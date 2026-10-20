@@ -22,8 +22,22 @@ pub const HOME_ENV: &str = "HEADROOM_HOME";
 const SOCKET_MAX: usize = 104;
 
 unsafe extern "C" {
-    #[link_name = "getuid"]
-    fn libc_getuid() -> u32;
+    fn confstr(name: i32, buf: *mut u8, len: usize) -> usize;
+}
+
+/// `_CS_DARWIN_USER_TEMP_DIR`: the per-user temporary directory under
+/// /var/folders, mode 0700. The same for every process of the user, whatever
+/// `$TMPDIR` says.
+const CS_DARWIN_USER_TEMP_DIR: i32 = 65537;
+
+fn user_temp_dir() -> Option<PathBuf> {
+    let mut buf = vec![0u8; 1024];
+    let n = unsafe { confstr(CS_DARWIN_USER_TEMP_DIR, buf.as_mut_ptr(), buf.len()) };
+    if n == 0 || n > buf.len() {
+        return None;
+    }
+    buf.truncate(n - 1);
+    String::from_utf8(buf).ok().map(PathBuf::from)
 }
 
 #[derive(Clone, Debug)]
@@ -56,7 +70,9 @@ impl Store {
 
     /// The daemon's socket. A Unix socket path must fit in 104 bytes; when
     /// the data directory is too deep for that (a long `$HEADROOM_HOME`),
-    /// the socket moves to a short per-user, per-directory name in /tmp.
+    /// the socket moves to a short per-directory name in the user's private
+    /// temporary directory. Not /tmp: anyone can create a name there first,
+    /// and a socket someone else made would receive our commands.
     pub fn socket(&self) -> PathBuf {
         let p = self.root.join("headroomd.sock");
         if p.as_os_str().len() < SOCKET_MAX {
@@ -71,8 +87,10 @@ impl Store {
             .fold(0xcbf29ce484222325u64, |h, &b| {
                 (h ^ b as u64).wrapping_mul(0x100000001b3)
             });
-        let uid = unsafe { libc_getuid() };
-        PathBuf::from(format!("/tmp/headroom-{uid}-{hash:016x}.sock"))
+        let name = format!("headroom-{hash:016x}.sock");
+        // Without a private directory, the long path: binding it fails with
+        // an error that names it, rather than falling back somewhere shared.
+        user_temp_dir().map_or(p, |d| d.join(name))
     }
 
     fn load<T: DeserializeOwned + Default>(&self, name: &str) -> T {
@@ -188,7 +206,16 @@ mod tests {
         let deep = std::env::temp_dir().join("x".repeat(90));
         let a = Store::at(&deep).unwrap().socket();
         assert!(a.as_os_str().len() < SOCKET_MAX, "{}", a.display());
-        assert!(a.starts_with("/tmp"));
+        let private = user_temp_dir().unwrap();
+        assert!(a.starts_with(&private), "{}", a.display());
+        // Only we can create names in it.
+        use std::os::unix::fs::MetadataExt;
+        let meta = fs::metadata(&private).unwrap();
+        assert_eq!(meta.mode() & 0o777, 0o700);
+        assert_eq!(
+            meta.uid(),
+            fs::metadata(std::env::home_dir().unwrap()).unwrap().uid()
+        );
         assert_eq!(
             a,
             Store::at(&deep).unwrap().socket(),
