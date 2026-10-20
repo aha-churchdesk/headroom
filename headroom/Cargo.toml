@@ -1,0 +1,12 @@
+[package]
+name = "headroom"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+headroom-core.workspace = true
+libc.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+headroomd = { path = "../headroomd" }
