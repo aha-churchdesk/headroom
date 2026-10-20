@@ -63,7 +63,13 @@ jobs:
           # Fine-grained token with contents: write on the tap repo only.
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
-          git clone "https://x-access-token:${GH_TOKEN}@github.com/${{ vars.TAP_REPO }}.git" tap
+          # A token pasted into the secret can carry a trailing newline, which
+          # git rejects. Send it as a header so it never lands in a URL.
+          token=$(printf %s "$GH_TOKEN" | tr -d '[:space:]')
+          auth=$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')
+          echo "::add-mask::$auth"
+          git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic $auth"
+          git clone "https://github.com/${{ vars.TAP_REPO }}.git" tap
           mkdir -p tap/Formula
           sed -e "s|@OWNER_REPO@|${GITHUB_REPOSITORY}|g" \
               -e "s|@VERSION@|${{ steps.pkg.outputs.ver }}|g" \
