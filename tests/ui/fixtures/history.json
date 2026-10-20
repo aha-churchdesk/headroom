@@ -18,7 +18,7 @@
   "queued": [],
   "banners": [
     {
-      "id": "h4-1792492409",
+      "id": "h4-1792493241",
       "kind": "gave_up",
       "job_id": "4",
       "label": "sc-49201",
@@ -26,7 +26,7 @@
       "why": "memory still critical 1 s after freezing; peak 0.2 GB vs est 1.5 GB. The agent was told: exit 137."
     },
     {
-      "id": "h4-1792492405",
+      "id": "h4-1792493237",
       "kind": "requeued",
       "job_id": "4",
       "label": "sc-49201",
@@ -44,7 +44,8 @@
       "peak": 216252920,
       "estimate": 1610612736,
       "exit": null,
-      "ended_ago_s": 2,
+      "ended_ago_s": 1,
+      "tuned": null,
       "guard": {
         "action": "gave_up",
         "why": "memory still critical 1 s after freezing; peak 0.2 GB vs est 1.5 GB"
@@ -59,7 +60,8 @@
       "peak": 216252920,
       "estimate": 1610612736,
       "exit": null,
-      "ended_ago_s": 6,
+      "ended_ago_s": 5,
+      "tuned": null,
       "guard": {
         "action": "requeued",
         "why": "memory still critical 1 s after freezing; peak 0.2 GB vs est 1.5 GB"
@@ -74,7 +76,8 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": null,
-      "ended_ago_s": 10,
+      "ended_ago_s": 9,
+      "tuned": null,
       "guard": {
         "action": "disconnected",
         "why": null
@@ -89,7 +92,8 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": 0,
-      "ended_ago_s": 10,
+      "ended_ago_s": 9,
+      "tuned": null,
       "guard": null
     },
     {
@@ -101,7 +105,8 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": 3,
-      "ended_ago_s": 10,
+      "ended_ago_s": 9,
+      "tuned": null,
       "guard": null
     }
   ],
@@ -136,6 +141,7 @@
     "wait_cap_s": 480,
     "default_estimate": 1610612736,
     "start_at_login": true,
+    "tune": true,
     "login_managed_by_brew": true,
     "patterns": [
       "* test",

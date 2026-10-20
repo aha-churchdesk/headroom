@@ -14,6 +14,20 @@ Status: early. Apple Silicon only, ad-hoc signed, used daily by one person.
 - **The guard.** Under sustained critical pressure the newest job gets SIGSTOP. If pressure stays critical it is killed and requeued once; a second kill gives up and the agent sees exit 137 with the reason. Low-priority jobs go first, and a job using more than twice its estimate (and over 8 GB) goes before anything else. Pinned jobs and processes Headroom didn't start are never touched.
 - **Fail open.** If the daemon isn't running or stops answering, `headroom run` runs the command directly. Headroom can slow a command down; it can't stop one from running.
 
+## Shrinking a job to fit
+
+Vitest, turbo and cargo start one worker per core by default, and their memory grows with the worker count. When the next job doesn't fit, Headroom can start it with fewer workers instead of making it wait. The agent sees one line saying so: `starting with 6 vitest workers instead of 14 so it fits in memory`.
+
+| Tool | How | Default it assumes |
+|---|---|---|
+| vitest | `VITEST_MAX_WORKERS` | cores - 1 |
+| turbo | `--concurrency=N` appended to the command | 10 |
+| cargo | `CARGO_BUILD_JOBS` | cores |
+
+It is found in the command itself or behind an npm script (`pnpm test` running `vitest run`). Headroom leaves the count alone when you chose one yourself: a flag in the command or script (`--maxWorkers`, `--concurrency`, `-j`), the environment variable, or a parallelism setting in `vitest.config.*`, `vite.config.*` or `.cargo/config.toml`. It never goes below 2 workers, because one worker can change how a test suite behaves and not only how fast it runs.
+
+Each run records its worker count. With runs at two or more counts, peak memory is fitted as a line in the worker count, kept above every run seen. Before that, a quarter of the peak is assumed to be fixed cost. A command with no history is never tuned. Turn it off in Settings ("Shrink jobs to fit"), or for one tool or repository with `"tune_off": ["turbo", "/path/to/repo"]` in `config.json`.
+
 A foreground command waits at most 8 minutes in the queue (under the 10 minute limit of Claude Code's Bash tool), then exits 75 with "still queued, try again later". The hook raises the Bash tool's timeout by the time it may spend queued.
 
 ## Install

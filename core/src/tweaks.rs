@@ -1,0 +1,450 @@
+//! Shrinking a job to fit instead of making it wait.
+//!
+//! Test runners and build tools start one worker per core by default, and
+//! peak memory grows with the worker count. When the head of the queue
+//! doesn't fit, admission may start it with fewer workers instead (see
+//! `admission`); this module knows which tools can be told so, how, and
+//! when the user has already decided for them.
+//!
+//! Only tools whose knob was checked against an installed version are here:
+//!
+//! | Tool   | Knob                         | Default workers                 |
+//! |--------|------------------------------|---------------------------------|
+//! | vitest | `VITEST_MAX_WORKERS` env     | cores - 1 (vitest 5.0.1 source) |
+//! | turbo  | `--concurrency=N` argument   | 10 (turbo docs; not in --help)  |
+//! | cargo  | `CARGO_BUILD_JOBS` env       | cores (cargo docs)              |
+//!
+//! vitest applies `VITEST_MAX_WORKERS` after its config and CLI flags, so it
+//! would override a `maxWorkers` the user set. That is why a setting in the
+//! command, the npm script or a vitest/vite config file turns tuning off.
+
+use serde::{Deserialize, Serialize};
+
+use crate::classify::basename;
+use crate::shell::simple_commands;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Tool {
+    Vitest,
+    Turbo,
+    Cargo,
+}
+
+impl Tool {
+    pub fn name(self) -> &'static str {
+        match self {
+            Tool::Vitest => "vitest",
+            Tool::Turbo => "turbo",
+            Tool::Cargo => "cargo",
+        }
+    }
+
+    pub fn default_workers(self, cores: u32) -> u32 {
+        match self {
+            Tool::Vitest => cores.saturating_sub(1).max(1),
+            Tool::Turbo => 10,
+            Tool::Cargo => cores.max(1),
+        }
+    }
+
+    /// Settings that mean the user chose the worker count themselves.
+    fn explicit_flags(self) -> &'static [&'static str] {
+        match self {
+            Tool::Vitest => &[
+                "--maxWorkers",
+                "--max-workers",
+                "--pool",
+                "--poolOptions",
+                "--fileParallelism",
+                "--no-file-parallelism",
+            ],
+            Tool::Turbo => &["--concurrency"],
+            Tool::Cargo => &["-j", "--jobs"],
+        }
+    }
+
+    fn explicit_env(self) -> Option<&'static str> {
+        match self {
+            Tool::Vitest => Some("VITEST_MAX_WORKERS"),
+            Tool::Turbo => None,
+            Tool::Cargo => Some("CARGO_BUILD_JOBS"),
+        }
+    }
+
+    /// Keys in the tool's config files that set parallelism.
+    fn config_keys(self) -> &'static [&'static str] {
+        match self {
+            Tool::Vitest => &[
+                "maxWorkers",
+                "maxThreads",
+                "maxForks",
+                "singleThread",
+                "singleFork",
+                "fileParallelism",
+            ],
+            Tool::Turbo => &[],
+            Tool::Cargo => &["jobs"],
+        }
+    }
+
+    /// Config files, relative to the directory a command runs in, that may
+    /// set parallelism for this tool.
+    pub fn config_files(self) -> &'static [&'static str] {
+        match self {
+            Tool::Vitest => &[
+                "vitest.config.ts",
+                "vitest.config.mts",
+                "vitest.config.js",
+                "vitest.config.mjs",
+                "vite.config.ts",
+                "vite.config.mts",
+                "vite.config.js",
+                "vite.config.mjs",
+                "vitest.workspace.ts",
+            ],
+            Tool::Turbo => &[],
+            Tool::Cargo => &[".cargo/config.toml", ".cargo/config"],
+        }
+    }
+}
+
+/// A job that can run with fewer workers, and how many it would use untouched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tunable {
+    pub tool: Tool,
+    pub default_workers: u32,
+    /// The turbo argument goes after an npm script name: npm needs `--` first.
+    #[serde(default)]
+    pub npm: bool,
+}
+
+/// How a granted worker count is passed to the command.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Knob {
+    Env(&'static str, String),
+    /// Appended to the command line, or to argv.
+    Args(Vec<String>),
+}
+
+impl Tunable {
+    pub fn knob(&self, workers: u32) -> Knob {
+        match self.tool {
+            Tool::Vitest => Knob::Env("VITEST_MAX_WORKERS", workers.to_string()),
+            Tool::Cargo => Knob::Env("CARGO_BUILD_JOBS", workers.to_string()),
+            Tool::Turbo => {
+                let arg = format!("--concurrency={workers}");
+                Knob::Args(if self.npm {
+                    vec!["--".into(), arg]
+                } else {
+                    vec![arg]
+                })
+            }
+        }
+    }
+}
+
+const PACKAGE_MANAGERS: [&str; 4] = ["pnpm", "npm", "yarn", "bun"];
+/// Package manager subcommands that are not script names.
+const PM_BUILTINS: [&str; 10] = [
+    "install", "add", "remove", "exec", "dlx", "x", "create", "why", "outdated", "update",
+];
+
+/// Package manager options that run a script somewhere other than here.
+const ELSEWHERE: [&str; 8] = [
+    "--filter",
+    "-F",
+    "--dir",
+    "-C",
+    "--prefix",
+    "--workspace",
+    "-w",
+    "--recursive",
+];
+
+/// The npm script a command runs, if it is a single `pnpm|npm|yarn|bun [run] NAME`
+/// in this directory's package.json.
+pub fn script_name(line: &str) -> Option<String> {
+    let cmds = simple_commands(line);
+    let [words] = cmds.as_slice() else {
+        return None;
+    };
+    let mut it = words
+        .iter()
+        .skip_while(|w| w.contains('=') && !w.starts_with('-'));
+    let pm = basename(it.next()?);
+    if !PACKAGE_MANAGERS.contains(&pm) {
+        return None;
+    }
+    // Another package's script: this directory's package.json says nothing about it.
+    if words.iter().any(|w| {
+        ELSEWHERE
+            .iter()
+            .any(|e| w == e || w.starts_with(&format!("{e}=")))
+    }) {
+        return None;
+    }
+    let mut name = it.find(|w| !w.starts_with('-'))?.as_str();
+    if name == "run" || name == "run-script" {
+        name = words
+            .iter()
+            .skip_while(|w| *w != "run" && *w != "run-script")
+            .nth(1)?;
+    }
+    (!PM_BUILTINS.contains(&name)).then(|| name.to_string())
+}
+
+/// What the wrapper knows about a command before it is queued.
+pub struct Probe<'a> {
+    pub line: &'a str,
+    /// The text of the npm script the line runs, from package.json.
+    pub script: Option<&'a str>,
+    /// The tool's config files near the command, concatenated.
+    pub configs: &'a dyn Fn(Tool) -> String,
+    /// Is this variable set in the wrapper's environment?
+    pub env_set: &'a dyn Fn(&str) -> bool,
+    pub cores: u32,
+}
+
+fn mentions(text: &str, program: &str) -> bool {
+    simple_commands(text)
+        .iter()
+        .flatten()
+        .any(|w| basename(w) == program)
+}
+
+fn has_flag(text: &str, flags: &[&str]) -> bool {
+    simple_commands(text).iter().flatten().any(|w| {
+        flags.iter().any(|f| {
+            w == f
+                || w.starts_with(&format!("{f}="))
+                // -j4, -j 4
+                || (f.len() == 2 && w.starts_with(f) && w[2..].chars().all(|c| c.is_ascii_digit()))
+        })
+    })
+}
+
+/// Whether to tune at all, and how. `None` when the tool isn't one we know,
+/// the user already set a worker count, or the line can't safely be edited.
+pub fn detect(p: &Probe) -> Option<Tunable> {
+    let text = format!("{} ; {}", p.line, p.script.unwrap_or(""));
+    let single = simple_commands(p.line).len() == 1;
+    let tool = if mentions(&text, "turbo") {
+        // The argument is appended to the line, so it must land on turbo: one
+        // simple command, nothing after it, and the script (if any) a single
+        // turbo call too.
+        let script_ok = p.script.is_none_or(|s| {
+            let cmds = simple_commands(s);
+            cmds.len() == 1 && cmds[0].iter().any(|w| basename(w) == "turbo")
+        });
+        let clean = !p.line.contains('#') && !p.line.trim_end().ends_with('\\');
+        if !(single && script_ok && clean) {
+            return None;
+        }
+        Tool::Turbo
+    } else if mentions(&text, "vitest") {
+        Tool::Vitest
+    } else if simple_commands(&text).iter().any(|w| {
+        w.first().is_some_and(|p| basename(p) == "cargo")
+            && w.get(1).is_some_and(|s| {
+                matches!(
+                    s.as_str(),
+                    "build" | "test" | "clippy" | "check" | "bench" | "doc"
+                )
+            })
+    }) {
+        Tool::Cargo
+    } else {
+        return None;
+    };
+    if has_flag(&text, tool.explicit_flags()) || tool.explicit_env().is_some_and(|v| (p.env_set)(v))
+    {
+        return None;
+    }
+    let configs = (p.configs)(tool);
+    if tool.config_keys().iter().any(|k| configs.contains(k)) {
+        return None;
+    }
+    let npm = p.script.is_some()
+        && simple_commands(p.line)
+            .first()
+            .and_then(|w| w.iter().find(|w| !w.contains('=')))
+            .is_some_and(|w| basename(w) == "npm")
+        && !p.line.split_whitespace().any(|w| w == "--");
+    Some(Tunable {
+        tool,
+        default_workers: tool.default_workers(p.cores),
+        npm: npm && tool == Tool::Turbo,
+    })
+}
+
+/// The command line with turbo's argument appended; other tools use the
+/// environment and leave the line alone.
+pub fn apply_line(line: &str, knob: &Knob) -> String {
+    match knob {
+        Knob::Env(..) => line.to_string(),
+        Knob::Args(a) => format!("{} {}", line.trim_end(), a.join(" ")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn probe(line: &str, script: Option<&str>, configs: &str, env: &[&str]) -> Option<Tunable> {
+        let configs = configs.to_string();
+        let set: Vec<String> = env.iter().map(|s| s.to_string()).collect();
+        detect(&Probe {
+            line,
+            script,
+            configs: &|_| configs.clone(),
+            env_set: &|v| set.iter().any(|s| s == v),
+            cores: 12,
+        })
+    }
+
+    fn tool(line: &str) -> Option<Tool> {
+        probe(line, None, "", &[]).map(|t| t.tool)
+    }
+
+    #[test]
+    fn finds_the_tool_in_the_command() {
+        assert_eq!(tool("pnpm vitest run src/a.test.ts"), Some(Tool::Vitest));
+        assert_eq!(tool("npx vitest run"), Some(Tool::Vitest));
+        assert_eq!(
+            tool("cd web && ./node_modules/.bin/vitest run"),
+            Some(Tool::Vitest)
+        );
+        assert_eq!(tool("turbo run build"), Some(Tool::Turbo));
+        assert_eq!(tool("cargo test --workspace"), Some(Tool::Cargo));
+        assert_eq!(tool("cargo fmt"), None, "not parallel work");
+        assert_eq!(tool("pnpm jest"), None, "not verified, so not tuned");
+        assert_eq!(tool("ls"), None);
+    }
+
+    #[test]
+    fn finds_the_tool_behind_an_npm_script() {
+        let t = probe("pnpm test", Some("vitest run --coverage"), "", &[]).unwrap();
+        assert_eq!((t.tool, t.default_workers), (Tool::Vitest, 11));
+        assert_eq!(
+            probe("yarn build", Some("turbo run build"), "", &[]).map(|t| t.tool),
+            Some(Tool::Turbo)
+        );
+        assert_eq!(
+            probe("pnpm test", Some("node scripts/test.js"), "", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn a_worker_count_the_user_chose_is_never_overridden() {
+        assert_eq!(tool("pnpm vitest run --maxWorkers=4"), None);
+        assert_eq!(tool("pnpm vitest run --maxWorkers 4"), None);
+        assert_eq!(tool("vitest run --no-file-parallelism"), None);
+        assert_eq!(tool("turbo run build --concurrency=50%"), None);
+        assert_eq!(tool("cargo build -j4"), None);
+        assert_eq!(tool("cargo build -j 4"), None);
+        assert_eq!(tool("cargo build --jobs=2"), None);
+        assert_eq!(
+            probe("pnpm test", Some("vitest run --maxWorkers=2"), "", &[]),
+            None
+        );
+        assert_eq!(probe("vitest run", None, "", &["VITEST_MAX_WORKERS"]), None);
+        assert_eq!(probe("cargo test", None, "", &["CARGO_BUILD_JOBS"]), None);
+        assert_eq!(
+            probe(
+                "vitest run",
+                None,
+                "export default { test: { maxWorkers: 2 } }",
+                &[]
+            ),
+            None
+        );
+        assert_eq!(probe("cargo build", None, "[build]\njobs = 4", &[]), None);
+        // An unrelated config is no reason to stop.
+        assert!(
+            probe(
+                "vitest run",
+                None,
+                "export default { test: { globals: true } }",
+                &[]
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn turbo_is_only_tuned_where_the_argument_reaches_it() {
+        assert_eq!(tool("turbo run build && echo done"), None);
+        assert_eq!(tool("turbo run build | tee log"), None);
+        assert_eq!(tool("turbo run build # all of it"), None);
+        assert_eq!(
+            probe(
+                "pnpm build",
+                Some("turbo run build && next export"),
+                "",
+                &[]
+            ),
+            None
+        );
+        assert!(probe("pnpm build", Some("turbo run build"), "", &[]).is_some());
+    }
+
+    #[test]
+    fn knobs_and_line_edits() {
+        let v = Tunable {
+            tool: Tool::Vitest,
+            default_workers: 11,
+            npm: false,
+        };
+        assert_eq!(v.knob(3), Knob::Env("VITEST_MAX_WORKERS", "3".into()));
+        assert_eq!(apply_line("pnpm test", &v.knob(3)), "pnpm test");
+        let t = probe("turbo run build  ", None, "", &[]).unwrap();
+        assert_eq!(
+            apply_line("turbo run build  ", &t.knob(4)),
+            "turbo run build --concurrency=4"
+        );
+        let npm = probe("npm run build", Some("turbo run build"), "", &[]).unwrap();
+        assert!(npm.npm);
+        assert_eq!(
+            apply_line("npm run build", &npm.knob(4)),
+            "npm run build -- --concurrency=4"
+        );
+        let pnpm = probe("pnpm build", Some("turbo run build"), "", &[]).unwrap();
+        assert_eq!(
+            apply_line("pnpm build", &pnpm.knob(4)),
+            "pnpm build --concurrency=4"
+        );
+    }
+
+    #[test]
+    fn script_names() {
+        assert_eq!(script_name("pnpm test").as_deref(), Some("test"));
+        assert_eq!(script_name("npm run build").as_deref(), Some("build"));
+        assert_eq!(
+            script_name("yarn test:unit --silent").as_deref(),
+            Some("test:unit")
+        );
+        assert_eq!(
+            script_name("CI=1 pnpm --silent test").as_deref(),
+            Some("test")
+        );
+        assert_eq!(
+            script_name("pnpm --filter web test"),
+            None,
+            "another package's script"
+        );
+        assert_eq!(script_name("npm --prefix=web run test"), None);
+        assert_eq!(script_name("pnpm install"), None);
+        assert_eq!(script_name("pnpm test && pnpm build"), None, "two commands");
+        assert_eq!(script_name("cargo test"), None);
+        assert_eq!(script_name("pnpm"), None);
+    }
+
+    #[test]
+    fn default_workers_never_reach_zero() {
+        assert_eq!(Tool::Vitest.default_workers(1), 1);
+        assert_eq!(Tool::Vitest.default_workers(0), 1);
+        assert_eq!(Tool::Cargo.default_workers(0), 1);
+    }
+}

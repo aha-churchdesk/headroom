@@ -602,6 +602,7 @@ function renderRunning(j){
         ${fpBar(j)}
         <span class="meta">${frozen ? `❄︎ frozen ${dur(j.frozen_s)}` : dur(j.elapsed_s)}</span>
         <span class="meta">CPU ${Math.round(j.cpu_pct)}%</span>
+        ${j.tuned ? `<span class="meta" title="Started with fewer workers so it fits in memory; it runs slower">${j.tuned.workers}/${j.tuned.default} workers</span>` : ""}
         <span class="acts-i">
           ${frozen
             ? `<button class="ib" data-act="resume" data-id="${j.id}" title="Resume">▶︎</button>`
@@ -650,6 +651,7 @@ function renderDetail(j){
         <span class="k">processes</span><span class="v num">${j.procs}</span>
         <span class="k">peak</span><span class="v num">${gb(j.peak)} GB</span>` : ""}
       ${j.retry ? `<span class="k">retry</span><span class="v">requeued after a guard kill (${j.retry}/1)</span>` : ""}
+      ${j.tuned ? `<span class="k">workers</span><span class="v">${j.tuned.workers} instead of ${j.tuned.default}, so it fits in memory</span>` : ""}
       <div class="full">
         <button class="chip-btn" data-act="copy" data-text="${esc(j.full_cmd)}">Copy command</button>
         <button class="chip-btn" data-act="profile" data-key="${esc(j.key)}">Profile</button>
@@ -683,7 +685,7 @@ function renderHistory(S){
   return pageHead("History") + (S.history.length ? S.history.map(r => `
     <div class="hrow" data-act="profile" data-key="${esc(r.key)}">
       <div class="l1"><span class="name"><b>${esc(r.label)}</b> <span class="dim">· ${esc(r.cmd)}</span></span>${outcomeTag(r)}</div>
-      <div class="l2 num">${dur(r.duration_s)} · peak ${gb(r.peak)} / est ${gb(r.estimate)} GB · ${ago(r.ended_ago_s)}
+      <div class="l2 num">${dur(r.duration_s)} · peak ${gb(r.peak)} / est ${gb(r.estimate)} GB${r.tuned ? ` · ${r.tuned.workers}/${r.tuned.default} workers` : ""} · ${ago(r.ended_ago_s)}
         ${r.guard && r.guard.why ? `<br>${esc(r.guard.why)}` : ""}</div>
     </div>`).join("") : `<div class="empty">No runs yet</div>`);
 }
@@ -799,6 +801,13 @@ function renderSettings(S){
         <input class="txt mono" id="testIn" placeholder="test a command: pnpm vitest run src/a.test.ts" value="${esc(UI.drafts.test)}" data-draft="test">
       </div>
       ${verdict}
+    </div>
+    <div class="set">
+      <div class="ctl" style="margin-top:0;justify-content:space-between">
+        <div><div class="k">Shrink jobs to fit</div>
+          <div class="h">When the next job doesn't fit, start it with fewer workers (vitest, turbo, cargo) instead of waiting. Never below 2, and never when you set a worker count yourself.</div></div>
+        <button class="toggle ${c.tune ? "on" : ""}" data-act="set" data-key="tune" data-val="${!c.tune}"></button>
+      </div>
     </div>
     <div class="set">
       <div class="ctl" style="margin-top:0;justify-content:space-between">
@@ -1002,6 +1011,7 @@ const G = n => Math.round(n * GiB);
 const BASE_SETTINGS = {
   headroom: G(2), kill_mode: "freeze_kill", wait_cap_s: 480, default_estimate: G(1.5),
   start_at_login: true,
+  tune: true,
   patterns: ["vitest", "jest", "playwright", "tsc", "pnpm test", "pnpm build", "nx run", "turbo run",
              "next build", "cargo build", "cargo test", "xcodebuild", "docker build", "pytest"],
   excluded: ["dev", "serve", "watch", "--watch", "docker compose up -d"],

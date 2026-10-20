@@ -1,0 +1,127 @@
+{
+  "system": {
+    "pressure": "normal",
+    "mem_total": 68719476736,
+    "mem_used": 17179869184,
+    "mem_available": 51539607552,
+    "swap_used": 0,
+    "cpu_pct": 0.0
+  },
+  "held": false,
+  "hooks": {
+    "claude": "installed",
+    "codex": "not_installed",
+    "pi": "absent"
+  },
+  "queue_reason": null,
+  "running": [
+    {
+      "id": "2",
+      "label": "fix-main",
+      "cmd": "sleep 30",
+      "full_cmd": "sleep 30",
+      "cwd": "~/Projects/work-scheduler-mcp/headroom",
+      "session": null,
+      "key": "~/Projects/work-scheduler-mcp|headroom|sleep 30",
+      "state": "running",
+      "pinned": false,
+      "low": false,
+      "estimate": 1610612736,
+      "samples": 0,
+      "footprint": 1212656,
+      "peak": 1212656,
+      "runaway_at": 8589934592,
+      "elapsed_s": 4,
+      "frozen_s": 0,
+      "waited_s": 4,
+      "cpu_pct": 0.0,
+      "procs": 1,
+      "retry": 0,
+      "tuned": null
+    }
+  ],
+  "queued": [],
+  "banners": [],
+  "history": [
+    {
+      "id": "3",
+      "label": "sc-49123",
+      "cmd": "vitest run",
+      "key": "~/Projects/work-scheduler-mcp|headroom|vitest run",
+      "duration_s": 4,
+      "peak": 538526440,
+      "estimate": 423127920,
+      "exit": 0,
+      "ended_ago_s": 0,
+      "tuned": {
+        "workers": 10,
+        "default": 14
+      },
+      "guard": null
+    },
+    {
+      "id": "1",
+      "label": "sc-49123",
+      "cmd": "vitest run",
+      "key": "~/Projects/work-scheduler-mcp|headroom|vitest run",
+      "duration_s": 4,
+      "peak": 538526440,
+      "estimate": 1610612736,
+      "exit": 0,
+      "ended_ago_s": 4,
+      "tuned": null,
+      "guard": null
+    }
+  ],
+  "profiles": {
+    "~/Projects/work-scheduler-mcp|headroom|vitest run": {
+      "peaks": [
+        538526440,
+        538526440
+      ],
+      "p90": 895888538,
+      "median_s": 4,
+      "samples": 2
+    }
+  },
+  "others": [],
+  "settings": {
+    "headroom": 49499498087,
+    "kill_mode": "freeze_kill",
+    "wait_cap_s": 480,
+    "default_estimate": 1610612736,
+    "start_at_login": false,
+    "tune": true,
+    "login_managed_by_brew": false,
+    "patterns": [
+      "* test",
+      "* build",
+      "* e2e",
+      "* typecheck",
+      "vitest",
+      "jest",
+      "playwright",
+      "tsc",
+      "nx",
+      "turbo",
+      "next build",
+      "xcodebuild",
+      "cargo clippy",
+      "gradle",
+      "pytest"
+    ],
+    "excluded": [
+      "dev",
+      "serve",
+      "start",
+      "watch",
+      "preview",
+      "storybook",
+      "--watch",
+      "--watchAll",
+      "--ui",
+      "docker compose up"
+    ]
+  },
+  "classify": null
+}

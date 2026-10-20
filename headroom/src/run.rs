@@ -19,8 +19,9 @@ use headroom_core::model::JobSpec;
 use headroom_core::protocol::{ClientMsg, DaemonMsg, read_msg, write_msg};
 use headroom_core::shell;
 use headroom_core::store::Store;
+use headroom_core::tweaks::{self, Knob, Tunable};
 
-use crate::context::git_context;
+use crate::context::{git_context, tunable};
 
 /// Set in a job's environment. A `headroom run` inside a job runs directly:
 /// queueing it would wait behind its own parent.
@@ -63,18 +64,22 @@ impl RunOpts {
         self.sh.clone().unwrap_or_else(|| shell::join(&self.argv))
     }
 
-    fn command(&self, low: bool) -> Command {
-        let (prog, args): (String, Vec<String>) = match &self.sh {
+    fn command(&self, low: bool, knob: Option<&Knob>) -> Command {
+        let (prog, mut args): (String, Vec<String>) = match &self.sh {
             Some(line) => {
                 let shell = std::env::var("SHELL")
                     .ok()
                     .filter(|s| !s.is_empty())
                     .unwrap_or("/bin/zsh".into());
-                (shell, vec!["-c".into(), line.clone()])
+                let line = knob.map_or_else(|| line.clone(), |k| tweaks::apply_line(line, k));
+                (shell, vec!["-c".into(), line])
             }
             None => (self.argv[0].clone(), self.argv[1..].to_vec()),
         };
-        if low {
+        if let (None, Some(Knob::Args(extra))) = (&self.sh, knob) {
+            args.extend(extra.iter().cloned());
+        }
+        let mut c = if low {
             // Background QoS clamp: inherited by every child of the job.
             let mut c = Command::new("/usr/sbin/taskpolicy");
             c.args(["-c", "background"]).arg(prog).args(args);
@@ -83,13 +88,17 @@ impl RunOpts {
             let mut c = Command::new(prog);
             c.args(args);
             c
+        };
+        if let Some(Knob::Env(var, value)) = knob {
+            c.env(var, value);
         }
+        c
     }
 }
 
 /// Run without the queue, in our own process group, as if Headroom weren't there.
 fn direct(o: &RunOpts) -> i32 {
-    match o.command(false).status() {
+    match o.command(false, None).status() {
         Ok(s) => code_of(s),
         Err(e) => {
             note(&format!("can't start: {e}"));
@@ -121,6 +130,7 @@ pub fn run(o: RunOpts) -> i32 {
     let git = git_context(&cwd);
     let (cmd, program) = describe(&line, &cfg);
     let (key, fallback_key) = profile_keys(&git.repo, &git.subdir, &cmd, &program);
+    let tune = tunable(&line, &cwd);
     let spec = JobSpec {
         full_cmd: line,
         cmd,
@@ -132,10 +142,11 @@ pub fn run(o: RunOpts) -> i32 {
         agent: o.agent.clone(),
         low: o.low,
         background: o.background,
+        tune,
     };
     let wait_cap = (!o.background).then(|| o.wait_cap.unwrap_or(cfg.wait_cap_s));
     match Session::open(stream, spec) {
-        Some(s) => s.drive(&o, wait_cap),
+        Some(s) => s.drive(&o, wait_cap, tune),
         None => {
             note("scheduler didn't answer; running directly");
             direct(&o)
@@ -185,7 +196,7 @@ impl Session {
         let _ = write_msg(&mut self.writer, m);
     }
 
-    fn drive(mut self, o: &RunOpts, wait_cap: Option<u64>) -> i32 {
+    fn drive(mut self, o: &RunOpts, wait_cap: Option<u64>, tune: Option<Tunable>) -> i32 {
         for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
             unsafe {
                 libc::signal(
@@ -242,7 +253,9 @@ impl Session {
                             last_said = said;
                         }
                     }
-                    Ok(Some(DaemonMsg::Granted { id, low, .. })) => break (id, low),
+                    Ok(Some(DaemonMsg::Granted {
+                        id, low, workers, ..
+                    })) => break (id, low, workers),
                     Ok(Some(DaemonMsg::Cancelled)) => {
                         note("cancelled from the queue. Nothing ran.");
                         return EXIT_CANCELLED;
@@ -272,8 +285,16 @@ impl Session {
             }
 
             // ── running ──
-            let (id, low) = grant;
-            let mut cmd = o.command(low);
+            let (id, low, workers) = grant;
+            let knob = workers.zip(tune).map(|(n, t)| {
+                note(&format!(
+                    "starting with {n} {} workers instead of {} so it fits in memory",
+                    t.tool.name(),
+                    t.default_workers
+                ));
+                t.knob(n)
+            });
+            let mut cmd = o.command(low, knob.as_ref());
             cmd.process_group(0).env(JOB_ENV, id.to_string());
             let mut child = match cmd.spawn() {
                 Ok(c) => c,

@@ -87,6 +87,9 @@ pub enum DaemonMsg {
         id: JobId,
         retry: u8,
         low: bool,
+        /// Run with this many workers instead of the tool's default.
+        #[serde(default)]
+        workers: Option<u32>,
     },
     Frozen {
         by: FrozenBy,

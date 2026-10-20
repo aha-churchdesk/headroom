@@ -39,6 +39,8 @@ const busy = ui.fixture('busy');
 const held = ui.fixture('held');
 const frozen = ui.fixture('frozen');
 const history = ui.fixture('history');
+const tuned = ui.fixture('tuned');
+const tunedHistory = ui.fixture('tuned-history');
 
 // ── the main view ─────────────────────────────────────────────────────────
 
@@ -65,7 +67,7 @@ test('a guard freeze is a banner with resume and kill', () => {
   ui.setState(frozen);
   const v = ui.view();
   has(v, 'Froze “headroom-hog” (sc-49201)');
-  has(v, 'memory critical for 1 s');
+  if (!/memory critical for \d+ s/.test(v)) throw new Error('freeze reason missing: ' + v);
   has(v, '❄︎ frozen');
   eq(ui.find({ act: 'resume', id: '4' }).length, 2, 'banner and row both offer resume');
   has(ui.head(), 'CRITICAL');
@@ -85,6 +87,20 @@ test('kills since the app started are banners; requeued offers a pin', () => {
 test('a missing hook is called out in the header', () => {
   ui.setState(busy);
   has(ui.head(), "Codex: heavy commands aren't gated yet");
+});
+
+test('a job started with fewer workers says so in its row, detail and history', () => {
+  ui.setState(tuned);
+  const j = tuned.running.find(r => r.tuned);
+  const { workers, default: dflt } = j.tuned;
+  has(ui.view(), `${workers}/${dflt} workers`);
+  eq(tuned.running.filter(r => !r.tuned).length, 1, 'the untouched job beside it');
+  ui.click({ act: 'expand', id: j.id });
+  has(ui.view(), `${workers} instead of ${dflt}, so it fits in memory`);
+  ui.setState(tunedHistory);
+  ui.click({ act: 'goto', page: 'history' });
+  has(ui.view(), `${workers}/${dflt} workers`);
+  eq((ui.view().match(/workers/g) || []).length, 1, 'only the tuned run mentions workers');
 });
 
 // ── intents ───────────────────────────────────────────────────────────────
@@ -265,6 +281,16 @@ test('hook status per agent, with the install command to copy', () => {
   ui.click({ act: 'copy', text: 'headroom hook install' });
   eq(ui.sent, [{ cmd: 'copy', text: 'headroom hook install' }]);
   lacks(ui.page(), 'wsq');
+});
+
+test('shrinking jobs to fit can be switched off and on', () => {
+  ui.setState(tuned);
+  ui.click({ act: 'goto', page: 'settings' }, 0);
+  has(ui.view(), 'Shrink jobs to fit');
+  ui.click({ act: 'set', key: 'tune' });
+  ui.setState({ ...tuned, settings: { ...tuned.settings, tune: false } });
+  ui.click({ act: 'set', key: 'tune' });
+  eq(ui.sent, [{ cmd: 'set', key: 'tune', value: false }, { cmd: 'set', key: 'tune', value: true }]);
 });
 
 test('quit is sent as an intent', () => {

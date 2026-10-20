@@ -35,12 +35,13 @@
       "footprint": 323666496,
       "peak": 323666496,
       "runaway_at": 8589934592,
-      "elapsed_s": 2,
+      "elapsed_s": 1,
       "frozen_s": 0,
-      "waited_s": 2,
+      "waited_s": 1,
       "cpu_pct": 0.0,
       "procs": 1,
-      "retry": 0
+      "retry": 0,
+      "tuned": null
     },
     {
       "id": "3",
@@ -58,12 +59,13 @@
       "footprint": 1212656,
       "peak": 1212656,
       "runaway_at": 8589934592,
-      "elapsed_s": 2,
+      "elapsed_s": 1,
       "frozen_s": 0,
-      "waited_s": 2,
+      "waited_s": 1,
       "cpu_pct": 0.0,
       "procs": 1,
-      "retry": 0
+      "retry": 0,
+      "tuned": null
     }
   ],
   "queued": [
@@ -85,10 +87,11 @@
       "runaway_at": 8589934592,
       "elapsed_s": 0,
       "frozen_s": 0,
-      "waited_s": 2,
+      "waited_s": 1,
       "cpu_pct": 0.0,
       "procs": 0,
-      "retry": 0
+      "retry": 0,
+      "tuned": null
     },
     {
       "id": "4",
@@ -108,10 +111,11 @@
       "runaway_at": 8589934592,
       "elapsed_s": 0,
       "frozen_s": 0,
-      "waited_s": 2,
+      "waited_s": 1,
       "cpu_pct": 0.0,
       "procs": 0,
-      "retry": 0
+      "retry": 0,
+      "tuned": null
     }
   ],
   "banners": [],
@@ -124,6 +128,7 @@
     "wait_cap_s": 480,
     "default_estimate": 1610612736,
     "start_at_login": false,
+    "tune": true,
     "login_managed_by_brew": false,
     "patterns": [
       "* test",

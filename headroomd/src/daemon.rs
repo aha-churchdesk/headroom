@@ -102,7 +102,7 @@ pub fn run_with(
             .saturating_duration_since(Instant::now())
             .min(Duration::from_millis(200));
         let fx = match rx.recv_timeout(wait) {
-            Ok(Event::Msg(c, msg)) => match msg {
+            Ok(Event::Msg(c, msg)) => match *msg {
                 ClientMsg::Enqueue(spec) => sched.enqueue(c, spec, ms()),
                 ClientMsg::Started { pgid, .. } => sched.started(c, pgid),
                 ClientMsg::Exited { code, signal } => sched.exited(c, code, signal, ms(), wall()),

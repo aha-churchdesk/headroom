@@ -31,12 +31,13 @@
       "footprint": 216252920,
       "peak": 216252920,
       "runaway_at": 8589934592,
-      "elapsed_s": 1,
+      "elapsed_s": 2,
       "frozen_s": 0,
-      "waited_s": 1,
+      "waited_s": 2,
       "cpu_pct": 0.0,
       "procs": 1,
-      "retry": 0
+      "retry": 0,
+      "tuned": null
     }
   ],
   "queued": [],
@@ -47,7 +48,7 @@
       "job_id": "4",
       "label": "sc-49201",
       "cmd": "headroom-hog",
-      "why": "memory critical for 1 s. Frozen jobs stop growing but keep their memory; kill frees it."
+      "why": "memory critical for 2 s. Frozen jobs stop growing but keep their memory; kill frees it."
     }
   ],
   "history": [
@@ -60,7 +61,8 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": null,
-      "ended_ago_s": 2,
+      "ended_ago_s": 3,
+      "tuned": null,
       "guard": {
         "action": "disconnected",
         "why": null
@@ -75,7 +77,8 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": 0,
-      "ended_ago_s": 2,
+      "ended_ago_s": 3,
+      "tuned": null,
       "guard": null
     },
     {
@@ -87,7 +90,8 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": 3,
-      "ended_ago_s": 2,
+      "ended_ago_s": 3,
+      "tuned": null,
       "guard": null
     }
   ],
@@ -116,6 +120,7 @@
     "wait_cap_s": 480,
     "default_estimate": 1610612736,
     "start_at_login": true,
+    "tune": true,
     "login_managed_by_brew": true,
     "patterns": [
       "* test",

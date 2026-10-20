@@ -25,7 +25,28 @@ pub struct Run {
     pub flagged: bool,
     /// Unix seconds.
     pub at: u64,
+    /// Workers the run used, for a tool Headroom can tune (see `tweaks`).
+    #[serde(default)]
+    pub workers: Option<u32>,
 }
+
+/// Peak memory as a function of worker count: `base + per_worker × N`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Scaling {
+    pub base: Bytes,
+    pub per_worker: Bytes,
+}
+
+impl Scaling {
+    pub fn at(&self, workers: u32) -> Bytes {
+        self.base + self.per_worker * workers as Bytes
+    }
+}
+
+/// Share of a peak assumed to be fixed cost while every run so far used the
+/// same worker count. Until a second count has been seen there is nothing to
+/// fit, and without a first tuned run there never would be.
+const ASSUMED_BASE: f64 = 0.25;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Profile {
@@ -95,6 +116,51 @@ impl Profile {
         }
         d.sort_unstable();
         Some(d[(d.len() - 1) / 2])
+    }
+
+    /// How peak memory grows with workers, from clean runs that recorded
+    /// their worker count. With two or more counts seen in at least
+    /// `TRUSTED` runs: the least-squares slope, with the base raised until
+    /// every run lies on or under the line, so it never underestimates a run
+    /// it has seen. Otherwise an assumption, from the p90 at the count seen
+    /// most often.
+    pub fn scaling(&self) -> Option<Scaling> {
+        let pts: Vec<(u32, Bytes)> = self
+            .runs
+            .iter()
+            .filter(|r| !r.flagged)
+            .filter_map(|r| r.workers.filter(|&n| n > 0).map(|n| (n, r.peak)))
+            .collect();
+        let mut counts: BTreeMap<u32, usize> = BTreeMap::new();
+        for (n, _) in &pts {
+            *counts.entry(*n).or_default() += 1;
+        }
+        if counts.len() >= 2 && pts.len() >= TRUSTED {
+            let len = pts.len() as f64;
+            let mx = pts.iter().map(|p| p.0 as f64).sum::<f64>() / len;
+            let my = pts.iter().map(|p| p.1 as f64).sum::<f64>() / len;
+            let sxx: f64 = pts.iter().map(|p| (p.0 as f64 - mx).powi(2)).sum();
+            let sxy: f64 = pts
+                .iter()
+                .map(|p| (p.0 as f64 - mx) * (p.1 as f64 - my))
+                .sum();
+            let per = (sxy / sxx).max(0.0);
+            let base = pts
+                .iter()
+                .map(|p| p.1 as f64 - per * p.0 as f64)
+                .fold(0.0, f64::max);
+            return Some(Scaling {
+                base: base.ceil() as Bytes,
+                per_worker: per.ceil() as Bytes,
+            });
+        }
+        let (&n0, _) = counts.iter().max_by_key(|(n, c)| (**c, **n))?;
+        let mut peaks: Vec<Bytes> = pts.iter().filter(|p| p.0 == n0).map(|p| p.1).collect();
+        let peak = p90(&mut peaks)? as f64;
+        Some(Scaling {
+            base: (peak * ASSUMED_BASE).ceil() as Bytes,
+            per_worker: (peak * (1.0 - ASSUMED_BASE) / n0 as f64).ceil() as Bytes,
+        })
     }
 
     pub fn samples(&self) -> u32 {
@@ -181,6 +247,7 @@ mod tests {
             exit: Some(0),
             flagged: false,
             at: 0,
+            workers: None,
         }
     }
 
@@ -190,6 +257,69 @@ mod tests {
             exit: None,
             ..run(gb)
         }
+    }
+
+    fn at(gb: f64, workers: u32) -> Run {
+        Run {
+            workers: Some(workers),
+            ..run(gb)
+        }
+    }
+
+    fn profile(runs: Vec<Run>) -> Profile {
+        Profile { runs: runs.into() }
+    }
+
+    #[test]
+    fn no_scaling_without_runs_that_recorded_workers() {
+        assert_eq!(profile(vec![]).scaling(), None);
+        assert_eq!(profile(vec![run(4.0), run(4.0)]).scaling(), None);
+        let flagged_only = Run {
+            workers: Some(8),
+            ..flagged(9.0)
+        };
+        assert_eq!(
+            profile(vec![flagged_only]).scaling(),
+            None,
+            "a killed run proves nothing"
+        );
+    }
+
+    #[test]
+    fn one_worker_count_seen_assumes_a_quarter_is_fixed_cost() {
+        let s = profile(vec![at(8.0, 8)]).scaling().unwrap();
+        assert_eq!((gb(s.base), gb(s.per_worker)), (2.0, 0.75));
+        assert_eq!(gb(s.at(8)), 8.0, "it reproduces the run it saw");
+        // Two counts but too few runs to fit: the count seen most often wins.
+        let s = profile(vec![at(8.0, 8), at(8.0, 8), at(3.0, 2)]).scaling();
+        assert!(s.is_some());
+        let s = profile(vec![at(8.0, 8), at(4.0, 4)]).scaling().unwrap();
+        assert_eq!(gb(s.at(8)), 8.0, "ties go to the larger count");
+    }
+
+    #[test]
+    fn two_counts_over_enough_runs_are_fitted_and_never_undershoot() {
+        // 1 GB + 0.5 GB a worker, with one noisy run above the line.
+        let s = profile(vec![at(5.0, 8), at(3.0, 4), at(2.2, 2)])
+            .scaling()
+            .unwrap();
+        for (n, peak) in [(8, 5.0), (4, 3.0), (2, 2.2)] {
+            assert!(gb(s.at(n)) >= peak, "{n} workers: {} < {peak}", gb(s.at(n)));
+        }
+        assert!(
+            (gb(s.per_worker) - 0.48).abs() < 0.05,
+            "{}",
+            gb(s.per_worker)
+        );
+    }
+
+    #[test]
+    fn memory_that_does_not_grow_with_workers_gets_no_slope() {
+        let s = profile(vec![at(4.0, 8), at(4.0, 4), at(4.2, 2)])
+            .scaling()
+            .unwrap();
+        assert_eq!(s.per_worker, 0);
+        assert_eq!(gb(s.base), 4.2);
     }
 
     fn gb(b: Bytes) -> f64 {

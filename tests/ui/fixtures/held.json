@@ -38,7 +38,8 @@
       "waited_s": 2,
       "cpu_pct": 0.0,
       "procs": 1,
-      "retry": 0
+      "retry": 0,
+      "tuned": null
     },
     {
       "id": "3",
@@ -61,7 +62,8 @@
       "waited_s": 2,
       "cpu_pct": 0.0,
       "procs": 1,
-      "retry": 0
+      "retry": 0,
+      "tuned": null
     }
   ],
   "queued": [
@@ -86,7 +88,8 @@
       "waited_s": 2,
       "cpu_pct": 0.0,
       "procs": 0,
-      "retry": 0
+      "retry": 0,
+      "tuned": null
     },
     {
       "id": "4",
@@ -109,7 +112,8 @@
       "waited_s": 2,
       "cpu_pct": 0.0,
       "procs": 0,
-      "retry": 0
+      "retry": 0,
+      "tuned": null
     }
   ],
   "banners": [],
@@ -122,6 +126,7 @@
     "wait_cap_s": 480,
     "default_estimate": 1610612736,
     "start_at_login": false,
+    "tune": true,
     "login_managed_by_brew": false,
     "patterns": [
       "* test",

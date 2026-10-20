@@ -16,7 +16,8 @@ use headroom_core::protocol::{ClientMsg, DaemonMsg, read_msg, write_msg};
 use headroom_core::scheduler::ConnId;
 
 pub enum Event {
-    Msg(ConnId, ClientMsg),
+    /// Boxed: an enqueue carries a whole job spec.
+    Msg(ConnId, Box<ClientMsg>),
     Closed(ConnId),
 }
 
@@ -41,7 +42,7 @@ pub fn spawn(listener: UnixListener, tx: Sender<Event>, conns: Conns) {
                 // Anything but a well-formed message ends the connection:
                 // a confused client is treated as a gone one.
                 while let Ok(Some(msg)) = read_msg::<_, ClientMsg>(&mut r) {
-                    if tx.send(Event::Msg(id, msg)).is_err() {
+                    if tx.send(Event::Msg(id, Box::new(msg))).is_err() {
                         return;
                     }
                 }

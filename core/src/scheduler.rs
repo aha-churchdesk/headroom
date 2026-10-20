@@ -12,9 +12,9 @@ use crate::admission::{self, Blocked};
 use crate::config::Config;
 use crate::guard::{self, Action, GuardState};
 use crate::model::{
-    Bytes, FrozenBy, HistoryEntry, Job, JobId, JobSpec, JobState, Millis, Outcome, Snapshot,
+    Bytes, FrozenBy, HistoryEntry, Job, JobId, JobSpec, JobState, Millis, Outcome, Snapshot, Tuned,
 };
-use crate::profile::{Profiles, Run};
+use crate::profile::{Profiles, Run, Scaling};
 use crate::protocol::{Control, DaemonMsg, Listing};
 
 pub type ConnId = u64;
@@ -139,7 +139,9 @@ impl Scheduler {
             .estimate(&spec.key, &spec.fallback_key, self.cfg.default_estimate);
         let id = self.next_id;
         self.next_id += 1;
-        let job = Job::queued(id, spec, est.bytes, est.samples, now);
+        let scaling = self.scaling_for(&spec);
+        let mut job = Job::queued(id, spec, est.bytes, est.samples, now);
+        job.scaling = scaling;
         self.jobs.insert(
             id,
             Entry {
@@ -196,6 +198,11 @@ impl Scheduler {
                 exit: code,
                 flagged,
                 at: wall,
+                workers: e.job.tuned.map(|t| t.workers).or(e
+                    .job
+                    .spec
+                    .tune
+                    .map(|t| t.default_workers)),
             };
             self.profiles
                 .record(&e.job.spec.key, &e.job.spec.fallback_key, run);
@@ -350,6 +357,7 @@ impl Scheduler {
             }
             Control::Configure { config } => {
                 self.cfg = *config;
+                self.reestimate(None);
                 fx.push(Effect::SaveConfig);
             }
             Control::ResetProfile { key } => {
@@ -357,19 +365,7 @@ impl Scheduler {
                     return Err(format!("no profile for {key}"));
                 }
                 fx.push(Effect::SaveProfiles);
-                for e in self
-                    .jobs
-                    .values_mut()
-                    .filter(|e| e.job.spec.key == key && e.job.state == JobState::Queued)
-                {
-                    let est = self.profiles.estimate(
-                        &key,
-                        &e.job.spec.fallback_key,
-                        self.cfg.default_estimate,
-                    );
-                    e.job.estimate = est.bytes;
-                    e.job.samples = est.samples;
-                }
+                self.reestimate(Some(&key));
             }
         }
         Ok(())
@@ -515,17 +511,49 @@ impl Scheduler {
         fx
     }
 
+    /// How a job's memory scales with workers, if it may be tuned at all.
+    fn scaling_for(&self, spec: &JobSpec) -> Option<Scaling> {
+        let tune = spec.tune?;
+        let off = |s: &String| *s == tune.tool.name() || spec.key.starts_with(&format!("{s}|"));
+        if !self.cfg.tune || self.cfg.tune_off.iter().any(off) {
+            return None;
+        }
+        self.profiles.get(&spec.key)?.scaling()
+    }
+
+    /// After the settings or a profile changed: queued jobs' estimates.
+    fn reestimate(&mut self, key: Option<&str>) {
+        let ids: Vec<JobId> = self
+            .jobs
+            .values()
+            .filter(|e| e.job.state == JobState::Queued)
+            .filter(|e| key.is_none_or(|k| e.job.spec.key == k))
+            .map(|e| e.job.id)
+            .collect();
+        for id in ids {
+            let spec = self.jobs[&id].job.spec.clone();
+            let est =
+                self.profiles
+                    .estimate(&spec.key, &spec.fallback_key, self.cfg.default_estimate);
+            let scaling = self.scaling_for(&spec);
+            let j = &mut self.jobs.get_mut(&id).expect("queued").job;
+            (j.estimate, j.samples, j.scaling) = (est.bytes, est.samples, scaling);
+        }
+    }
+
     fn requeue(&mut self, mut e: Entry) {
         let est = self.profiles.estimate(
             &e.job.spec.key,
             &e.job.spec.fallback_key,
             self.cfg.default_estimate,
         );
+        let scaling = self.scaling_for(&e.job.spec);
         let j = &mut e.job;
         j.state = JobState::Queued;
         j.retry += 1;
         j.estimate = est.bytes;
         j.samples = est.samples;
+        (j.scaling, j.tuned) = (scaling, None);
         (j.footprint, j.peak, j.cpu_pct, j.procs) = (0, 0, 0.0, 0);
         (j.started_at, j.frozen_at, j.frozen_by, j.pgid) = (None, None, None, None);
         j.was_frozen = false;
@@ -558,6 +586,7 @@ impl Scheduler {
             ended_at: wall,
             outcome,
             why,
+            tuned: j.tuned,
         });
         self.history.truncate(HISTORY);
     }
@@ -609,12 +638,18 @@ impl Scheduler {
             e.job.state = JobState::Running;
             e.job.started_at = Some(now);
             e.job.swap_at_start = swap;
+            if let Some(&(_, workers, est)) = d.tuned.iter().find(|t| t.0 == id) {
+                let default = e.job.spec.tune.map_or(workers, |t| t.default_workers);
+                e.job.tuned = Some(Tuned { workers, default });
+                e.job.estimate = est;
+            }
             fx.push(Effect::Send(
                 e.conn,
                 DaemonMsg::Granted {
                     id,
                     retry: e.job.retry,
                     low: e.job.spec.low,
+                    workers: e.job.tuned.map(|t| t.workers),
                 },
             ));
         }
@@ -672,6 +707,7 @@ mod tests {
     use super::*;
     use crate::config::KillMode;
     use crate::model::{GIB, Pressure};
+    use crate::tweaks::{Tool, Tunable};
 
     fn snap(avail_gb: u64) -> Snapshot {
         Snapshot {
@@ -775,6 +811,152 @@ mod tests {
         assert!(granted(&fx, 3));
     }
 
+    /// `vitest run`, tunable from 9 workers, with three clean 9 GB runs at 9.
+    fn tunable_sched(avail_gb: u64) -> (Scheduler, JobSpec) {
+        let mut s = sched(avail_gb);
+        let mut sp = spec("vitest run");
+        // Its own fallback, so the blocker's estimate stays the default.
+        sp.fallback_key = "/r|vitest".into();
+        sp.tune = Some(Tunable {
+            tool: Tool::Vitest,
+            default_workers: 9,
+            npm: false,
+        });
+        for _ in 0..3 {
+            let run = Run {
+                peak: 9 * GIB,
+                duration_ms: 1,
+                exit: Some(0),
+                flagged: false,
+                at: 0,
+                workers: Some(9),
+            };
+            s.profiles.record(&sp.key, &sp.fallback_key, run);
+        }
+        // A 3 GB job running, so the queue isn't idle.
+        s.enqueue(9, spec("blocker"), 0);
+        s.started(9, 900);
+        (s, sp)
+    }
+
+    #[test]
+    fn a_job_that_does_not_fit_is_granted_with_fewer_workers_and_remembers_it() {
+        // 12 − 2 headroom − 3 still to grow = 7 GB: 2.25 + 0.75 × 6 = 6.75 fits.
+        let (mut s, sp) = tunable_sched(12);
+        let fx = s.enqueue(1, sp.clone(), 0);
+        assert!(sent(&fx, 1).contains(&&DaemonMsg::Granted {
+            id: 2,
+            retry: 0,
+            low: false,
+            workers: Some(6),
+        }));
+        let job = &s
+            .list()
+            .running
+            .iter()
+            .find(|j| j.id == 2)
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            job.tuned,
+            Some(Tuned {
+                workers: 6,
+                default: 9
+            })
+        );
+        assert_eq!(job.estimate, 27 * GIB / 4);
+        s.started(1, 100);
+        s.tick(snap(12), &usage(100, 5.0), 1_000);
+        s.exited(1, Some(0), None, 2_000, 7);
+        assert_eq!(s.profiles.get(&sp.key).unwrap().runs[3].workers, Some(6));
+        assert_eq!(
+            s.history[0].tuned,
+            Some(Tuned {
+                workers: 6,
+                default: 9
+            })
+        );
+    }
+
+    #[test]
+    fn an_untuned_run_records_the_tools_default_workers() {
+        let (mut s, sp) = tunable_sched(30);
+        let fx = s.enqueue(1, sp.clone(), 0);
+        assert!(sent(&fx, 1).contains(&&DaemonMsg::Granted {
+            id: 2,
+            retry: 0,
+            low: false,
+            workers: None,
+        }));
+        s.started(1, 100);
+        s.exited(1, Some(0), None, 1_000, 7);
+        assert_eq!(s.profiles.get(&sp.key).unwrap().runs[3].workers, Some(9));
+        assert_eq!(s.history[0].tuned, None);
+    }
+
+    #[test]
+    fn turning_tuning_off_globally_per_tool_or_per_repo_keeps_it_waiting() {
+        for off in [
+            Config {
+                tune: false,
+                ..s_cfg()
+            },
+            Config {
+                tune_off: vec!["vitest".into()],
+                ..s_cfg()
+            },
+            Config {
+                tune_off: vec!["/r".into()],
+                ..s_cfg()
+            },
+        ] {
+            let (mut s, sp) = tunable_sched(12);
+            s.control(
+                5,
+                Control::Configure {
+                    config: Box::new(off.clone()),
+                },
+                0,
+                0,
+            );
+            let fx = s.enqueue(1, sp, 0);
+            assert!(!granted(&fx, 1), "{off:?}");
+        }
+        // And turning it back on re-plans the job already waiting.
+        let (mut s, sp) = tunable_sched(12);
+        let off = Config {
+            tune: false,
+            ..s_cfg()
+        };
+        s.control(
+            5,
+            Control::Configure {
+                config: Box::new(off),
+            },
+            0,
+            0,
+        );
+        assert!(!granted(&s.enqueue(1, sp, 0), 1));
+        let fx = s.control(
+            5,
+            Control::Configure {
+                config: Box::new(s_cfg()),
+            },
+            0,
+            0,
+        );
+        assert!(fx.contains(&Effect::SaveConfig));
+        let later = s.tick(snap(12), &HashMap::new(), 1_000);
+        assert!(granted(&fx, 1) || granted(&later, 1));
+    }
+
+    fn s_cfg() -> Config {
+        Config {
+            default_estimate: 3 * GIB,
+            ..Config::default()
+        }
+    }
+
     #[test]
     fn exit_records_a_clean_run_and_history() {
         let mut s = sched(20);
@@ -792,7 +974,8 @@ mod tests {
                 duration_ms: 3_000,
                 exit: Some(1),
                 flagged: false,
-                at: 42
+                at: 42,
+                workers: None,
             }
         );
         assert_eq!(s.history[0].outcome, Outcome::Exited);
@@ -912,7 +1095,8 @@ mod tests {
         assert!(sent(&fx, 1).contains(&&DaemonMsg::Granted {
             id: 1,
             retry: 1,
-            low: false
+            low: false,
+            workers: None,
         }));
     }
 
@@ -1134,7 +1318,8 @@ mod tests {
         assert!(sent(&fx, 1).contains(&&DaemonMsg::Granted {
             id: 1,
             retry: 0,
-            low: true
+            low: true,
+            workers: None,
         }));
     }
 
@@ -1150,6 +1335,7 @@ mod tests {
                 exit: Some(0),
                 flagged: false,
                 at: 0,
+                workers: None,
             },
         );
         s.enqueue(1, spec("a"), 0);

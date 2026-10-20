@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::profile::Scaling;
+use crate::tweaks::Tunable;
+
 pub type JobId = u64;
 pub type Bytes = u64;
 /// Milliseconds on a monotonic clock the caller owns. Core never reads a
@@ -72,6 +75,16 @@ pub struct JobSpec {
     pub agent: Option<String>,
     pub low: bool,
     pub background: bool,
+    /// Set when the command can be told to use fewer workers.
+    #[serde(default)]
+    pub tune: Option<Tunable>,
+}
+
+/// A job started with fewer workers than it would use untouched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tuned {
+    pub workers: u32,
+    pub default: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -103,6 +116,12 @@ pub struct Job {
     #[serde(default)]
     pub guard_note: Option<String>,
     pub pgid: Option<i32>,
+    /// How its peak grows with workers, while it may be tuned.
+    #[serde(default)]
+    pub scaling: Option<Scaling>,
+    /// The worker count it was started with, if admission lowered it.
+    #[serde(default)]
+    pub tuned: Option<Tuned>,
 }
 
 impl Job {
@@ -127,6 +146,8 @@ impl Job {
             retry: 0,
             guard_note: None,
             pgid: None,
+            scaling: None,
+            tuned: None,
         }
     }
 
@@ -176,4 +197,6 @@ pub struct HistoryEntry {
     pub ended_at: u64,
     pub outcome: Outcome,
     pub why: Option<String>,
+    #[serde(default)]
+    pub tuned: Option<Tuned>,
 }

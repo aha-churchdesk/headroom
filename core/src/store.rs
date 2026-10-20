@@ -151,6 +151,7 @@ mod tests {
                 exit: Some(0),
                 flagged: false,
                 at: 3,
+                workers: None,
             },
         );
         s.save_profiles(&p).unwrap();

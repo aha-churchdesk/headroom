@@ -7,6 +7,9 @@
 //!
 //! The queue is strict head-of-line: if the head doesn't fit, nothing behind
 //! it starts, so a big job can't be starved by a stream of small ones.
+//!
+//! A head that doesn't fit may still start with fewer workers, when its tool
+//! can be told so and its profile says how memory scales with workers.
 
 use serde::{Deserialize, Serialize};
 
@@ -42,7 +45,22 @@ impl Blocked {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Decision {
     pub admit: Vec<JobId>,
+    /// Admitted jobs that start with fewer workers: (id, workers, estimate).
+    pub tuned: Vec<(JobId, u32, Bytes)>,
     pub blocked: Option<Blocked>,
+}
+
+/// The most workers, below the tool's default and not below the floor, at
+/// which the job's estimate fits in `free`, and that estimate.
+pub fn shrink(job: &Job, free: Bytes, cfg: &Config) -> Option<(u32, Bytes)> {
+    if !cfg.tune || job.pinned {
+        return None;
+    }
+    let (scaling, tune) = (job.scaling?, job.spec.tune?);
+    (cfg.tune_floor.max(1)..tune.default_workers)
+        .rev()
+        .map(|n| (n, scaling.at(n)))
+        .find(|&(_, est)| est <= free)
 }
 
 /// Memory the running jobs are still expected to take on top of what they
@@ -100,7 +118,9 @@ pub fn decide(
             .mem_available
             .saturating_sub(cfg.headroom)
             .saturating_sub(growth);
-        if !(idle || job.pinned || job.estimate <= free) {
+        let fits = idle || job.pinned || job.estimate <= free;
+        let tuned = if fits { None } else { shrink(job, free, cfg) };
+        if !fits && tuned.is_none() {
             d.blocked = Some(Blocked::Memory {
                 need: job.estimate,
                 free,
@@ -116,7 +136,13 @@ pub fn decide(
             break;
         }
         d.admit.push(job.id);
-        growth += job.estimate;
+        growth += match tuned {
+            Some((n, est)) => {
+                d.tuned.push((job.id, n, est));
+                est
+            }
+            None => job.estimate,
+        };
         load += 1.0;
     }
     d
@@ -126,6 +152,8 @@ pub fn decide(
 mod tests {
     use super::*;
     use crate::model::{GIB, JobSpec};
+    use crate::profile::Scaling;
+    use crate::tweaks::{Tool, Tunable};
 
     fn snap(avail_gb: f64) -> Snapshot {
         Snapshot {
@@ -155,6 +183,100 @@ mod tests {
         let r: Vec<&Job> = r.iter().collect();
         let q: Vec<&Job> = q.iter().collect();
         decide(s, &r, &q, held, &Config::default())
+    }
+
+    /// A vitest job estimated at 6 GB, needing 1 GB plus 0.5 GB a worker.
+    fn tunable(id: JobId) -> Job {
+        let mut j = job(id, 6.0);
+        j.spec.tune = Some(Tunable {
+            tool: Tool::Vitest,
+            default_workers: 10,
+            npm: false,
+        });
+        j.scaling = Some(Scaling {
+            base: GIB,
+            per_worker: GIB / 2,
+        });
+        j
+    }
+
+    /// Something of ours running, so the idle rule doesn't admit everything.
+    fn busy() -> Vec<Job> {
+        vec![running(9, 0.0, 0.0)]
+    }
+
+    #[test]
+    fn a_job_that_does_not_fit_starts_with_the_most_workers_that_do() {
+        // 6 GB available − 2 headroom = 4 GB: 1 + 0.5 × 6 = 4 GB fits exactly.
+        let d = run(&snap(6.0), &busy(), &[tunable(1), job(2, 0.5)], false);
+        assert_eq!(d.admit, vec![1]);
+        assert_eq!(d.tuned, vec![(1, 6, 4 * GIB)]);
+        // The tuned estimate is what it reserves: nothing is left for job 2.
+        assert_eq!(
+            d.blocked,
+            Some(Blocked::Memory {
+                need: GIB / 2,
+                free: 0
+            })
+        );
+        // One byte less and it takes one worker fewer.
+        let d = run(&snap(6.0 - 1.0 / GIB as f64), &busy(), &[tunable(1)], false);
+        assert_eq!(d.tuned.first().map(|t| t.1), Some(5));
+    }
+
+    #[test]
+    fn below_the_floor_it_waits_as_before() {
+        // The floor, 2 workers, needs 2 GB: 4 GB available leaves exactly that.
+        let d = run(&snap(4.0), &busy(), &[tunable(1)], false);
+        assert_eq!(d.tuned, vec![(1, 2, 2 * GIB)]);
+        let d = run(&snap(3.9), &busy(), &[tunable(1)], false);
+        assert!(d.admit.is_empty());
+        assert_eq!(
+            d.blocked,
+            Some(Blocked::Memory {
+                need: 6 * GIB,
+                free: (1.9 * GIB as f64) as Bytes
+            })
+        );
+    }
+
+    #[test]
+    fn no_tuning_without_a_profile_a_tool_or_permission() {
+        let mut no_profile = tunable(1);
+        no_profile.scaling = None;
+        let mut no_tool = tunable(1);
+        no_tool.spec.tune = None;
+        let mut pinned = tunable(1);
+        pinned.pinned = true;
+        for j in [no_profile, no_tool] {
+            assert!(run(&snap(5.0), &busy(), &[j], false).admit.is_empty());
+        }
+        let off = Config {
+            tune: false,
+            ..Config::default()
+        };
+        let d = decide(&snap(5.0), &[&busy()[0]], &[&tunable(1)], false, &off);
+        assert!(d.admit.is_empty());
+        // Pinned jobs skip the memory check, so they start untouched.
+        let d = run(&snap(5.0), &busy(), &[pinned], false);
+        assert_eq!((d.admit, d.tuned), (vec![1], vec![]));
+    }
+
+    #[test]
+    fn a_job_that_fits_is_never_tuned() {
+        let d = run(&snap(9.0), &busy(), &[tunable(1)], false);
+        assert_eq!((d.admit, d.tuned), (vec![1], vec![]));
+    }
+
+    #[test]
+    fn a_default_at_or_below_the_floor_leaves_nothing_to_try() {
+        let mut j = tunable(1);
+        j.spec.tune = Some(Tunable {
+            tool: Tool::Vitest,
+            default_workers: 2,
+            npm: false,
+        });
+        assert!(run(&snap(3.0), &busy(), &[j], false).admit.is_empty());
     }
 
     #[test]

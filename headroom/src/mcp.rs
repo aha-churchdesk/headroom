@@ -93,6 +93,7 @@ fn job_json(j: &Job, pos: Option<usize>) -> Value {
         "estimate_gb": gb(j.estimate),
         "footprint_gb": gb(j.footprint),
         "profiled_runs": j.samples,
+        "workers": j.tuned.map(|t| json!({ "running_with": t.workers, "default": t.default })),
     })
 }
 
@@ -499,6 +500,7 @@ mod tests {
                 exit: Some(0),
                 flagged: false,
                 at: 0,
+                workers: None,
             };
             p.record(&key, &key, run);
         }

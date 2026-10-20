@@ -51,6 +51,13 @@ pub struct Config {
     /// subcommand or script name such as `dev` or `dev:web`.
     pub excluded: Vec<String>,
     pub start_at_login: bool,
+    /// Start a job that doesn't fit with fewer workers, when its tool allows.
+    pub tune: bool,
+    /// Never tune below this many workers: one worker can change how a
+    /// test suite behaves, not just how fast it runs.
+    pub tune_floor: u32,
+    /// Tools (`vitest`, `turbo`, `cargo`) or repository paths never tuned.
+    pub tune_off: Vec<String>,
 }
 
 impl Default for Config {
@@ -102,6 +109,9 @@ impl Default for Config {
             .map(String::from)
             .to_vec(),
             start_at_login: true,
+            tune: true,
+            tune_floor: 2,
+            tune_off: Vec::new(),
         }
     }
 }

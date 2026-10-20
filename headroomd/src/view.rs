@@ -77,6 +77,7 @@ fn job_json(j: &Job, now: u64, cfg: &Config) -> Value {
         "cpu_pct": j.cpu_pct,
         "procs": j.procs,
         "retry": j.retry,
+        "tuned": j.tuned,
     })
 }
 
@@ -182,6 +183,7 @@ pub fn state(l: &Listing, x: &Extras) -> Value {
                 "estimate": h.estimate,
                 "exit": h.exit,
                 "ended_ago_s": x.wall.saturating_sub(h.ended_at),
+                "tuned": h.tuned,
                 "guard": outcome_guard(&h.outcome).map(|a| json!({ "action": a, "why": h.why })),
             })
         })
@@ -215,6 +217,7 @@ pub fn state(l: &Listing, x: &Extras) -> Value {
             "wait_cap_s": cfg.wait_cap_s,
             "default_estimate": cfg.default_estimate,
             "start_at_login": x.login != Login::Off,
+            "tune": cfg.tune,
             "login_managed_by_brew": x.login == Login::Brew,
             "patterns": cfg.patterns,
             "excluded": cfg.excluded,
@@ -305,6 +308,7 @@ mod tests {
                     ended_at: 1_000,
                     outcome: Outcome::Requeued,
                     why: Some("memory still critical".into()),
+                    tuned: None,
                 },
                 HistoryEntry {
                     id: 4,
@@ -318,6 +322,7 @@ mod tests {
                     ended_at: 10,
                     outcome: Outcome::Exited,
                     why: None,
+                    tuned: None,
                 },
             ],
         }

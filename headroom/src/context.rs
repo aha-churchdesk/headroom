@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use headroom_core::classify::basename;
+use headroom_core::tweaks::{self, Probe, Tool, Tunable};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitContext {
@@ -61,6 +62,49 @@ pub fn git_context(cwd: &Path) -> GitContext {
         subdir,
         label: basename(&top.display().to_string()).to_string(),
     }
+}
+
+/// `dir` and its parents up to the checkout's top (the first with `.git`).
+fn up_to_top(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for d in dir.ancestors() {
+        out.push(d.to_path_buf());
+        if d.join(".git").exists() {
+            break;
+        }
+    }
+    out
+}
+
+/// The nearest package.json's text for script `name`.
+fn npm_script(cwd: &Path, name: &str) -> Option<String> {
+    let text = up_to_top(cwd)
+        .iter()
+        .find_map(|d| std::fs::read_to_string(d.join("package.json")).ok())?;
+    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+    json.get("scripts")?.get(name)?.as_str().map(String::from)
+}
+
+/// Can this command be told to use fewer workers? Reads the npm script it
+/// runs and the tool's config files between `cwd` and the checkout's top.
+pub fn tunable(line: &str, cwd: &Path) -> Option<Tunable> {
+    let script = tweaks::script_name(line).and_then(|n| npm_script(cwd, &n));
+    let dirs = up_to_top(cwd);
+    let configs = |tool: Tool| {
+        dirs.iter()
+            .flat_map(|d| tool.config_files().iter().map(move |f| d.join(f)))
+            .filter_map(|p| std::fs::read_to_string(p).ok())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
+    tweaks::detect(&Probe {
+        line,
+        script: script.as_deref(),
+        configs: &configs,
+        env_set: &|v| std::env::var_os(v).is_some_and(|x| !x.is_empty()),
+        cores,
+    })
 }
 
 /// The path agents' hooks should call. Homebrew runs us from a versioned
@@ -164,5 +208,61 @@ mod tests {
         assert_eq!(stable_from(cellar, |_| false), cellar.display().to_string());
         let dev = Path::new("/Users/me/src/headroom/target/release/headroom");
         assert_eq!(stable_from(dev, |_| true), dev.display().to_string());
+    }
+
+    fn checkout(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("hr-tune-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join("apps/web")).unwrap();
+        root
+    }
+
+    #[test]
+    fn finds_vitest_behind_the_nearest_package_json_script() {
+        let root = checkout("script");
+        std::fs::write(
+            root.join("apps/web/package.json"),
+            r#"{"scripts":{"test":"vitest run","lint":"eslint ."}}"#,
+        )
+        .unwrap();
+        let web = root.join("apps/web");
+        assert_eq!(
+            tunable("pnpm test", &web).map(|t| t.tool),
+            Some(Tool::Vitest)
+        );
+        assert_eq!(tunable("pnpm lint", &web), None);
+        assert_eq!(tunable("pnpm missing", &web), None);
+    }
+
+    #[test]
+    fn a_worker_setting_in_a_config_file_up_to_the_checkout_top_wins() {
+        let root = checkout("config");
+        let web = root.join("apps/web");
+        assert!(tunable("vitest run", &web).is_some());
+        std::fs::write(root.join("vitest.config.ts"), "test: { maxWorkers: 4 }").unwrap();
+        assert_eq!(tunable("vitest run", &web), None);
+    }
+
+    #[test]
+    fn files_above_the_checkout_are_not_read() {
+        let root = checkout("above");
+        let outer = root
+            .parent()
+            .unwrap()
+            .join(format!("hr-tune-outer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&outer);
+        std::fs::create_dir_all(&outer).unwrap();
+        let inner = outer.join("repo");
+        std::fs::create_dir_all(inner.join(".git")).unwrap();
+        std::fs::write(outer.join("vitest.config.ts"), "maxWorkers: 1").unwrap();
+        assert!(tunable("vitest run", &inner).is_some());
+    }
+
+    #[test]
+    fn a_broken_package_json_means_no_script_not_a_crash() {
+        let root = checkout("broken");
+        std::fs::write(root.join("package.json"), "{ nope").unwrap();
+        assert_eq!(tunable("pnpm test", &root), None);
     }
 }
