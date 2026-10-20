@@ -57,6 +57,7 @@ pub struct App {
     hooks: Vec<(&'static str, &'static str)>,
     login: Login,
     listing: Option<Listing>,
+    attached: bool,
     /// The last thing the daemon refused, for stderr; not shown in the page.
     pub last_error: Option<String>,
 }
@@ -104,6 +105,7 @@ impl App {
             hooks: Vec::new(),
             login: Login::Off,
             listing: None,
+            attached: false,
             last_error: None,
         };
         app.refresh_settings();
@@ -151,6 +153,11 @@ impl App {
         self.hooks = hook_states(&self.home, &self.cli);
     }
 
+    /// Whether the queue this app shows runs in another headroomd.
+    pub fn set_attached(&mut self, on: bool) {
+        self.attached = on;
+    }
+
     pub fn listing(&self) -> Option<&Listing> {
         self.listing.as_ref()
     }
@@ -170,6 +177,7 @@ impl App {
                 wall: wall(),
                 since: self.since,
                 login: self.login,
+                attached: self.attached,
             },
         ))
     }
@@ -357,6 +365,14 @@ mod tests {
         app.command(r#"{"cmd":"dismiss","id":"k7"}"#);
         assert!(app.dismissed.contains("k7"));
         assert_eq!(app.command(r#"{"cmd":"quit"}"#), Next::Quit);
+    }
+
+    #[test]
+    fn the_state_says_when_the_queue_runs_in_another_daemon() {
+        let (mut app, _d) = with_daemon("attached");
+        assert_eq!(app.state().unwrap()["attached"], false);
+        app.set_attached(true);
+        assert_eq!(app.state().unwrap()["attached"], true);
     }
 
     #[test]

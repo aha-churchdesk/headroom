@@ -770,7 +770,7 @@ function renderSettings(S){
     <div class="set">
       <div class="k">Headroom</div>
       <div class="h">Memory kept free before a new job may start.</div>
-      <div class="ctl">${stepper("headroom", c.headroom, 0.5 * GiB, b => gb(b) + " GB", 0, 16 * GiB)}</div>
+      <div class="ctl">${stepper("headroom", c.headroom, 0.5 * GiB, b => gb(b) + " GB", 0, Math.max(16 * GiB, Math.floor(S.system.mem_total / GiB) * GiB / 2))}</div>
     </div>
     <div class="set">
       <div class="k">When memory runs out</div>
@@ -845,7 +845,9 @@ function renderSettings(S){
       ${UI.snippet ? `<pre class="snip">${esc(HOOK_SNIPPET)}</pre>` : ""}
     </div>
     <div class="quit">
-      <span>Quitting stops the queue; commands then run ungated.</span>
+      <span>${S.attached
+        ? "The queue runs in another headroomd; quitting closes only this menu bar."
+        : "Quitting stops the queue; commands then run ungated."}</span>
       <button class="chip-btn" data-act="quit">Quit</button>
     </div>`;
 }

@@ -315,6 +315,22 @@ test('letting short jobs go first can be switched off', () => {
   eq(ui.sent, [{ cmd: 'set', key: 'backfill', value: false }]);
 });
 
+test('quitting says whether it stops the queue', () => {
+  ui.setState(busy);
+  ui.click({ act: 'goto', page: 'settings' }, 0);
+  has(ui.view(), 'Quitting stops the queue');
+  ui.setState({ ...busy, attached: true });
+  has(ui.view(), 'quitting closes only this menu bar');
+});
+
+test('the headroom stepper goes up to half the machine', () => {
+  // The capture's machine has 64 GB: up to 32 GB, from below.
+  ui.setState({ ...busy, settings: { ...busy.settings, headroom: 31.5 * 2 ** 30 } });
+  ui.click({ act: 'goto', page: 'settings' }, 0);
+  const [, plus] = ui.find({ act: 'set', key: 'headroom' });
+  eq([plus.disabled, Number(plus.dataset.val) / 2 ** 30], [false, 32]);
+});
+
 test('quit is sent as an intent', () => {
   ui.setState(busy);
   ui.click({ act: 'goto', page: 'settings' }, 0);

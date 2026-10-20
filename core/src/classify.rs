@@ -45,7 +45,7 @@ impl Normal {
 const NOT_WORK: &[&str] = &[
     "cd", "pushd", "popd", "export", "source", ".", "echo", "printf", "true", "false", "set",
     "unset", "test", "[", "mkdir", "rm", "cp", "mv", "cat", "tee", "grep", "rg", "head", "tail",
-    "sleep", "wait", "ls", "pwd", "which", "git",
+    "sleep", "wait", "ls", "pwd", "which", "git", "exit", "return", ":",
 ];
 
 /// Tools a package manager can run directly (`pnpm vitest run`). Without
@@ -601,6 +601,8 @@ mod tests {
             ("node".into(), "node".into())
         );
         assert_eq!(describe("cd x", &cfg), ("cd x".into(), "sh".into()));
+        assert_eq!(describe("exit 3", &cfg), ("exit 3".into(), "sh".into()));
+        assert_eq!(describe("node a.js; exit 3", &cfg).1, "node");
     }
 
     #[test]

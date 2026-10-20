@@ -146,12 +146,14 @@ fn main() -> wry::Result<()> {
     };
     install_signals();
     let stop = stop_on_signal();
+    let attached = Arc::new(AtomicBool::new(false));
     let daemon_thread = {
-        let (stop, root) = (stop.clone(), store.root().to_path_buf());
+        let (stop, root, attached) = (stop.clone(), store.root().to_path_buf(), attached.clone());
         std::thread::spawn(
             move || match Store::at(root).and_then(|s| daemon::run(s, stop)) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                    attached.store(true, Ordering::Relaxed);
                     eprintln!("headroomd: a daemon is already running; showing its queue");
                 }
                 Err(e) => eprintln!("headroomd: daemon stopped: {e}"),
@@ -355,6 +357,8 @@ fn main() -> wry::Result<()> {
         let now = Instant::now();
         if now >= next_list {
             next_list = now + LIST_EVERY;
+            app.borrow_mut()
+                .set_attached(attached.load(Ordering::Relaxed));
             app.borrow_mut().poll();
             update_tray();
             if visible {

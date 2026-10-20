@@ -43,6 +43,8 @@ pub struct Extras<'a> {
     pub wall: u64,
     pub since: u64,
     pub login: Login,
+    /// The queue runs in another headroomd; quitting this one leaves it.
+    pub attached: bool,
 }
 
 fn secs(ms: u64) -> u64 {
@@ -231,6 +233,7 @@ pub fn state(l: &Listing, x: &Extras) -> Value {
             "excluded": cfg.excluded,
         },
         "classify": x.classify,
+        "attached": x.attached,
     })
 }
 
@@ -349,6 +352,7 @@ mod tests {
             wall: 1_100,
             since: 500,
             login: Login::Brew,
+            attached: false,
         }
     }
 
