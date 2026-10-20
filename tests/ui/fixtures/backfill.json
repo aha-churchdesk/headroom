@@ -15,31 +15,31 @@
   },
   "queue_reason": {
     "kind": "memory",
-    "need": 1075659880,
-    "free": 0
+    "need": 1075643496,
+    "free": 536870912
   },
   "running": [
     {
       "id": "7",
       "label": "sc-49123",
       "cmd": "e2e.sh",
-      "full_cmd": "/var/folders/g3/qjbw6xys4_1cb6zs26vqbjkr0000gn/T/hr-ui-backfill-bin-32474/e2e.sh",
+      "full_cmd": "/var/folders/g3/qjbw6xys4_1cb6zs26vqbjkr0000gn/T/hr-ui-backfill-bin-883/e2e.sh",
       "cwd": "~/Projects/work-scheduler-mcp/headroom",
       "session": null,
       "key": "~/Projects/work-scheduler-mcp|headroom|e2e.sh",
       "state": "running",
       "pinned": false,
       "low": false,
-      "estimate": 1075659880,
+      "estimate": 1075643496,
       "samples": 3,
-      "footprint": 0,
-      "peak": 0,
+      "footprint": 1075643496,
+      "peak": 1075643496,
       "runaway_at": 8589934592,
       "elapsed_s": 0,
       "frozen_s": 0,
       "waited_s": 0,
       "cpu_pct": 0.0,
-      "procs": 0,
+      "procs": 1,
       "retry": 0,
       "tuned": null,
       "skipped": 0,
@@ -51,14 +51,14 @@
       "id": "8",
       "label": "browser-cd",
       "cmd": "e2e.sh",
-      "full_cmd": "/var/folders/g3/qjbw6xys4_1cb6zs26vqbjkr0000gn/T/hr-ui-backfill-bin-32474/e2e.sh",
+      "full_cmd": "/var/folders/g3/qjbw6xys4_1cb6zs26vqbjkr0000gn/T/hr-ui-backfill-bin-883/e2e.sh",
       "cwd": "~/Projects/work-scheduler-mcp/headroom",
       "session": null,
       "key": "~/Projects/work-scheduler-mcp|headroom|e2e.sh",
       "state": "queued",
       "pinned": false,
       "low": false,
-      "estimate": 1075659880,
+      "estimate": 1075643496,
       "samples": 3,
       "footprint": 0,
       "peak": 0,
@@ -99,7 +99,7 @@
       "peak": 0,
       "estimate": 536870912,
       "exit": 0,
-      "ended_ago_s": 1,
+      "ended_ago_s": 0,
       "tuned": null,
       "ahead_of": null,
       "guard": null
@@ -111,7 +111,7 @@
       "key": "~/Projects/work-scheduler-mcp|headroom|e2e.sh",
       "duration_s": 3,
       "peak": 1075643496,
-      "estimate": 1253977498,
+      "estimate": 1253966576,
       "exit": 0,
       "ended_ago_s": 1,
       "tuned": null,
@@ -139,7 +139,7 @@
       "key": "~/Projects/work-scheduler-mcp|headroom|e2e.sh",
       "duration_s": 3,
       "peak": 1075643496,
-      "estimate": 1432295117,
+      "estimate": 1432289656,
       "exit": 0,
       "ended_ago_s": 4,
       "tuned": null,
@@ -166,10 +166,10 @@
       "cmd": "e2e.sh",
       "key": "~/Projects/work-scheduler-mcp|headroom|e2e.sh",
       "duration_s": 3,
-      "peak": 1075659880,
+      "peak": 1075643496,
       "estimate": 1610612736,
       "exit": 0,
-      "ended_ago_s": 8,
+      "ended_ago_s": 7,
       "tuned": null,
       "ahead_of": null,
       "guard": null
@@ -178,11 +178,11 @@
   "profiles": {
     "~/Projects/work-scheduler-mcp|headroom|e2e.sh": {
       "peaks": [
-        1075659880,
+        1075643496,
         1075643496,
         1075643496
       ],
-      "p90": 1075659880,
+      "p90": 1075643496,
       "median_s": 3,
       "samples": 3
     },
@@ -197,6 +197,10 @@
       "median_s": 0,
       "samples": 4
     }
+  },
+  "others_total": {
+    "bytes": 0,
+    "procs": 0
   },
   "others": [],
   "settings": {

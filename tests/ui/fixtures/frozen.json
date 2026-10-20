@@ -63,7 +63,7 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": null,
-      "ended_ago_s": 2,
+      "ended_ago_s": 1,
       "tuned": null,
       "ahead_of": null,
       "guard": {
@@ -80,7 +80,7 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": 0,
-      "ended_ago_s": 2,
+      "ended_ago_s": 1,
       "tuned": null,
       "ahead_of": null,
       "guard": null
@@ -117,6 +117,10 @@
       "median_s": 0,
       "samples": 1
     }
+  },
+  "others_total": {
+    "bytes": 0,
+    "procs": 0
   },
   "others": [],
   "settings": {

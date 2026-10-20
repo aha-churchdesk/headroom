@@ -71,7 +71,7 @@
       "peak": 538510056,
       "estimate": 1610612736,
       "exit": 0,
-      "ended_ago_s": 4,
+      "ended_ago_s": 5,
       "tuned": null,
       "ahead_of": null,
       "guard": null
@@ -87,6 +87,10 @@
       "median_s": 4,
       "samples": 2
     }
+  },
+  "others_total": {
+    "bytes": 0,
+    "procs": 0
   },
   "others": [],
   "settings": {

@@ -22,7 +22,7 @@ use headroom_core::store::Store;
 use serde_json::Value;
 
 use crate::bridge::{self, Do, UiCmd};
-use crate::view::{self, AppUsage, Extras, Login};
+use crate::view::{self, Extras, Login, Others};
 use crate::{login, sample};
 
 /// Apps listed on the "Other apps" page.
@@ -53,7 +53,7 @@ pub struct App {
     classify: Option<Value>,
     cfg: Config,
     profiles: Profiles,
-    others: Vec<AppUsage>,
+    others: Others,
     hooks: Vec<(&'static str, &'static str)>,
     login: Login,
     listing: Option<Listing>,
@@ -101,7 +101,7 @@ impl App {
             since: wall(),
             dismissed: HashSet::new(),
             classify: None,
-            others: Vec::new(),
+            others: Others::default(),
             hooks: Vec::new(),
             login: Login::Off,
             listing: None,
@@ -159,17 +159,14 @@ impl App {
             }
             _ => s.to_string(),
         };
-        self.others = sample::top_apps(pids, &skip, OTHERS)
-            .into_iter()
-            .map(|mut a| {
-                a.path = short(&a.path);
-                for p in &mut a.top {
-                    p.cmd = p.cmd.replace(&format!("{home}/"), "~/");
-                    p.cwd = p.cwd.as_deref().map(short);
-                }
-                a
-            })
-            .collect();
+        self.others = sample::top_apps(pids, &skip, OTHERS);
+        for a in &mut self.others.apps {
+            a.path = short(&a.path);
+            for p in &mut a.top {
+                p.cmd = p.cmd.replace(&format!("{home}/"), "~/");
+                p.cwd = p.cwd.as_deref().map(short);
+            }
+        }
     }
 
     pub fn refresh_hooks(&mut self) {

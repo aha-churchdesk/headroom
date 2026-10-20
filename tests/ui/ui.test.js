@@ -139,6 +139,18 @@ test('other apps expand to what each process runs, where, and who started it', (
   eq(ui.sent, [], 'expanding stays in the page');
 });
 
+test('other apps open with what all of them use together', () => {
+  ui.setState(others);
+  ui.click({ act: 'goto', page: 'others' });
+  const v = ui.view();
+  eq(others.others_total.procs, 2, 'the capture counts the shell and the hog');
+  has(v, 'All other apps 0.3 GB 2 procs · under 1% of 64 GB');
+  ui.setState({ ...others, others_total: { bytes: others.system.mem_total / 4, procs: 1 } });
+  has(ui.view(), 'All other apps 16 GB 1 proc · 25% of 64 GB');
+  ui.setState({ ...others, others: [], others_total: { bytes: 0, procs: 0 } });
+  has(ui.view(), 'All other apps 0 GB 0 procs · 0% of 64 GB');
+});
+
 test('an app with more processes than listed says how many are left out', () => {
   const many = { ...others.others[0], procs: others.others[0].top.length + 4 };
   ui.setState({ ...others, others: [many] });

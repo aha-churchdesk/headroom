@@ -25,9 +25,9 @@
       "key": "~/Projects/work-scheduler-mcp|headroom|e2e.sh",
       "duration_s": 3,
       "peak": 1075643496,
-      "estimate": 1075659880,
+      "estimate": 1075643496,
       "exit": 0,
-      "ended_ago_s": 0,
+      "ended_ago_s": 1,
       "tuned": null,
       "ahead_of": null,
       "guard": null
@@ -38,8 +38,8 @@
       "cmd": "e2e.sh",
       "key": "~/Projects/work-scheduler-mcp|headroom|e2e.sh",
       "duration_s": 3,
-      "peak": 1075627112,
-      "estimate": 1075659880,
+      "peak": 1075643496,
+      "estimate": 1075643496,
       "exit": 0,
       "ended_ago_s": 4,
       "tuned": null,
@@ -55,7 +55,7 @@
       "peak": 0,
       "estimate": 0,
       "exit": 0,
-      "ended_ago_s": 6,
+      "ended_ago_s": 7,
       "tuned": null,
       "ahead_of": "browser-cd · e2e.sh",
       "guard": null
@@ -81,9 +81,9 @@
       "key": "~/Projects/work-scheduler-mcp|headroom|e2e.sh",
       "duration_s": 3,
       "peak": 1075643496,
-      "estimate": 1253977498,
+      "estimate": 1253966576,
       "exit": 0,
-      "ended_ago_s": 7,
+      "ended_ago_s": 8,
       "tuned": null,
       "ahead_of": null,
       "guard": null
@@ -97,7 +97,7 @@
       "peak": 0,
       "estimate": 1073741824,
       "exit": 0,
-      "ended_ago_s": 10,
+      "ended_ago_s": 11,
       "tuned": null,
       "ahead_of": null,
       "guard": null
@@ -109,9 +109,9 @@
       "key": "~/Projects/work-scheduler-mcp|headroom|e2e.sh",
       "duration_s": 3,
       "peak": 1075643496,
-      "estimate": 1432295117,
+      "estimate": 1432289656,
       "exit": 0,
-      "ended_ago_s": 10,
+      "ended_ago_s": 11,
       "tuned": null,
       "ahead_of": null,
       "guard": null
@@ -125,7 +125,7 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": 0,
-      "ended_ago_s": 13,
+      "ended_ago_s": 14,
       "tuned": null,
       "ahead_of": null,
       "guard": null
@@ -136,7 +136,7 @@
       "cmd": "e2e.sh",
       "key": "~/Projects/work-scheduler-mcp|headroom|e2e.sh",
       "duration_s": 3,
-      "peak": 1075659880,
+      "peak": 1075643496,
       "estimate": 1610612736,
       "exit": 0,
       "ended_ago_s": 14,
@@ -148,13 +148,13 @@
   "profiles": {
     "~/Projects/work-scheduler-mcp|headroom|e2e.sh": {
       "peaks": [
-        1075659880,
         1075643496,
         1075643496,
-        1075627112,
+        1075643496,
+        1075643496,
         1075643496
       ],
-      "p90": 1075659880,
+      "p90": 1075643496,
       "median_s": 3,
       "samples": 5
     },
@@ -170,6 +170,10 @@
       "samples": 4
     }
   },
+  "others_total": {
+    "bytes": 325305280,
+    "procs": 2
+  },
   "others": [
     {
       "name": "headroom-hog",
@@ -178,19 +182,16 @@
       "path": "~/Projects/work-scheduler-mcp/target/debug/headroom-hog",
       "top": [
         {
-          "pid": 37201,
+          "pid": 6071,
           "bytes": 323650112,
           "cmd": "~/Projects/work-scheduler-mcp/target/debug/headroom-hog 0.3 30",
-          "cwd": "/private/var/folders/g3/qjbw6xys4_1cb6zs26vqbjkr0000gn/T/hr-ui-others-project-32474",
+          "cwd": "/private/var/folders/g3/qjbw6xys4_1cb6zs26vqbjkr0000gn/T/hr-ui-others-project-883",
           "started_by": [
             "sh",
             "e2e-c750b85913507a65",
             "cargo",
             "zsh",
-            "claude",
-            "zsh",
-            "login",
-            "cmux"
+            "Headroom"
           ]
         }
       ]
@@ -202,18 +203,15 @@
       "path": "/bin/bash",
       "top": [
         {
-          "pid": 37188,
+          "pid": 6058,
           "bytes": 1655168,
           "cmd": "/bin/sh -c '~/Projects/work-scheduler-mcp/target/debug/headroom-hog 0.3 30; true'",
-          "cwd": "/private/var/folders/g3/qjbw6xys4_1cb6zs26vqbjkr0000gn/T/hr-ui-others-project-32474",
+          "cwd": "/private/var/folders/g3/qjbw6xys4_1cb6zs26vqbjkr0000gn/T/hr-ui-others-project-883",
           "started_by": [
             "e2e-c750b85913507a65",
             "cargo",
             "zsh",
-            "claude",
-            "zsh",
-            "login",
-            "cmux"
+            "Headroom"
           ]
         }
       ]
