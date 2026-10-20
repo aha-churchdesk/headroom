@@ -1,0 +1,129 @@
+# Headroom
+
+Run four coding agents on one Mac and sooner or later they all start a test suite in the same minute. Vitest forks a worker per core, Playwright opens browsers, `tsc` holds a few GB, swap climbs past 10 GB and the machine stalls. Headroom puts those commands in a queue and starts each one only when there is memory for it.
+
+It is a macOS menu bar app plus a small CLI. Each agent's pre-tool hook sends heavy shell commands (tests, builds, e2e runs, type checks) through `headroom run`, which waits for a slot and then runs the command unchanged. Everything else runs as before.
+
+Status: early. Apple Silicon only, ad-hoc signed, used daily by one person.
+
+## How it decides
+
+- **Memory, not job count.** Headroom records the peak memory of every run, per repository and command. A command's estimate is the p90 of its last 20 clean peaks. A queued job starts when its estimate fits in available memory, minus a reserve (2 GB by default), minus what the running jobs are still expected to grow into. A command with no history is assumed to need 1.5 GB.
+- **Pressure.** Under normal memory pressure jobs start as above. Under warn, one job may start only when nothing else of ours is running. Under critical, nothing starts.
+- **Strict order.** If the head of the queue doesn't fit, nothing behind it starts, so a big e2e run can't be starved by a stream of small jobs. A job always starts when the queue is otherwise idle, so an estimate bigger than the machine can't block forever.
+- **The guard.** Under sustained critical pressure the newest job gets SIGSTOP. If pressure stays critical it is killed and requeued once; a second kill gives up and the agent sees exit 137 with the reason. Low-priority jobs go first, and a job using more than twice its estimate (and over 8 GB) goes before anything else. Pinned jobs and processes Headroom didn't start are never touched.
+- **Fail open.** If the daemon isn't running or stops answering, `headroom run` runs the command directly. Headroom can slow a command down; it can't stop one from running.
+
+A foreground command waits at most 8 minutes in the queue (under the 10 minute limit of Claude Code's Bash tool), then exits 75 with "still queued, try again later". The hook raises the Bash tool's timeout by the time it may spend queued.
+
+## Install
+
+From source (Rust 1.97, pinned in `mise.toml`):
+
+```sh
+git clone https://github.com/aha-churchdesk/headroom
+cd headroom
+./scripts/bundle.sh --install      # builds Headroom.app into /Applications
+open -a Headroom
+```
+
+The CLI is inside the app. Put it on your PATH, for example:
+
+```sh
+ln -s /Applications/Headroom.app/Contents/MacOS/headroom /usr/local/bin/headroom
+```
+
+Homebrew, once the first release is out:
+
+```sh
+brew install aha-churchdesk/tap/headroom
+brew services start headroom       # menu bar app, now and at login
+```
+
+## Connect your agents
+
+```sh
+headroom hook install              # every agent found on this Mac
+headroom hook status
+```
+
+This adds one `PreToolUse` entry to each agent's config and touches nothing else in the file. It refuses to write a file that isn't valid JSON, and keeps the previous version as `<file>.headroom-bak`. `--dry-run` prints the diff instead of writing, `--agent claude|codex|pi` picks one agent, and `--scope project|local` writes Claude Code's project settings instead of `~/.claude/settings.json`.
+
+| Agent | Where | After installing |
+|---|---|---|
+| Claude Code | `~/.claude/settings.json` | New sessions pick it up. |
+| Codex | `~/.codex/hooks.json` | Codex asks you to review new hooks; approve it there. |
+| pi | `~/.pi/agent/extensions/headroom.ts` | Run `/reload` in pi. |
+
+`headroom hook uninstall` removes exactly that entry.
+
+Claude Code note: the hook rewrites the command to `headroom run … --sh '<your command>'` and leaves the permission decision to you. Allow rules written for the raw command (`Bash(pnpm test:*)`) won't match the rewritten one, so you may see a prompt you didn't see before. Deny and ask rules still apply.
+
+## Which commands are heavy
+
+Commands that match a pattern are queued: `* test`, `* build`, `* e2e`, `* typecheck`, `vitest`, `jest`, `playwright`, `tsc`, `nx`, `turbo`, `next build`, `xcodebuild`, `cargo clippy`, `gradle`, `pytest`. `*` stands for any program, so `* test` covers `pnpm test` and `cargo test`. Long-lived commands are never queued, because they would hold a slot forever: `dev`, `serve`, `start`, `watch`, `preview`, `storybook`, anything with `--watch` or `--ui`, and `docker compose up`.
+
+Check one:
+
+```sh
+$ headroom classify 'pnpm vitest run src/calendar'
+heavy: queued, profiled as `vitest run`
+$ headroom classify 'pnpm dev'
+long-lived (dev): never queued
+```
+
+Patterns are editable in the menu bar's Settings page.
+
+## The menu bar
+
+The icon is a four-bar memory gauge. It turns amber or red under memory pressure, and the title shows running·queued jobs, with ❄︎ while something is frozen and ⏸︎ while the queue is held.
+
+The popover lists running and queued jobs and why the queue is waiting (`next needs 4.2 GB, 2.9 GB free`). From it you can:
+
+- drag queued jobs to reorder them, move one to the top, or cancel it;
+- **pin** a job, so it runs next, skips the memory check and is never frozen or killed;
+- mark a job **low**, so it runs at background CPU priority and is first to be frozen;
+- freeze, resume or kill a running job;
+- **hold** the queue during a call or a demo (running jobs carry on).
+
+It also has a history of the last 50 runs with each command's memory profile, the top memory users Headroom doesn't manage, and settings.
+
+## CLI
+
+```
+headroom run [--background] [--wait-cap SECS] [--low] [--label L] (--sh 'LINE' | -- CMD ARGS…)
+headroom ls
+headroom hold on|off
+headroom pin|unpin|low|normal|top|cancel|kill|freeze|resume ID
+headroom reset-profile KEY
+headroom classify 'LINE'
+headroom hook install|uninstall|status [--agent claude|codex|pi|all] [--scope user|project|local] [--dry-run]
+headroom mcp
+```
+
+Exit codes from `headroom run`: the command's own, or 75 (still queued when the wait cap ran out), 130 (cancelled from the queue), 137 (killed twice to free memory).
+
+A `headroom run` inside a job runs directly (the job sets `HEADROOM_JOB`), so a script that calls another heavy script can't deadlock behind itself.
+
+## MCP server
+
+Optional. The hooks do the gating whether an agent calls these tools or not. `headroom mcp` speaks MCP over stdio with five tools: `system_status`, `list_jobs`, `estimate_command`, `move_job` and `pin_job`.
+
+```sh
+claude mcp add headroom -- headroom mcp
+```
+
+## Files
+
+Everything lives in `~/Library/Application Support/dev.headroom/` (or `$HEADROOM_HOME`): `config.json`, `profiles.json`, `history.json` and the daemon's socket. Delete `profiles.json` to forget what Headroom has learned.
+
+`headroomd --headless` runs the queue without the menu bar. `headroomd --probe` prints what it measures and exits.
+
+## Development
+
+```sh
+./scripts/test.sh             # fmt, clippy, Rust tests, UI tests
+./scripts/test.sh --coverage  # the same, with the core coverage gate (90% lines)
+```
+
+The scheduling policy lives in `core/` with no platform calls, so the queue and the guard are tested with scripted memory readings. `headroom/tests/e2e.rs` runs a real daemon against real processes (`headroom-hog GB SECS` allocates memory on demand). The popover is a single HTML file, `ui/index.html`; opened in a browser it shows design scenarios, and `tests/ui/` renders it under node from states captured in real runs.
