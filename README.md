@@ -38,15 +38,10 @@ From source (Rust 1.97, pinned in `mise.toml`):
 ```sh
 git clone https://github.com/aha-churchdesk/headroom
 cd headroom
-./scripts/bundle.sh --install      # builds Headroom.app into /Applications
-open -a Headroom
+./scripts/install.sh --login --hooks
 ```
 
-The CLI is inside the app. Put it on your PATH, for example:
-
-```sh
-ln -s /Applications/Headroom.app/Contents/MacOS/headroom /usr/local/bin/headroom
-```
+That builds `Headroom.app` into `/Applications`, links the CLI to `~/.local/bin/headroom` (`--bin DIR` for elsewhere), starts the app now and at login, and installs the agent hooks. Leave out `--login` or `--hooks` to do those yourself later. It never edits your shell config; if the bin directory isn't on your PATH it prints the line to add. Run it again after `git pull` to upgrade. `./scripts/install.sh --uninstall` removes the hooks, the login item, the link and the app, and keeps your learned profiles.
 
 Homebrew, once the first release is out:
 
