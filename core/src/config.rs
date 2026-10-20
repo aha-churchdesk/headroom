@@ -41,7 +41,7 @@ pub struct Config {
     pub kill_grace_s: u64,
     /// Swap growth since a job started that gets it killed outright.
     pub swap_kill_growth: Bytes,
-    /// The queue holds while `load1 ≥ perf_cores × cpu_factor`.
+    /// The queue holds while `load1 ≥ cores × cpu_factor`.
     pub cpu_factor: f64,
     /// Commands whose normalised form matches one of these are queued.
     /// `*` matches any program: `* test` covers `pnpm test` and `cargo test`.

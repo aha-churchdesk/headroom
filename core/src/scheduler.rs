@@ -742,7 +742,7 @@ mod tests {
             mem_available: avail_gb * GIB,
             swap_used: 0,
             load1: 1.0,
-            perf_cores: 10,
+            cores: 10,
             cpu_pct: 10.0,
         }
     }

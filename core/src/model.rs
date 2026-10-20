@@ -33,9 +33,9 @@ pub struct Snapshot {
     pub mem_available: Bytes,
     pub swap_used: Bytes,
     pub load1: f64,
-    /// Performance cores. Zero means unknown, which disables the CPU rule
-    /// rather than blocking everything.
-    pub perf_cores: u32,
+    /// Physical cores, performance and efficiency. Zero means unknown, which
+    /// disables the CPU rule rather than blocking everything.
+    pub cores: u32,
     pub cpu_pct: f64,
 }
 

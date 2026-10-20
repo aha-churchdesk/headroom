@@ -50,10 +50,7 @@ fn probe() {
         gb(s.mem_available)
     );
     println!("swap       {:.1} GB", gb(s.swap_used));
-    println!(
-        "load       {:.1} on {} performance cores",
-        s.load1, s.perf_cores
-    );
+    println!("load       {:.1} on {} cores", s.load1, s.cores);
 }
 
 fn open_store() -> Store {

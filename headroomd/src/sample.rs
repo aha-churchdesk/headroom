@@ -57,7 +57,7 @@ pub struct Sampler {
     host: libc::mach_port_t,
     page: u64,
     total: Bytes,
-    perf_cores: u32,
+    cores: u32,
     /// (numer, denom): mach absolute time to nanoseconds.
     timebase: (u64, u64),
     prev_ticks: Option<[u32; 4]>,
@@ -76,16 +76,16 @@ impl Sampler {
     pub fn new() -> Self {
         let mut tb = libc::mach_timebase_info { numer: 1, denom: 1 };
         unsafe { libc::mach_timebase_info(&mut tb) };
-        let perf_cores = sysctl::<i32>("hw.perflevel0.physicalcpu")
-            .or_else(|| sysctl::<i32>("hw.physicalcpu"))
-            .unwrap_or(0)
-            .max(0) as u32;
+        // Every core, efficiency ones too: agents' load spreads over all of
+        // them, and counting only performance cores held the queue whenever
+        // a few sessions were busy.
+        let cores = sysctl::<i32>("hw.physicalcpu").unwrap_or(0).max(0) as u32;
         Self {
             // One send right for the process's life, not one per sample.
             host: unsafe { libc::mach_host_self() },
             page: unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(4096) as u64,
             total: sysctl::<u64>("hw.memsize").unwrap_or(0),
-            perf_cores,
+            cores,
             timebase: (tb.numer.max(1) as u64, tb.denom.max(1) as u64),
             prev_ticks: None,
             prev_cpu: HashMap::new(),
@@ -132,7 +132,7 @@ impl Sampler {
             mem_available: self.total.saturating_sub(used),
             swap_used: swap,
             load1,
-            perf_cores: self.perf_cores,
+            cores: self.cores,
             cpu_pct: self.cpu_pct(),
         }
     }
@@ -503,7 +503,10 @@ mod tests {
         assert!(s.mem_total > 1 << 30);
         assert!(s.mem_used > 0 && s.mem_used <= s.mem_total);
         assert_eq!(s.mem_available, s.mem_total - s.mem_used);
-        assert!(s.perf_cores > 0);
+        // All of them: on Apple Silicon more than the performance cores.
+        let perf = sysctl::<i32>("hw.perflevel0.physicalcpu").unwrap_or(0) as u32;
+        assert_eq!(s.cores, sysctl::<i32>("hw.physicalcpu").unwrap() as u32);
+        assert!(s.cores > perf, "{} cores, {perf} performance", s.cores);
     }
 
     #[test]

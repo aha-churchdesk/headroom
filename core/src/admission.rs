@@ -151,7 +151,7 @@ pub fn decide(
     // Jobs admitted this round haven't reached the load average yet; count
     // each as a busy core so one round can't overshoot.
     let mut load = snap.load1;
-    let cpu_limit = snap.perf_cores as f64 * cfg.cpu_factor;
+    let cpu_limit = snap.cores as f64 * cfg.cpu_factor;
 
     let mut admitted: Vec<(&Job, Bytes)> = Vec::new();
     let mut waiting_head: Option<(usize, Bytes)> = None;
@@ -187,11 +187,11 @@ pub fn decide(
             waiting_head = Some((i, free));
             break;
         }
-        let cpu_ok = idle || job.low() || snap.perf_cores == 0 || load < cpu_limit;
+        let cpu_ok = idle || job.low() || snap.cores == 0 || load < cpu_limit;
         if !cpu_ok {
             d.blocked = Some(Blocked::Cpu {
                 load,
-                cores: snap.perf_cores,
+                cores: snap.cores,
             });
             break;
         }
@@ -223,7 +223,7 @@ pub fn decide(
         let Some(takes) = job.median_ms.filter(|_| job.samples > 0) else {
             continue;
         };
-        let cpu_ok = job.low() || snap.perf_cores == 0 || load < cpu_limit;
+        let cpu_ok = job.low() || snap.cores == 0 || load < cpu_limit;
         if takes <= head_starts_in && job.estimate <= free && cpu_ok {
             d.admit.push(job.id);
             d.backfilled.push(job.id);
@@ -252,7 +252,7 @@ mod tests {
             mem_available: (avail_gb * GIB as f64) as Bytes,
             swap_used: 0,
             load1: 2.0,
-            perf_cores: 10,
+            cores: 10,
             cpu_pct: 20.0,
         }
     }
@@ -679,7 +679,7 @@ mod tests {
     fn unknown_core_count_disables_the_cpu_rule() {
         let s = Snapshot {
             load1: 99.0,
-            perf_cores: 0,
+            cores: 0,
             ..snap(30.0)
         };
         assert_eq!(

@@ -192,7 +192,7 @@ mod tests {
         Snapshot {
             pressure: p,
             mem_total: 36 * GIB,
-            perf_cores: 10,
+            cores: 10,
             ..Snapshot::default()
         }
     }

@@ -293,7 +293,7 @@ mod tests {
                 mem_total: 32 * GIB,
                 mem_used: 8 * GIB,
                 mem_available: 24 * GIB,
-                perf_cores: 8,
+                cores: 8,
                 ..Snapshot::default()
             }
         }

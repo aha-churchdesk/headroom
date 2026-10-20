@@ -40,7 +40,7 @@ impl Probe for Scripted {
             mem_available: 48 * GIB,
             swap_used: 0,
             load1: 0.0,
-            perf_cores: 8,
+            cores: 8,
             cpu_pct: 0.0,
         }
     }
