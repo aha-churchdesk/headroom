@@ -891,6 +891,15 @@ fn capture_ui_states() {
     });
     save(&mut app, "tuned");
     finish(tuned);
+    // The wrapper exits as soon as it has reported; the daemon may not have
+    // recorded the run yet.
+    wait_for("tuned run in history", 10, || {
+        d.ls()
+            .history
+            .iter()
+            .any(|h| h.tuned.is_some())
+            .then_some(())
+    });
     save(&mut app, "tuned-history");
     d.output(&["kill", &d.ls().running[0].id.to_string()]);
     finish(blocker);

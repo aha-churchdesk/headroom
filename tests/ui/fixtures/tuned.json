@@ -45,7 +45,7 @@
       "id": "3",
       "label": "sc-49123",
       "cmd": "vitest run",
-      "full_cmd": "/var/folders/g3/qjbw6xys4_1cb6zs26vqbjkr0000gn/T/hr-ui-tune-bin-27598/vitest run",
+      "full_cmd": "/var/folders/g3/qjbw6xys4_1cb6zs26vqbjkr0000gn/T/hr-ui-tune-bin-59499/vitest run",
       "cwd": "~/Projects/work-scheduler-mcp/headroom",
       "session": null,
       "key": "~/Projects/work-scheduler-mcp|headroom|vitest run",
@@ -54,8 +54,8 @@
       "low": false,
       "estimate": 423115044,
       "samples": 1,
-      "footprint": 538526440,
-      "peak": 538526440,
+      "footprint": 538510056,
+      "peak": 538510056,
       "runaway_at": 8589934592,
       "elapsed_s": 0,
       "frozen_s": 0,
@@ -89,6 +89,16 @@
       "guard": null
     }
   ],
+  "last_hour": {
+    "runs": 1,
+    "failed": 0,
+    "killed": 0,
+    "waited_s": 0,
+    "longest_wait_s": 0,
+    "shrunk": 0,
+    "went_first": 0,
+    "more": false
+  },
   "profiles": {
     "~/Projects/work-scheduler-mcp|headroom|vitest run": {
       "peaks": [

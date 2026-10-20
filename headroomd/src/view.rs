@@ -8,9 +8,10 @@
 use std::collections::{BTreeMap, HashSet};
 
 use headroom_core::config::Config;
-use headroom_core::model::{Bytes, Job, JobState, Outcome, Pressure};
+use headroom_core::model::{Bytes, HistoryEntry, Job, JobState, Outcome, Pressure};
 use headroom_core::profile::Profiles;
 use headroom_core::protocol::Listing;
+use headroom_core::scheduler::HISTORY;
 use serde_json::{Value, json};
 
 /// One unmanaged app's memory, for the "Other apps" page.
@@ -65,6 +66,25 @@ pub struct Extras<'a> {
 
 fn secs(ms: u64) -> u64 {
     ms / 1000
+}
+
+/// What finished in the hour before `wall`, from the history (newest
+/// first). The history keeps only the last `HISTORY` runs; when all of them
+/// are inside the hour the counts are a floor, and `more` says so.
+fn last_hour(history: &[HistoryEntry], wall: u64) -> Value {
+    let since = wall.saturating_sub(3600);
+    let recent: Vec<&HistoryEntry> = history.iter().filter(|h| h.ended_at >= since).collect();
+    let count = |f: &dyn Fn(&HistoryEntry) -> bool| recent.iter().filter(|h| f(h)).count();
+    json!({
+        "runs": count(&|h| h.outcome != Outcome::Cancelled),
+        "failed": count(&|h| h.outcome == Outcome::Exited && h.exit != Some(0)),
+        "killed": count(&|h| matches!(h.outcome, Outcome::Requeued | Outcome::GaveUp)),
+        "waited_s": secs(recent.iter().map(|h| h.waited_ms).sum()),
+        "longest_wait_s": secs(recent.iter().map(|h| h.waited_ms).max().unwrap_or(0)),
+        "shrunk": count(&|h| h.tuned.is_some()),
+        "went_first": count(&|h| h.ahead_of.is_some()),
+        "more": history.len() >= HISTORY && recent.len() == history.len(),
+    })
 }
 
 fn job_json(j: &Job, now: u64, cfg: &Config) -> Value {
@@ -232,6 +252,7 @@ pub fn state(l: &Listing, x: &Extras) -> Value {
         "queued": l.queued.iter().map(|j| job_json(j, l.now, cfg)).collect::<Vec<_>>(),
         "banners": banners(l, x),
         "history": history,
+        "last_hour": last_hour(&l.history, x.wall),
         "profiles": profiles,
         "others": x.others.iter().map(|o| json!({
             "name": o.name,
@@ -304,7 +325,7 @@ pub fn tray(l: &Listing) -> (u32, Option<[u8; 3]>, String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use headroom_core::model::{FrozenBy, GIB, HistoryEntry, JobSpec, Snapshot};
+    use headroom_core::model::{FrozenBy, GIB, JobSpec, Snapshot, Tuned};
 
     fn listing() -> Listing {
         let spec = JobSpec {
@@ -349,6 +370,7 @@ mod tests {
                     why: Some("memory still critical".into()),
                     tuned: None,
                     ahead_of: None,
+                    waited_ms: 0,
                 },
                 HistoryEntry {
                     id: 4,
@@ -364,6 +386,7 @@ mod tests {
                     why: None,
                     tuned: None,
                     ahead_of: None,
+                    waited_ms: 0,
                 },
             ],
         }
@@ -409,6 +432,79 @@ mod tests {
         assert_eq!(v["history"][0]["guard"]["action"], "requeued");
         assert_eq!(v["history"][0]["ended_ago_s"], 100);
         assert!(v["history"][1]["guard"].is_null());
+        assert_eq!(v["last_hour"]["runs"], 2);
+    }
+
+    fn ended(at: u64, outcome: Outcome, exit: Option<i32>, waited_ms: u64) -> HistoryEntry {
+        HistoryEntry {
+            id: at,
+            label: "r".into(),
+            cmd: "c".into(),
+            key: "/r|c".into(),
+            duration_ms: 1,
+            peak: 0,
+            estimate: 0,
+            exit,
+            ended_at: at,
+            outcome,
+            why: None,
+            tuned: None,
+            ahead_of: None,
+            waited_ms,
+        }
+    }
+
+    #[test]
+    fn last_hour_sums_what_finished_in_it() {
+        let wall = 10_000;
+        let mut shrunk = ended(9_000, Outcome::Exited, Some(0), 90_000);
+        shrunk.tuned = Some(Tuned {
+            workers: 3,
+            default: 9,
+        });
+        let mut first = ended(8_000, Outcome::Exited, Some(1), 0);
+        first.ahead_of = Some("r · e2e".into());
+        let h = vec![
+            ended(9_990, Outcome::Requeued, None, 30_000),
+            shrunk,
+            first,
+            ended(7_000, Outcome::Cancelled, None, 20_000),
+            ended(6_500, Outcome::Exited, None, 0),
+            ended(6_400, Outcome::GaveUp, None, 0),
+            ended(wall - 3600, Outcome::Exited, Some(0), 1_000),
+            ended(wall - 3601, Outcome::Exited, Some(2), 500_000),
+        ];
+        assert_eq!(
+            last_hour(&h, wall),
+            json!({
+                "runs": 6, "failed": 2, "killed": 2,
+                "waited_s": 141, "longest_wait_s": 90,
+                "shrunk": 1, "went_first": 1, "more": false,
+            })
+        );
+    }
+
+    #[test]
+    fn last_hour_says_when_the_history_is_too_short_to_cover_it() {
+        let quiet = last_hour(&[], 5_000);
+        assert_eq!(
+            (quiet["runs"].as_u64(), quiet["waited_s"].as_u64()),
+            (Some(0), Some(0))
+        );
+        assert_eq!(quiet["more"], false);
+        let full: Vec<_> = (0..HISTORY as u64)
+            .map(|i| ended(5_000 - i, Outcome::Exited, Some(0), 0))
+            .collect();
+        assert_eq!(last_hour(&full, 5_000)["more"], true);
+        let mut older = full.clone();
+        older.last_mut().unwrap().ended_at = 1_000;
+        let v = last_hour(&older, 5_000);
+        assert_eq!(
+            (v["more"].as_bool(), v["runs"].as_u64()),
+            (Some(false), Some(HISTORY as u64 - 1))
+        );
+        // Early in the clock's life the hour starts at zero, not before it.
+        assert_eq!(last_hour(&full, 30)["runs"], HISTORY as u64);
     }
 
     #[test]

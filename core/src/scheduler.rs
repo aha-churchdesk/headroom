@@ -219,7 +219,7 @@ impl Scheduler {
                     Outcome::Requeued,
                     Some(why),
                 );
-                self.requeue(e);
+                self.requeue(e, now);
                 fx.push(Effect::SaveHistory);
                 fx.extend(self.settle(now));
                 return fx;
@@ -548,7 +548,7 @@ impl Scheduler {
         }
     }
 
-    fn requeue(&mut self, mut e: Entry) {
+    fn requeue(&mut self, mut e: Entry, now: Millis) {
         let est = self.profiles.estimate(
             &e.job.spec.key,
             &e.job.spec.fallback_key,
@@ -566,6 +566,8 @@ impl Scheduler {
         (j.footprint, j.peak, j.cpu_pct, j.procs) = (0, 0, 0.0, 0);
         (j.started_at, j.frozen_at, j.frozen_by, j.pgid) = (None, None, None, None);
         j.was_frozen = false;
+        // Its next wait counts from here; the first one is in its history.
+        j.enqueued_at = now;
         e.told = None;
         let id = j.id;
         self.jobs.insert(id, e);
@@ -597,6 +599,10 @@ impl Scheduler {
             why,
             tuned: j.tuned,
             ahead_of: j.ahead_of.clone(),
+            waited_ms: j
+                .started_at
+                .unwrap_or(self.clock)
+                .saturating_sub(j.enqueued_at),
         });
         self.history.truncate(HISTORY);
     }
@@ -1049,6 +1055,29 @@ mod tests {
     }
 
     #[test]
+    fn history_records_how_long_each_job_waited() {
+        let mut s = sched(9);
+        s.enqueue(1, spec("a"), 0);
+        s.started(1, 100);
+        s.enqueue(2, spec("b"), 0);
+        s.started(2, 200);
+        s.enqueue(3, spec("c"), 1_000);
+        s.enqueue(4, spec("d"), 2_000);
+        s.exited(1, Some(0), None, 5_000, 0);
+        s.started(3, 300);
+        assert_eq!(s.history[0].waited_ms, 0, "a started at once");
+        // Cancelled while queued: the wait up to then.
+        s.control(9, Control::Cancel { id: 4 }, 5_500, 0);
+        assert_eq!(s.history[0].outcome, Outcome::Cancelled);
+        assert_eq!(s.history[0].waited_ms, 3_500);
+        s.exited(3, Some(0), None, 6_000, 0);
+        assert_eq!(
+            s.history[0].waited_ms, 4_000,
+            "c: queued at 1 s, granted at 5 s"
+        );
+    }
+
+    #[test]
     fn a_job_that_never_started_records_no_run() {
         let mut s = sched(20);
         s.enqueue(1, spec("a"), 0);
@@ -1164,6 +1193,10 @@ mod tests {
             low: false,
             workers: None,
         }));
+        // The second run's wait counts from the requeue, not the first enqueue.
+        s.started(1, 100);
+        s.exited(1, Some(0), None, 60_000, 0);
+        assert_eq!((s.history[0].waited_ms, s.history[1].waited_ms), (9_000, 0));
     }
 
     #[test]

@@ -217,4 +217,8 @@ pub struct HistoryEntry {
     pub tuned: Option<Tuned>,
     #[serde(default)]
     pub ahead_of: Option<String>,
+    /// Time in the queue before it started, or before it was cancelled or
+    /// its client left.
+    #[serde(default)]
+    pub waited_ms: u64,
 }
