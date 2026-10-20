@@ -88,8 +88,8 @@
     {
       "id": "1",
       "label": "fix-main",
-      "cmd": "exit",
-      "key": "~/Projects/work-scheduler-mcp|headroom|exit",
+      "cmd": "exit 3",
+      "key": "~/Projects/work-scheduler-mcp|headroom|exit 3",
       "duration_s": 0,
       "peak": 0,
       "estimate": 1610612736,
@@ -109,7 +109,7 @@
       "median_s": 0,
       "samples": 1
     },
-    "~/Projects/work-scheduler-mcp|headroom|exit": {
+    "~/Projects/work-scheduler-mcp|headroom|exit 3": {
       "peaks": [
         0
       ],
@@ -160,5 +160,6 @@
       "docker compose up"
     ]
   },
-  "classify": null
+  "classify": null,
+  "attached": false
 }

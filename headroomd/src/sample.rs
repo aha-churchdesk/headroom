@@ -18,6 +18,8 @@ use std::time::Instant;
 use headroom_core::model::{Bytes, Pressure, Snapshot};
 use headroom_core::scheduler::Usage;
 
+use crate::view::{AppUsage, ProcInfo};
+
 const PROC_ALL_PIDS: u32 = 1;
 const PROC_PGRP_ONLY: u32 = 2;
 
@@ -229,43 +231,220 @@ pub fn app_name(path: &str) -> String {
     }
 }
 
-/// Memory by app, largest first, leaving out the process groups Headroom
-/// manages. Processes we may not inspect (other users', the kernel's) are
-/// skipped.
-pub fn top_apps(skip_pgids: &[i32], limit: usize) -> Vec<crate::view::AppUsage> {
-    let mut by_app: HashMap<String, (Bytes, u32)> = HashMap::new();
-    for pid in list_pids(PROC_ALL_PIDS, 0) {
+/// Processes listed per app on the "Other apps" page.
+const PER_APP: usize = 6;
+/// Ancestors walked looking for what started a process.
+const MAX_DEPTH: usize = 10;
+
+fn footprint(pid: i32) -> Option<Bytes> {
+    let mut ri: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        libc::proc_pid_rusage(
+            pid,
+            libc::RUSAGE_INFO_V4,
+            (&mut ri as *mut libc::rusage_info_v4).cast(),
+        )
+    };
+    (rc == 0).then_some(ri.ri_phys_footprint)
+}
+
+fn exe_path(pid: i32) -> Option<String> {
+    let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())
+}
+
+fn ppid(pid: i32) -> Option<i32> {
+    let mut info: libc::proc_bsdshortinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdshortinfo>() as libc::c_int;
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDT_SHORTBSDINFO,
+            0,
+            (&mut info as *mut libc::proc_bsdshortinfo).cast(),
+            size,
+        )
+    };
+    (n == size).then_some(info.pbsi_ppid as i32)
+}
+
+/// The process's working directory. Only for processes we may inspect.
+pub fn cwd(pid: i32) -> Option<String> {
+    let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            (&mut info as *mut libc::proc_vnodepathinfo).cast(),
+            size,
+        )
+    };
+    if n != size {
+        return None;
+    }
+    // libc spells MAXPATHLEN chars as 32 × 32.
+    let bytes: Vec<u8> = info
+        .pvi_cdir
+        .vip_path
+        .iter()
+        .flatten()
+        .take_while(|&&c| c != 0)
+        .map(|&c| c as u8)
+        .collect();
+    (!bytes.is_empty()).then(|| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// The process's arguments, from `kern.procargs2`: argc, the executable
+/// path, NUL padding, then argc NUL-terminated arguments (then the
+/// environment, which is not read). Only for processes we may inspect.
+pub fn args(pid: i32) -> Option<Vec<String>> {
+    let max: libc::c_int = sysctl("kern.argmax")?;
+    let mut buf = vec![0u8; max as usize];
+    let mut len = buf.len();
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    let rc = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            buf.as_mut_ptr().cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 || len < 4 {
+        return None;
+    }
+    parse_procargs(&buf[..len])
+}
+
+fn parse_procargs(buf: &[u8]) -> Option<Vec<String>> {
+    let argc = i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?);
+    let mut rest = &buf[4..];
+    // The executable path, then padding.
+    let end = rest.iter().position(|&b| b == 0)?;
+    rest = &rest[end..];
+    let start = rest.iter().position(|&b| b != 0)?;
+    rest = &rest[start..];
+    let args: Vec<String> = rest
+        .split(|&b| b == 0)
+        .take(argc.max(0) as usize)
+        .map(|a| String::from_utf8_lossy(a).into_owned())
+        .collect();
+    (!args.is_empty()).then_some(args)
+}
+
+/// Up to and including the outermost `.app`, or the path itself.
+pub fn bundle_path(path: &str) -> String {
+    match path.find(".app/") {
+        Some(i) => path[..i + 4].to_string(),
+        None => path.to_string(),
+    }
+}
+
+/// A process's name for people: its app, or the name it was started as.
+/// Claude Code's executable is a file named after its version (2.1.304),
+/// and /bin/sh is bash underneath; argv[0] says "claude" and "sh".
+fn display_name(pid: i32, path: &str) -> String {
+    if path.contains(".app/") {
+        return app_name(path);
+    }
+    args(pid)
+        .and_then(|a| a.into_iter().next())
+        .map(|a0| {
+            a0.trim_start_matches('-')
+                .rsplit('/')
+                .next()
+                .unwrap_or("")
+                .to_string()
+        })
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| app_name(path))
+}
+
+/// What started a process: its parent's name, the grandparent's and so on,
+/// up to the first app (a Terminal, an editor, Claude) or launchd. Repeats
+/// are folded: `node › node › zsh` reads `node › zsh`.
+pub fn started_by(pid: i32) -> Vec<String> {
+    let mut chain: Vec<String> = Vec::new();
+    let mut p = ppid(pid);
+    while let Some(parent) = p.filter(|_| chain.len() < MAX_DEPTH) {
+        if parent <= 1 {
+            chain.push("launchd".into());
+            break;
+        }
+        let Some(path) = exe_path(parent) else { break };
+        let name = display_name(parent, &path);
+        if chain.last() != Some(&name) {
+            chain.push(name);
+        }
+        if path.contains(".app/") {
+            break;
+        }
+        p = ppid(parent);
+    }
+    chain
+}
+
+fn proc_info(pid: i32, bytes: Bytes, path: &str) -> ProcInfo {
+    let cmd = args(pid).map_or_else(|| path.to_string(), |a| headroom_core::shell::join(&a));
+    ProcInfo {
+        pid,
+        bytes,
+        cmd,
+        cwd: cwd(pid).filter(|c| c != "/"),
+        started_by: started_by(pid),
+    }
+}
+
+/// Every process id on the machine.
+pub fn all_pids() -> Vec<i32> {
+    list_pids(PROC_ALL_PIDS, 0)
+}
+
+/// Memory by app among `pids`, largest first, leaving out the process
+/// groups Headroom manages. Processes we may not inspect (other users',
+/// the kernel's) are skipped. The largest apps get their largest processes
+/// listed in detail.
+pub fn top_apps(pids: &[i32], skip_pgids: &[i32], limit: usize) -> Vec<AppUsage> {
+    // (pid, footprint, executable path)
+    type Proc = (i32, Bytes, String);
+    let mut by_app: HashMap<String, Vec<Proc>> = HashMap::new();
+    for &pid in pids {
         if skip_pgids.contains(&unsafe { libc::getpgid(pid) }) {
             continue;
         }
-        let mut ri: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
-        let rc = unsafe {
-            libc::proc_pid_rusage(
-                pid,
-                libc::RUSAGE_INFO_V4,
-                (&mut ri as *mut libc::rusage_info_v4).cast(),
-            )
+        let (Some(bytes), Some(path)) = (footprint(pid), exe_path(pid)) else {
+            continue;
         };
-        if rc != 0 {
-            continue;
-        }
-        let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
-        let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
-        if n <= 0 {
-            continue;
-        }
-        let path = String::from_utf8_lossy(&buf[..n as usize]).into_owned();
-        let e = by_app.entry(app_name(&path)).or_default();
-        e.0 += ri.ri_phys_footprint;
-        e.1 += 1;
+        by_app
+            .entry(app_name(&path))
+            .or_default()
+            .push((pid, bytes, path));
     }
-    let mut v: Vec<crate::view::AppUsage> = by_app
-        .into_iter()
-        .map(|(name, (bytes, procs))| crate::view::AppUsage { name, bytes, procs })
-        .collect();
-    v.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.name.cmp(&b.name)));
+    let mut v: Vec<(String, Vec<Proc>)> = by_app.into_iter().collect();
+    let total = |p: &[Proc]| p.iter().map(|x| x.1).sum::<Bytes>();
+    v.sort_by(|a, b| total(&b.1).cmp(&total(&a.1)).then_with(|| a.0.cmp(&b.0)));
     v.truncate(limit);
-    v
+    v.into_iter()
+        .map(|(name, mut procs)| {
+            procs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            AppUsage {
+                bytes: total(&procs),
+                procs: procs.len() as u32,
+                path: bundle_path(&procs[0].2),
+                top: procs
+                    .iter()
+                    .take(PER_APP)
+                    .map(|(pid, bytes, path)| proc_info(*pid, *bytes, path))
+                    .collect(),
+                name,
+            }
+        })
+        .collect()
 }
 
 fn pids_in_group(pgid: i32) -> Vec<i32> {
@@ -359,17 +538,85 @@ mod tests {
 
     #[test]
     fn top_apps_finds_this_test_and_respects_the_skip_list() {
-        let apps = top_apps(&[], 1000);
+        let apps = top_apps(&all_pids(), &[], 1000);
         assert!(!apps.is_empty());
         assert!(
             apps.windows(2).all(|w| w[0].bytes >= w[1].bytes),
             "largest first"
         );
         let me = unsafe { libc::getpgid(0) };
-        let without_me = top_apps(&[me], 1000);
-        let procs = |v: &[crate::view::AppUsage]| v.iter().map(|a| a.procs).sum::<u32>();
+        let without_me = top_apps(&all_pids(), &[me], 1000);
+        let procs = |v: &[AppUsage]| v.iter().map(|a| a.procs).sum::<u32>();
         assert!(procs(&without_me) < procs(&apps));
-        assert_eq!(top_apps(&[], 3).len(), 3);
+        assert_eq!(top_apps(&all_pids(), &[], 3).len(), 3);
+        assert!(
+            apps.iter()
+                .all(|a| !a.top.is_empty() && a.top.len() <= PER_APP)
+        );
+    }
+
+    #[test]
+    fn a_process_says_what_it_runs_where_and_who_started_it() {
+        let dir = std::env::temp_dir().join(format!("hr-procinfo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut child = Command::new("/bin/sleep")
+            .arg("30")
+            .current_dir(&dir)
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let apps = top_apps(&[pid], &[], 10);
+        assert_eq!(apps.len(), 1);
+        let (app, p) = (&apps[0], &apps[0].top[0]);
+        assert_eq!(
+            (app.name.as_str(), app.path.as_str()),
+            ("sleep", "/bin/sleep")
+        );
+        assert_eq!((p.pid, p.cmd.as_str()), (pid, "/bin/sleep 30"));
+        let real = std::fs::canonicalize(&dir).unwrap();
+        assert_eq!(p.cwd.as_deref(), real.to_str());
+        let me = app_name(&std::env::current_exe().unwrap().display().to_string());
+        assert_eq!(p.started_by.first(), Some(&me), "{:?}", p.started_by);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(top_apps(&[pid], &[], 10).is_empty(), "gone");
+    }
+
+    #[test]
+    fn other_users_processes_give_what_they_can() {
+        // launchd: its memory and arguments are not ours to read.
+        assert_eq!(args(1), None);
+        assert_eq!(cwd(1), None);
+        assert_eq!(args(999_999), None);
+        assert!(started_by(999_999).is_empty());
+    }
+
+    #[test]
+    fn procargs_are_parsed_past_the_executable_and_padding() {
+        let mut buf = 2i32.to_ne_bytes().to_vec();
+        buf.extend(b"/usr/bin/node\0\0\0\0node\0a b.js\0PATH=/bin\0");
+        assert_eq!(
+            parse_procargs(&buf),
+            Some(vec!["node".into(), "a b.js".into()])
+        );
+        assert_eq!(parse_procargs(&[1, 0]), None, "too short");
+        let mut empty = 0i32.to_ne_bytes().to_vec();
+        empty.extend(b"/x\0\0y\0");
+        assert_eq!(parse_procargs(&empty), None);
+    }
+
+    #[test]
+    fn bundle_paths_stop_at_the_outermost_app() {
+        assert_eq!(
+            bundle_path(
+                "/Applications/Google Chrome.app/Contents/Frameworks/x.app/Contents/MacOS/x"
+            ),
+            "/Applications/Google Chrome.app"
+        );
+        assert_eq!(
+            bundle_path("/opt/homebrew/bin/node"),
+            "/opt/homebrew/bin/node"
+        );
     }
 
     #[test]

@@ -18,7 +18,7 @@
   "queued": [],
   "banners": [
     {
-      "id": "h4-1792493661",
+      "id": "h4-1792495026",
       "kind": "gave_up",
       "job_id": "4",
       "label": "sc-49201",
@@ -26,7 +26,7 @@
       "why": "memory still critical 1 s after freezing; peak 0.2 GB vs est 1.5 GB. The agent was told: exit 137."
     },
     {
-      "id": "h4-1792493656",
+      "id": "h4-1792495021",
       "kind": "requeued",
       "job_id": "4",
       "label": "sc-49201",
@@ -44,7 +44,7 @@
       "peak": 216236536,
       "estimate": 1610612736,
       "exit": null,
-      "ended_ago_s": 2,
+      "ended_ago_s": 1,
       "tuned": null,
       "ahead_of": null,
       "guard": {
@@ -57,11 +57,11 @@
       "label": "sc-49201",
       "cmd": "headroom-hog",
       "key": "~/Projects/work-scheduler-mcp|headroom|headroom-hog",
-      "duration_s": 2,
+      "duration_s": 3,
       "peak": 216236536,
       "estimate": 1610612736,
       "exit": null,
-      "ended_ago_s": 7,
+      "ended_ago_s": 6,
       "tuned": null,
       "ahead_of": null,
       "guard": {
@@ -103,8 +103,8 @@
     {
       "id": "1",
       "label": "fix-main",
-      "cmd": "exit",
-      "key": "~/Projects/work-scheduler-mcp|headroom|exit",
+      "cmd": "exit 3",
+      "key": "~/Projects/work-scheduler-mcp|headroom|exit 3",
       "duration_s": 0,
       "peak": 0,
       "estimate": 1610612736,
@@ -124,7 +124,7 @@
       "median_s": 0,
       "samples": 1
     },
-    "~/Projects/work-scheduler-mcp|headroom|exit": {
+    "~/Projects/work-scheduler-mcp|headroom|exit 3": {
       "peaks": [
         0
       ],
@@ -181,5 +181,6 @@
       "docker compose up"
     ]
   },
-  "classify": null
+  "classify": null,
+  "attached": false
 }

@@ -935,4 +935,27 @@ fn capture_ui_states() {
     for c in [running, head, ahead] {
         finish(c);
     }
+
+    // Other apps: a process Headroom didn't start, from a shell, in a
+    // project directory. Only it is listed, so nothing else on this machine
+    // ends up in the fixture.
+    let project = tmp("ui-others-project");
+    let mut outside = Command::new("/bin/sh")
+        .args(["-c", &format!("{HOG} 0.3 30; true")])
+        .current_dir(&project)
+        .spawn()
+        .unwrap();
+    let hog = wait_for("the hog under its shell", 5, || {
+        let out = Command::new("pgrep")
+            .args(["-P", &outside.id().to_string()])
+            .output()
+            .ok()?;
+        text(&out.stdout).trim().parse::<i32>().ok()
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    app.refresh_others_among(&[outside.id() as i32, hog]);
+    save(&mut app, "others");
+    outside.kill().unwrap();
+    unsafe { libc::kill(hog, libc::SIGKILL) };
+    outside.wait().unwrap();
 }

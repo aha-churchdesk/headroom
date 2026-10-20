@@ -52,7 +52,7 @@
       "key": "~/Projects/work-scheduler-mcp|headroom|vitest run",
       "duration_s": 4,
       "peak": 538510056,
-      "estimate": 423102178,
+      "estimate": 423115044,
       "exit": 0,
       "ended_ago_s": 0,
       "tuned": {
@@ -68,7 +68,7 @@
       "cmd": "vitest run",
       "key": "~/Projects/work-scheduler-mcp|headroom|vitest run",
       "duration_s": 4,
-      "peak": 538493672,
+      "peak": 538510056,
       "estimate": 1610612736,
       "exit": 0,
       "ended_ago_s": 4,
@@ -80,7 +80,7 @@
   "profiles": {
     "~/Projects/work-scheduler-mcp|headroom|vitest run": {
       "peaks": [
-        538493672,
+        538510056,
         538510056
       ],
       "p90": 895877616,
@@ -130,5 +130,6 @@
       "docker compose up"
     ]
   },
-  "classify": null
+  "classify": null,
+  "attached": false
 }

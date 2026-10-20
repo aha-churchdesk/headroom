@@ -1,0 +1,265 @@
+{
+  "system": {
+    "pressure": "normal",
+    "mem_total": 68719476736,
+    "mem_used": 17179869184,
+    "mem_available": 51539607552,
+    "swap_used": 0,
+    "cpu_pct": 0.0
+  },
+  "held": false,
+  "hooks": {
+    "claude": "installed",
+    "codex": "not_installed",
+    "pi": "absent"
+  },
+  "queue_reason": null,
+  "running": [],
+  "queued": [],
+  "banners": [],
+  "history": [
+    {
+      "id": "8",
+      "label": "browser-cd",
+      "cmd": "e2e.sh",
+      "key": "~/Projects/work-scheduler-mcp|headroom|e2e.sh",
+      "duration_s": 3,
+      "peak": 1075643496,
+      "estimate": 1075659880,
+      "exit": 0,
+      "ended_ago_s": 0,
+      "tuned": null,
+      "ahead_of": null,
+      "guard": null
+    },
+    {
+      "id": "7",
+      "label": "sc-49123",
+      "cmd": "e2e.sh",
+      "key": "~/Projects/work-scheduler-mcp|headroom|e2e.sh",
+      "duration_s": 3,
+      "peak": 1075627112,
+      "estimate": 1075659880,
+      "exit": 0,
+      "ended_ago_s": 4,
+      "tuned": null,
+      "ahead_of": null,
+      "guard": null
+    },
+    {
+      "id": "9",
+      "label": "fix-main",
+      "cmd": "lint.sh",
+      "key": "~/Projects/work-scheduler-mcp|headroom|lint.sh",
+      "duration_s": 0,
+      "peak": 0,
+      "estimate": 0,
+      "exit": 0,
+      "ended_ago_s": 6,
+      "tuned": null,
+      "ahead_of": "browser-cd · e2e.sh",
+      "guard": null
+    },
+    {
+      "id": "6",
+      "label": "work-scheduler-mcp",
+      "cmd": "lint.sh",
+      "key": "~/Projects/work-scheduler-mcp|headroom|lint.sh",
+      "duration_s": 0,
+      "peak": 0,
+      "estimate": 536870912,
+      "exit": 0,
+      "ended_ago_s": 7,
+      "tuned": null,
+      "ahead_of": null,
+      "guard": null
+    },
+    {
+      "id": "5",
+      "label": "work-scheduler-mcp",
+      "cmd": "e2e.sh",
+      "key": "~/Projects/work-scheduler-mcp|headroom|e2e.sh",
+      "duration_s": 3,
+      "peak": 1075643496,
+      "estimate": 1253977498,
+      "exit": 0,
+      "ended_ago_s": 7,
+      "tuned": null,
+      "ahead_of": null,
+      "guard": null
+    },
+    {
+      "id": "4",
+      "label": "work-scheduler-mcp",
+      "cmd": "lint.sh",
+      "key": "~/Projects/work-scheduler-mcp|headroom|lint.sh",
+      "duration_s": 0,
+      "peak": 0,
+      "estimate": 1073741824,
+      "exit": 0,
+      "ended_ago_s": 10,
+      "tuned": null,
+      "ahead_of": null,
+      "guard": null
+    },
+    {
+      "id": "3",
+      "label": "work-scheduler-mcp",
+      "cmd": "e2e.sh",
+      "key": "~/Projects/work-scheduler-mcp|headroom|e2e.sh",
+      "duration_s": 3,
+      "peak": 1075643496,
+      "estimate": 1432295117,
+      "exit": 0,
+      "ended_ago_s": 10,
+      "tuned": null,
+      "ahead_of": null,
+      "guard": null
+    },
+    {
+      "id": "2",
+      "label": "work-scheduler-mcp",
+      "cmd": "lint.sh",
+      "key": "~/Projects/work-scheduler-mcp|headroom|lint.sh",
+      "duration_s": 0,
+      "peak": 0,
+      "estimate": 1610612736,
+      "exit": 0,
+      "ended_ago_s": 13,
+      "tuned": null,
+      "ahead_of": null,
+      "guard": null
+    },
+    {
+      "id": "1",
+      "label": "work-scheduler-mcp",
+      "cmd": "e2e.sh",
+      "key": "~/Projects/work-scheduler-mcp|headroom|e2e.sh",
+      "duration_s": 3,
+      "peak": 1075659880,
+      "estimate": 1610612736,
+      "exit": 0,
+      "ended_ago_s": 14,
+      "tuned": null,
+      "ahead_of": null,
+      "guard": null
+    }
+  ],
+  "profiles": {
+    "~/Projects/work-scheduler-mcp|headroom|e2e.sh": {
+      "peaks": [
+        1075659880,
+        1075643496,
+        1075643496,
+        1075627112,
+        1075643496
+      ],
+      "p90": 1075659880,
+      "median_s": 3,
+      "samples": 5
+    },
+    "~/Projects/work-scheduler-mcp|headroom|lint.sh": {
+      "peaks": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "p90": 0,
+      "median_s": 0,
+      "samples": 4
+    }
+  },
+  "others": [
+    {
+      "name": "headroom-hog",
+      "bytes": 323650112,
+      "procs": 1,
+      "path": "~/Projects/work-scheduler-mcp/target/debug/headroom-hog",
+      "top": [
+        {
+          "pid": 37201,
+          "bytes": 323650112,
+          "cmd": "~/Projects/work-scheduler-mcp/target/debug/headroom-hog 0.3 30",
+          "cwd": "/private/var/folders/g3/qjbw6xys4_1cb6zs26vqbjkr0000gn/T/hr-ui-others-project-32474",
+          "started_by": [
+            "sh",
+            "e2e-c750b85913507a65",
+            "cargo",
+            "zsh",
+            "claude",
+            "zsh",
+            "login",
+            "cmux"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "bash",
+      "bytes": 1655168,
+      "procs": 1,
+      "path": "/bin/bash",
+      "top": [
+        {
+          "pid": 37188,
+          "bytes": 1655168,
+          "cmd": "/bin/sh -c '~/Projects/work-scheduler-mcp/target/debug/headroom-hog 0.3 30; true'",
+          "cwd": "/private/var/folders/g3/qjbw6xys4_1cb6zs26vqbjkr0000gn/T/hr-ui-others-project-32474",
+          "started_by": [
+            "e2e-c750b85913507a65",
+            "cargo",
+            "zsh",
+            "claude",
+            "zsh",
+            "login",
+            "cmux"
+          ]
+        }
+      ]
+    }
+  ],
+  "settings": {
+    "headroom": 51002736640,
+    "kill_mode": "freeze_kill",
+    "wait_cap_s": 480,
+    "default_estimate": 1610612736,
+    "start_at_login": false,
+    "tune": true,
+    "backfill": true,
+    "backfill_skips": 3,
+    "backfill_wait_s": 300,
+    "login_managed_by_brew": false,
+    "patterns": [
+      "* test",
+      "* build",
+      "* e2e",
+      "* typecheck",
+      "vitest",
+      "jest",
+      "playwright",
+      "tsc",
+      "nx",
+      "turbo",
+      "next build",
+      "xcodebuild",
+      "cargo clippy",
+      "gradle",
+      "pytest"
+    ],
+    "excluded": [
+      "dev",
+      "serve",
+      "start",
+      "watch",
+      "preview",
+      "storybook",
+      "--watch",
+      "--watchAll",
+      "--ui",
+      "docker compose up"
+    ]
+  },
+  "classify": null,
+  "attached": false
+}

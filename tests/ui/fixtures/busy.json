@@ -35,9 +35,9 @@
       "footprint": 323650112,
       "peak": 323650112,
       "runaway_at": 8589934592,
-      "elapsed_s": 1,
+      "elapsed_s": 2,
       "frozen_s": 0,
-      "waited_s": 1,
+      "waited_s": 2,
       "cpu_pct": 0.0,
       "procs": 1,
       "retry": 0,
@@ -61,9 +61,9 @@
       "footprint": 1212656,
       "peak": 1212656,
       "runaway_at": 8589934592,
-      "elapsed_s": 1,
+      "elapsed_s": 2,
       "frozen_s": 0,
-      "waited_s": 1,
+      "waited_s": 2,
       "cpu_pct": 0.0,
       "procs": 1,
       "retry": 0,
@@ -91,7 +91,7 @@
       "runaway_at": 8589934592,
       "elapsed_s": 0,
       "frozen_s": 0,
-      "waited_s": 1,
+      "waited_s": 2,
       "cpu_pct": 0.0,
       "procs": 0,
       "retry": 0,
@@ -117,7 +117,7 @@
       "runaway_at": 8589934592,
       "elapsed_s": 0,
       "frozen_s": 0,
-      "waited_s": 1,
+      "waited_s": 2,
       "cpu_pct": 0.0,
       "procs": 0,
       "retry": 0,
@@ -171,5 +171,6 @@
       "docker compose up"
     ]
   },
-  "classify": null
+  "classify": null,
+  "attached": false
 }

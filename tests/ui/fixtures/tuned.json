@@ -45,14 +45,14 @@
       "id": "3",
       "label": "sc-49123",
       "cmd": "vitest run",
-      "full_cmd": "/var/folders/g3/qjbw6xys4_1cb6zs26vqbjkr0000gn/T/hr-ui-tune-bin-11909/vitest run",
+      "full_cmd": "/var/folders/g3/qjbw6xys4_1cb6zs26vqbjkr0000gn/T/hr-ui-tune-bin-32474/vitest run",
       "cwd": "~/Projects/work-scheduler-mcp/headroom",
       "session": null,
       "key": "~/Projects/work-scheduler-mcp|headroom|vitest run",
       "state": "running",
       "pinned": false,
       "low": false,
-      "estimate": 423102178,
+      "estimate": 423115044,
       "samples": 1,
       "footprint": 538510056,
       "peak": 538510056,
@@ -80,7 +80,7 @@
       "cmd": "vitest run",
       "key": "~/Projects/work-scheduler-mcp|headroom|vitest run",
       "duration_s": 4,
-      "peak": 538493672,
+      "peak": 538510056,
       "estimate": 1610612736,
       "exit": 0,
       "ended_ago_s": 1,
@@ -92,9 +92,9 @@
   "profiles": {
     "~/Projects/work-scheduler-mcp|headroom|vitest run": {
       "peaks": [
-        538493672
+        538510056
       ],
-      "p90": 1253239714,
+      "p90": 1253245176,
       "median_s": 4,
       "samples": 1
     }
@@ -141,5 +141,6 @@
       "docker compose up"
     ]
   },
-  "classify": null
+  "classify": null,
+  "attached": false
 }

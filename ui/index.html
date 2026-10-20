@@ -300,6 +300,15 @@ button:disabled{ cursor:default; opacity:.4; }
 .orow .l1 .name{ flex:1; }
 .orow .bar{ height:4px; border-radius:2px; background:var(--track); margin-top:4px; }
 .orow .bar div{ height:100%; border-radius:2px; background:var(--text-faint); }
+.orow .l1 .name{ cursor:pointer; }
+.orow .l1 .name::before{ content:"▸ "; color:var(--text-faint); }
+.orow.open .l1 .name::before{ content:"▾ "; }
+.odetail{ margin:6px 0 2px 12px; font-size:11px; }
+.odetail .where{ color:var(--text-faint); word-break:break-all; }
+.oproc{ padding:6px 0 0; border-top:1px solid var(--sep); margin-top:6px; }
+.oproc .l1{ display:flex; gap:8px; }
+.oproc .cmd{ word-break:break-all; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
+.oproc .k{ color:var(--text-dim); margin-top:2px; word-break:break-all; }
 .note-foot{ padding:10px 14px 14px; font-size:11px; color:var(--text-faint); }
 
 .set{ padding:10px 14px; border-bottom:1px solid var(--sep-soft); }
@@ -434,6 +443,7 @@ const UI = {
   page: "main",           // main | history | profile | others | settings
   profileKey: null,
   expanded: new Set(),
+  openApps: new Set(),    // Other apps rows showing their processes
   confirm: null,          // { key, until } — second click within 3 s acts
   drag: null,             // { id } while a queued row is being dragged
   drafts: { pattern: "", test: "" },
@@ -732,12 +742,26 @@ function renderProfile(S){
 
 function renderOthers(S){
   const max = Math.max(1, ...S.others.map(o => o.bytes));
-  return pageHead("Other apps") + S.others.map(o => `
-    <div class="orow">
-      <div class="l1 num"><span class="name">${esc(o.name)}</span>
+  return pageHead("Other apps") + S.others.map(o => {
+    const open = UI.openApps.has(o.name);
+    const top = o.top || [];
+    return `
+    <div class="orow ${open ? "open" : ""}">
+      <div class="l1 num"><span class="name" data-act="expand_app" data-name="${esc(o.name)}">${esc(o.name)}</span>
         <span class="dim">${o.procs} proc${o.procs === 1 ? "" : "s"}</span><b>${gb(o.bytes)} GB</b></div>
       <div class="bar"><div style="width:${o.bytes / max * 100}%"></div></div>
-    </div>`).join("") + `
+      ${open ? `<div class="odetail">
+        ${o.path ? `<div class="where mono">${esc(o.path)}</div>` : ""}
+        ${top.map(p => `<div class="oproc">
+          <div class="l1 num"><span class="dim">pid ${p.pid}</span><span style="flex:1"></span><b>${gb(p.bytes)} GB</b></div>
+          <div class="cmd mono" title="${esc(p.cmd)}">${esc(p.cmd)}</div>
+          ${p.cwd ? `<div class="k">in <span class="mono">${esc(p.cwd)}</span></div>` : ""}
+          ${p.started_by.length ? `<div class="k">started by ${p.started_by.map(esc).join(" › ")}</div>` : ""}
+        </div>`).join("")}
+        ${o.procs > top.length ? `<div class="k" style="margin-top:6px">and ${o.procs - top.length} smaller</div>` : ""}
+      </div>` : ""}
+    </div>`;
+  }).join("") + `
     <div class="note-foot">Not managed: the scheduler never pauses or kills these. They count toward
       memory in use, so they affect when queued jobs can start.</div>`;
 }
@@ -919,6 +943,7 @@ $("pop").addEventListener("click", (e) => {
   switch (d.act){
     case "goto":    UI.page = d.page; $("view").scrollTop = 0; break;
     case "expand":  UI.expanded.has(id) ? UI.expanded.delete(id) : UI.expanded.add(id); break;
+    case "expand_app": UI.openApps.has(d.name) ? UI.openApps.delete(d.name) : UI.openApps.add(d.name); break;
     case "profile": UI.profileFrom = UI.page === "main" ? "main" : "history";
                     UI.page = "profile"; UI.profileKey = d.key; break;
     case "snippet": UI.snippet = !UI.snippet; break;
@@ -1033,6 +1058,11 @@ const OTHERS = [
   { name:"Google Chrome", bytes:G(6.8), procs:41 },
   { name:"Cursor", bytes:G(3.9), procs:18 },
   { name:"Docker", bytes:G(3.1), procs:6 },
+  { name:"node", bytes:G(2.4), procs:5, path:"/opt/homebrew/bin/node", top:[
+    { pid:4121, bytes:G(1.6), cmd:"node ~/Projects/browser-churchdesk/node_modules/typescript/lib/tsserver.js --stdio",
+      cwd:"~/Projects/browser-churchdesk", started_by:["Cursor"] },
+    { pid:5310, bytes:G(0.6), cmd:"node ~/Projects/form-service/node_modules/.bin/vite", cwd:"~/Projects/form-service",
+      started_by:["pnpm", "zsh", "cmux"] } ] },
   { name:"Slack", bytes:G(1.2), procs:7 },
   { name:"cmux", bytes:G(0.9), procs:12 },
   { name:"Postgres.app", bytes:G(0.6), procs:9 },

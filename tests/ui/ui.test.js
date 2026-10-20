@@ -42,6 +42,7 @@ const history = ui.fixture('history');
 const tuned = ui.fixture('tuned');
 const tunedHistory = ui.fixture('tuned-history');
 const backfill = ui.fixture('backfill');
+const others = ui.fixture('others');
 
 // ── the main view ─────────────────────────────────────────────────────────
 
@@ -115,6 +116,35 @@ test('a head passed over says how often and until when; the job that went first 
 test('a head never passed over shows no count', () => {
   ui.setState(busy);
   lacks(ui.view(), 'passed over');
+});
+
+test('other apps expand to what each process runs, where, and who started it', () => {
+  ui.setState(others);
+  ui.click({ act: 'goto', page: 'others' });
+  const hog = others.others.find(o => o.name === 'headroom-hog');
+  const p = hog.top[0];
+  lacks(ui.view(), `pid ${p.pid}`);
+  ui.click({ act: 'expand_app', name: 'headroom-hog' });
+  const v = ui.view();
+  has(v, hog.path);
+  has(v, `pid ${p.pid}`);
+  has(v, p.cmd);
+  has(v, `in ${p.cwd}`);
+  has(v, `started by ${p.started_by.join(' › ')}`);
+  eq(p.started_by[0], 'sh', 'its parent shell, by the name it was started as');
+  lacks(v, 'smaller', 'one process: nothing hidden');
+  // Collapsing hides it again; the other app was never opened.
+  ui.click({ act: 'expand_app', name: 'headroom-hog' });
+  lacks(ui.view(), `pid ${p.pid}`);
+  eq(ui.sent, [], 'expanding stays in the page');
+});
+
+test('an app with more processes than listed says how many are left out', () => {
+  const many = { ...others.others[0], procs: others.others[0].top.length + 4 };
+  ui.setState({ ...others, others: [many] });
+  ui.click({ act: 'goto', page: 'others' });
+  ui.click({ act: 'expand_app', name: many.name });
+  has(ui.view(), 'and 4 smaller');
 });
 
 // ── intents ───────────────────────────────────────────────────────────────

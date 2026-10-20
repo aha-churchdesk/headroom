@@ -19,6 +19,22 @@ pub struct AppUsage {
     pub name: String,
     pub bytes: Bytes,
     pub procs: u32,
+    /// The app bundle, or the executable for a bare command like `node`.
+    pub path: String,
+    /// Its largest processes, with what they run and who started them.
+    pub top: Vec<ProcInfo>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProcInfo {
+    pub pid: i32,
+    pub bytes: Bytes,
+    /// The command line, or the executable when it can't be read.
+    pub cmd: String,
+    /// Working directory, when it says something (not `/`).
+    pub cwd: Option<String>,
+    /// Parent, grandparent, … up to the first app or launchd.
+    pub started_by: Vec<String>,
 }
 
 /// Start-at-login as the page shows it.
@@ -217,7 +233,19 @@ pub fn state(l: &Listing, x: &Extras) -> Value {
         "banners": banners(l, x),
         "history": history,
         "profiles": profiles,
-        "others": x.others.iter().map(|o| json!({ "name": o.name, "bytes": o.bytes, "procs": o.procs })).collect::<Vec<_>>(),
+        "others": x.others.iter().map(|o| json!({
+            "name": o.name,
+            "bytes": o.bytes,
+            "procs": o.procs,
+            "path": o.path,
+            "top": o.top.iter().map(|p| json!({
+                "pid": p.pid,
+                "bytes": p.bytes,
+                "cmd": p.cmd,
+                "cwd": p.cwd,
+                "started_by": p.started_by,
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
         "settings": {
             "headroom": cfg.headroom,
             "kill_mode": cfg.kill_mode,

@@ -141,12 +141,35 @@ impl App {
 
     /// Walks every process, so only while the popover is open.
     pub fn refresh_others(&mut self) {
+        self.refresh_others_among(&sample::all_pids());
+    }
+
+    /// The "Other apps" page from just these processes. Paths under the
+    /// home directory are shown from `~`.
+    pub fn refresh_others_among(&mut self, pids: &[i32]) {
         let skip: Vec<i32> = self
             .listing
             .iter()
             .flat_map(|l| l.running.iter().filter_map(|j| j.pgid))
             .collect();
-        self.others = sample::top_apps(&skip, OTHERS);
+        let home = self.home.display().to_string();
+        let short = |s: &str| match s.strip_prefix(&home) {
+            Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => {
+                format!("~{rest}")
+            }
+            _ => s.to_string(),
+        };
+        self.others = sample::top_apps(pids, &skip, OTHERS)
+            .into_iter()
+            .map(|mut a| {
+                a.path = short(&a.path);
+                for p in &mut a.top {
+                    p.cmd = p.cmd.replace(&format!("{home}/"), "~/");
+                    p.cwd = p.cwd.as_deref().map(short);
+                }
+                a
+            })
+            .collect();
     }
 
     pub fn refresh_hooks(&mut self) {
