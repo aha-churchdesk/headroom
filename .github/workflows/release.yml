@@ -1,0 +1,77 @@
+name: Release
+
+# Push a tag like v0.1.0 to build, publish a GitHub Release, and bump the
+# Homebrew formula in the tap named by the TAP_REPO repository variable.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - run: mise exec -- rustup component add clippy rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check the tag matches the crate version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ "$tag" = "$crate" ] || { echo "tag v$tag but Cargo.toml says $crate"; exit 1; }
+
+      - name: Test
+        run: ./scripts/test.sh
+
+      - name: Build and package
+        id: pkg
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          mise exec -- cargo build --release --locked -p headroom -p headroomd
+          name="headroom-${ver}-aarch64-apple-darwin"
+          mkdir -p "dist/$name/bin"
+          cp target/release/headroom target/release/headroomd "dist/$name/bin/"
+          # Ad-hoc signature: Homebrew doesn't quarantine formula downloads,
+          # so no Developer ID is needed for them to run.
+          codesign --force --sign - "dist/$name/bin/headroom" "dist/$name/bin/headroomd"
+          if [ -x scripts/bundle.sh ]; then
+            ./scripts/bundle.sh && cp -R Headroom.app "dist/$name/"
+          fi
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          sha=$(shasum -a 256 "dist/$name.tar.gz" | cut -d' ' -f1)
+          echo "$sha  $name.tar.gz" > "dist/$name.tar.gz.sha256"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "ver=$ver" >> "$GITHUB_OUTPUT"
+
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/${{ steps.pkg.outputs.name }}.tar.gz" \
+            "dist/${{ steps.pkg.outputs.name }}.tar.gz.sha256" \
+            --title "Headroom ${{ steps.pkg.outputs.ver }}" --generate-notes
+
+      - name: Bump the Homebrew formula
+        if: vars.TAP_REPO != ''
+        env:
+          # Fine-grained token with contents: write on the tap repo only.
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/${{ vars.TAP_REPO }}.git" tap
+          mkdir -p tap/Formula
+          sed -e "s|@OWNER_REPO@|${GITHUB_REPOSITORY}|g" \
+              -e "s|@VERSION@|${{ steps.pkg.outputs.ver }}|g" \
+              -e "s|@SHA256@|${{ steps.pkg.outputs.sha }}|g" \
+              packaging/headroom.rb.in > tap/Formula/headroom.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/headroom.rb
+          git commit -m "headroom ${{ steps.pkg.outputs.ver }}"
+          git push

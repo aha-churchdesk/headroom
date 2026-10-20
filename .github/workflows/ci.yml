@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # Apple Silicon: the sampler reads macOS-only counters, and the e2e
+    # tests drive real process groups and signals.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      # Same Rust as local, from mise.toml.
+      - uses: jdx/mise-action@v2
+      # The UI tests run under plain node, which the runner image has.
+      - run: mise exec -- rustup component add clippy rustfmt llvm-tools
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tests, lint and coverage gate
+        run: ./scripts/test.sh --coverage
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          if [ -f target/coverage-summary.txt ]; then
+            { echo '### Coverage'; echo '```'; grep -E '^(Filename|TOTAL|core/|headroom/|headroomd/)' target/coverage-summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-html
+          path: target/llvm-cov/html
+          if-no-files-found: ignore
+
+      # Release build of both binaries, assembled into Headroom.app.
+      - name: Bundle
+        run: ./scripts/bundle.sh
