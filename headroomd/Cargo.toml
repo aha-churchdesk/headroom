@@ -1,0 +1,16 @@
+[package]
+name = "headroomd"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+headroom-core.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# The menu bar app, as in hour-tracker.
+objc2 = "0.6.4"
+objc2-app-kit = "0.3.2"
+tao = "0.36.0"
+tray-icon = "0.24.2"
+wry = "0.56.1"
