@@ -155,6 +155,33 @@ pub fn normalize(words: &[String]) -> Option<Normal> {
                     i += 1;
                 }
             }
+            // Version managers and project runners: `mise exec -- cargo test`.
+            "mise" | "rtx"
+                if matches!(words.get(i + 1).map(String::as_str), Some("exec" | "x")) =>
+            {
+                i += 2;
+                match words[i..].iter().position(|w| w == "--") {
+                    Some(dd) => i += dd + 1,
+                    // Without `--`: tool specs (node@20) and flags come first.
+                    None => {
+                        while words.get(i).is_some_and(|w| is_flag(w) || w.contains('@')) {
+                            i += 1;
+                        }
+                    }
+                }
+            }
+            "asdf" | "rbenv" | "pyenv" | "nodenv" | "bundle"
+                if words.get(i + 1).is_some_and(|w| w == "exec") =>
+            {
+                i += 2;
+            }
+            "uv" | "poetry" | "pipenv" if words.get(i + 1).is_some_and(|w| w == "run") => {
+                i += 2;
+                while words.get(i).is_some_and(|w| is_flag(w)) {
+                    i += 1;
+                }
+            }
+            "direnv" if words.get(i + 1).is_some_and(|w| w == "exec") => i += 3,
             _ => break,
         }
     }
@@ -587,6 +614,39 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(classify("pnpm test", &cfg), Class::Light);
+    }
+
+    #[test]
+    fn version_managers_and_runners_are_looked_through() {
+        let cargo_test = heavy("cargo test", "cargo");
+        assert_eq!(cls("mise exec -- cargo test -p core"), cargo_test);
+        assert_eq!(cls("mise x -- cargo test"), cargo_test);
+        assert_eq!(cls("mise exec rust@1.97 -- cargo test"), cargo_test);
+        assert_eq!(cls("mise exec rust@1.97 cargo test"), cargo_test);
+        assert_eq!(
+            cls("cd core && mise exec -- cargo test 2>&1 | tail -5"),
+            cargo_test
+        );
+        assert_eq!(cls("asdf exec cargo test"), cargo_test);
+        assert_eq!(cls("bundle exec rake test"), heavy("rake test", "rake"));
+        assert!(matches!(
+            cls("uv run --frozen pytest -x"),
+            Class::Heavy { .. }
+        ));
+        assert!(matches!(cls("poetry run pytest"), Class::Heavy { .. }));
+        assert!(matches!(
+            cls("direnv exec . pnpm test"),
+            Class::Heavy { .. }
+        ));
+        // Their other subcommands are not wrappers.
+        assert_eq!(cls("mise install"), Class::Light);
+        assert_eq!(cls("uv sync"), Class::Light);
+        assert_eq!(cls("mise exec --"), Class::Light, "nothing to run");
+        // A long-lived command stays long-lived behind a wrapper.
+        assert!(matches!(
+            cls("mise exec -- pnpm dev"),
+            Class::Excluded { .. }
+        ));
     }
 
     #[test]
