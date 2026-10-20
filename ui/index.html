@@ -1,0 +1,1230 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Work Scheduler</title>
+<style>
+/* ─────────────────────────────────────────────────────────────
+   Work Scheduler — menu bar popover UI
+   Self-contained: no build step, no dependencies, no network.
+   Runs standalone in a browser (POC mode) or embedded in wry.
+   ───────────────────────────────────────────────────────────── */
+
+:root{
+  --pop-w: 400px;
+  --pop-max-h: 640px;
+
+  --bg:        #ffffff;
+  --bg-elev:   #f2f2f7;
+  --bg-sunk:   #e9e9ee;
+  --text:      #1c1c1e;
+  --text-dim:  #8a8a8e;
+  --text-faint:#aeaeb2;
+  --sep:       rgba(0,0,0,.10);
+  --sep-soft:  rgba(0,0,0,.06);
+
+  --accent:    #3b82f6;
+  --good:      #10b981;
+  --warn:      #f59e0b;
+  --bad:       #ef4444;
+  --ice:       #38bdf8;
+  --track:     rgba(0,0,0,.07);
+
+  --radius: 10px;
+}
+
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:        #1e1e20;
+    --bg-elev:   #2c2c2e;
+    --bg-sunk:   #151517;
+    --text:      #f2f2f7;
+    --text-dim:  #98989d;
+    --text-faint:#6c6c70;
+    --sep:       rgba(255,255,255,.13);
+    --sep-soft:  rgba(255,255,255,.07);
+
+    --accent:    #60a5fa;
+    --good:      #34d399;
+    --warn:      #fbbf24;
+    --bad:       #f87171;
+    --ice:       #7dd3fc;
+    --track:     rgba(255,255,255,.09);
+  }
+}
+
+*{ box-sizing:border-box; margin:0; padding:0; }
+
+html,body{
+  font: 13px/1.45 -apple-system, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+}
+/* Paint the canvas so a rounding gap between 100vh and the window height
+   shows the popover's own colour rather than WKWebView's white. */
+html{ background: var(--bg); }
+
+/* Standalone POC chrome — hidden when embedded in the real app */
+body{
+  background: var(--bg-sunk);
+  min-height:100vh;
+  display:flex; align-items:flex-start; justify-content:center;
+  gap:24px; padding:28px 20px 60px;
+}
+body.live{ background:transparent; padding:0; display:block; }
+body.live #poc, body.live #stage .menubar{ display:none; }
+
+#poc{ width:212px; flex:0 0 auto; padding-top:4px; }
+#poc h2{
+  font-size:10px; letter-spacing:.09em; text-transform:uppercase;
+  color:var(--text-faint); font-weight:600; margin:0 0 8px 2px;
+}
+#poc .st{
+  display:block; width:100%; text-align:left; margin-bottom:4px;
+  padding:7px 10px; border-radius:7px; border:1px solid transparent;
+  background:transparent; color:var(--text-dim); cursor:pointer;
+  font:inherit; font-size:12px;
+}
+#poc .st:hover{ background:var(--bg-elev); color:var(--text); }
+#poc .st.on{ background:var(--bg); color:var(--text); border-color:var(--sep); font-weight:600; }
+#poc .st small{ display:block; color:var(--text-faint); font-size:10.5px; font-weight:400; }
+#poc .note{
+  margin-top:14px; padding:10px; font-size:11px; line-height:1.5;
+  color:var(--text-faint); border-top:1px solid var(--sep-soft);
+}
+#poc #sent{
+  margin-top:6px; max-height:180px; overflow:auto;
+  font: 10.5px/1.45 ui-monospace, "SF Mono", Menlo, monospace;
+  color:var(--text-dim); white-space:pre-wrap; word-break:break-all;
+}
+
+#stage{ display:flex; flex-direction:column; align-items:flex-end; gap:6px; }
+body.live #stage{ display:block; }
+
+/* POC only: a strip standing in for the macOS menu bar, to review the item */
+.menubar{
+  align-self:stretch; height:24px; border-radius:6px;
+  background:rgba(240,240,245,.85); color:#1c1c1e;
+  display:flex; align-items:center; justify-content:flex-end; gap:14px;
+  padding:0 10px; font-size:13px; border:1px solid var(--sep);
+}
+.menubar.dark{ background:rgba(40,40,44,.9); color:#f2f2f7; }
+.menubar .item{ display:flex; align-items:center; gap:5px; padding:1px 6px; border-radius:4px; }
+.menubar .item.open{ background:rgba(0,0,0,.12); }
+.menubar.dark .item.open{ background:rgba(255,255,255,.18); }
+.menubar .faux{ opacity:.45; font-size:12px; }
+.menubar canvas{ display:block; }
+
+/* ── The popover itself ───────────────────────────────────── */
+.popover{
+  width:var(--pop-w); max-height:var(--pop-max-h);
+  background:var(--bg);
+  border-radius:12px;
+  border:1px solid var(--sep);
+  box-shadow: 0 12px 40px rgba(0,0,0,.22), 0 2px 6px rgba(0,0,0,.10);
+  display:flex; flex-direction:column; overflow:hidden;
+}
+body.live .popover{
+  width:100%; max-height:none; height:100vh; border-radius:0; border:none; box-shadow:none;
+}
+
+button{ font:inherit; color:inherit; background:none; border:none; cursor:pointer; }
+button:disabled{ cursor:default; opacity:.4; }
+.mono{ font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size:11.5px; }
+.dim{ color:var(--text-dim); }
+.faint{ color:var(--text-faint); }
+.num{ font-variant-numeric:tabular-nums; }
+
+/* ── Header ───────────────────────────────────────────────── */
+.head{ padding:12px 14px 10px; border-bottom:1px solid var(--sep); flex:0 0 auto; }
+.head .row1{ display:flex; align-items:center; gap:10px; }
+.head .lbl{ font-size:11px; font-weight:600; color:var(--text-dim); width:52px; }
+.memtrack{ flex:1; height:8px; border-radius:4px; background:var(--track); overflow:hidden; position:relative; }
+.memtrack .fill{ position:absolute; inset:0 auto 0 0; border-radius:4px; }
+.memtrack .reserve{
+  position:absolute; top:0; bottom:0; right:0;
+  background: repeating-linear-gradient(135deg, transparent 0 3px, var(--sep) 3px 5px);
+}
+.head .memtxt{ font-size:12px; font-weight:600; min-width:92px; text-align:right; }
+.btn-hold{
+  font-size:11px; font-weight:600; padding:3px 9px; border-radius:6px;
+  border:1px solid var(--sep); background:var(--bg-elev);
+}
+.btn-hold.on{ background:var(--warn); border-color:transparent; color:#1c1c1e; }
+.head .row2{ display:flex; align-items:center; gap:8px; margin-top:7px; font-size:11.5px; color:var(--text-dim); }
+.pill{
+  font-size:10px; font-weight:700; letter-spacing:.06em; padding:1px 7px; border-radius:9px;
+  color:#fff;
+}
+.pill.normal{ background:var(--good); }
+.pill.warn{ background:var(--warn); color:#1c1c1e; }
+.pill.critical{ background:var(--bad); }
+.head .alert{
+  margin-top:8px; font-size:11.5px; padding:6px 9px; border-radius:7px;
+  background:color-mix(in srgb, var(--warn) 16%, transparent);
+  display:flex; justify-content:space-between; align-items:center; gap:8px;
+}
+.head .alert button{ font-size:11px; font-weight:600; color:var(--accent); white-space:nowrap; }
+
+/* ── Scroll body ──────────────────────────────────────────── */
+.body{ flex:1 1 auto; overflow:auto; min-height:0; }
+
+/* Guard banners */
+.banner{
+  margin:10px 12px 0; padding:9px 11px; border-radius:var(--radius);
+  font-size:12px; position:relative;
+}
+.banner.frozen{ background:color-mix(in srgb, var(--ice) 18%, transparent); }
+.banner.requeued{ background:color-mix(in srgb, var(--warn) 18%, transparent); }
+.banner.gave_up{ background:color-mix(in srgb, var(--bad) 16%, transparent); }
+.banner .t{ font-weight:600; padding-right:18px; }
+.banner .d{ color:var(--text-dim); font-size:11.5px; margin-top:1px; }
+.banner .acts{ display:flex; gap:6px; margin-top:7px; }
+.banner .x{ position:absolute; top:6px; right:8px; color:var(--text-dim); font-size:12px; }
+.chip-btn{
+  font-size:11px; font-weight:600; padding:3px 10px; border-radius:6px;
+  background:var(--bg); border:1px solid var(--sep);
+}
+.chip-btn.danger{ color:var(--bad); }
+.chip-btn.confirm{ background:var(--bad); color:#fff; border-color:transparent; }
+
+/* Sections */
+.sec{ padding:10px 0 4px; }
+.sec + .sec{ border-top:1px solid var(--sep-soft); }
+.sec-h{
+  display:flex; align-items:baseline; gap:8px; padding:0 14px 5px;
+  font-size:10.5px; letter-spacing:.07em; text-transform:uppercase; font-weight:700; color:var(--text-dim);
+}
+.sec-h .why{ text-transform:none; letter-spacing:0; font-weight:500; font-size:11.5px; color:var(--text-dim); }
+.sec-h .why.blocked{ color:var(--warn); }
+.empty{ padding:6px 14px 10px; color:var(--text-faint); font-size:12px; }
+
+/* Job rows */
+.job{ padding:7px 14px 8px; position:relative; }
+.job:hover{ background:var(--bg-elev); }
+.job .l1{ display:flex; align-items:baseline; gap:6px; min-width:0; }
+.job .name{ flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer; }
+.job .name b{ font-weight:600; }
+.job .name .cmd{ color:var(--text-dim); }
+.job .mem{ font-size:11.5px; color:var(--text-dim); white-space:nowrap; }
+.job .mem b{ color:var(--text); font-weight:600; }
+.job .mem .new{
+  font-size:9.5px; font-weight:700; letter-spacing:.05em; text-transform:uppercase;
+  padding:0 5px; border-radius:4px; background:var(--bg-sunk); color:var(--text-dim); margin-right:3px;
+}
+.job .l2{ display:flex; align-items:center; gap:9px; margin-top:5px; font-size:11px; color:var(--text-dim); }
+.job .l2 .meta{ white-space:nowrap; }
+.tag{ font-size:12px; }
+
+.fp{ flex:1; height:6px; border-radius:3px; background:var(--track); position:relative; }
+.fp .f{ position:absolute; inset:0 auto 0 0; border-radius:3px; background:var(--accent); }
+.fp.over .f{ background:var(--warn); }
+.fp.runaway .f{ background:var(--bad); }
+.fp.frozen .f{
+  background: repeating-linear-gradient(135deg, var(--ice) 0 4px, color-mix(in srgb, var(--ice) 55%, transparent) 4px 8px);
+}
+.fp .tick{ position:absolute; top:-3px; bottom:-3px; width:2px; margin-left:-1px; background:var(--text); opacity:.55; border-radius:1px; }
+
+.acts-i{ display:flex; gap:2px; }
+.ib{
+  width:22px; height:20px; border-radius:5px; font-size:11px; line-height:20px; text-align:center;
+  color:var(--text-dim);
+}
+.ib:hover{ background:var(--bg-sunk); color:var(--text); }
+.ib.on{ color:var(--text); background:var(--bg-sunk); }
+.ib.kill-confirm{ width:auto; padding:0 7px; background:var(--bad); color:#fff; font-weight:600; }
+/* Queued rows swap the estimate for their actions on hover, so the name
+   keeps the full width the rest of the time. */
+.job.queued .acts-i{ display:none; }
+.job.queued:hover .acts-i, .job.queued.expanded .acts-i{ display:flex; }
+.job.queued:hover .mem, .job.queued.expanded .mem{ display:none; }
+/* Emoji toggles are coloured either way; mute the off state so on reads as on. */
+.ib:not(.on) .emo{ filter:grayscale(1); opacity:.55; }
+
+.job.queued .l1{ align-items:center; }
+.handle{ color:var(--text-faint); cursor:grab; width:14px; text-align:center; font-size:12px; user-select:none; }
+.pos{ color:var(--text-faint); font-size:11px; width:12px; text-align:right; }
+.job.dragging{ opacity:.35; }
+.job.drop-before{ box-shadow: inset 0 2px 0 var(--accent); }
+.job.drop-after{ box-shadow: inset 0 -2px 0 var(--accent); }
+
+.detail{
+  margin-top:8px; padding:8px 10px; border-radius:8px; background:var(--bg-sunk);
+  display:grid; grid-template-columns:auto 1fr; gap:3px 10px; font-size:11px;
+}
+.detail .k{ color:var(--text-dim); }
+.detail .v{ word-break:break-all; }
+.detail .full{ grid-column:1 / -1; display:flex; gap:6px; margin-top:4px; }
+
+/* Footer nav */
+.foot{
+  flex:0 0 auto; display:flex; border-top:1px solid var(--sep);
+}
+.foot button{ flex:1; padding:9px 0; font-size:12px; color:var(--text-dim); }
+.foot button:hover{ background:var(--bg-elev); color:var(--text); }
+.foot button + button{ border-left:1px solid var(--sep-soft); }
+
+/* Drill-in pages */
+.pagehead{
+  display:flex; align-items:center; gap:8px; padding:9px 12px; border-bottom:1px solid var(--sep-soft);
+  position:sticky; top:0; background:var(--bg); z-index:1;
+}
+.pagehead .back{ color:var(--accent); font-size:12.5px; }
+.pagehead h3{ font-size:13px; font-weight:650; flex:1; text-align:center; margin-right:44px; }
+
+.hrow{ padding:7px 14px; cursor:pointer; }
+.hrow:hover{ background:var(--bg-elev); }
+.hrow .l1{ display:flex; gap:6px; align-items:baseline; }
+.hrow .l1 .name{ flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.hrow .l2{ font-size:11px; color:var(--text-dim); margin-top:1px; }
+.gtag{
+  font-size:9.5px; font-weight:700; letter-spacing:.04em; text-transform:uppercase;
+  padding:1px 6px; border-radius:4px; white-space:nowrap;
+}
+.gtag.ok{ color:var(--good); background:color-mix(in srgb, var(--good) 14%, transparent); }
+.gtag.fail{ color:var(--bad); background:color-mix(in srgb, var(--bad) 14%, transparent); }
+.gtag.guard{ color:#1c1c1e; background:var(--warn); }
+.gtag.user{ color:var(--text-dim); background:var(--bg-sunk); }
+
+.prof{ padding:12px 14px; }
+.prof .key{ font-size:11.5px; color:var(--text-dim); word-break:break-all; }
+.prof svg{ display:block; margin:12px 0 4px; width:100%; height:64px; }
+.stats{ display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-top:10px; }
+.stat{ background:var(--bg-elev); border-radius:8px; padding:7px 9px; }
+.stat .k{ font-size:10.5px; color:var(--text-dim); }
+.stat .v{ font-size:14px; font-weight:650; }
+
+.orow{ padding:7px 14px; }
+.orow .l1{ display:flex; gap:8px; align-items:baseline; }
+.orow .l1 .name{ flex:1; }
+.orow .bar{ height:4px; border-radius:2px; background:var(--track); margin-top:4px; }
+.orow .bar div{ height:100%; border-radius:2px; background:var(--text-faint); }
+.note-foot{ padding:10px 14px 14px; font-size:11px; color:var(--text-faint); }
+
+.set{ padding:10px 14px; border-bottom:1px solid var(--sep-soft); }
+.set .k{ font-weight:600; font-size:12.5px; }
+.set .h{ font-size:11px; color:var(--text-dim); margin-top:2px; }
+.set .ctl{ margin-top:7px; display:flex; align-items:center; gap:8px; }
+.stepper{ display:inline-flex; align-items:center; border:1px solid var(--sep); border-radius:7px; overflow:hidden; }
+.stepper button{ width:26px; height:24px; font-size:14px; color:var(--text-dim); }
+.stepper button:hover{ background:var(--bg-elev); color:var(--text); }
+.stepper span{ min-width:64px; text-align:center; font-weight:600; font-size:12px; border-left:1px solid var(--sep-soft); border-right:1px solid var(--sep-soft); line-height:24px; }
+.seg{ display:inline-flex; background:var(--bg-sunk); border-radius:7px; padding:2px; }
+.seg button{ padding:3px 10px; border-radius:5px; font-size:11.5px; color:var(--text-dim); }
+.seg button.on{ background:var(--bg); color:var(--text); font-weight:600; box-shadow:0 1px 2px rgba(0,0,0,.12); }
+.toggle{ width:34px; height:20px; border-radius:10px; background:var(--bg-sunk); position:relative; border:1px solid var(--sep); }
+.toggle::after{ content:""; position:absolute; top:1px; left:1px; width:16px; height:16px; border-radius:50%; background:#fff; box-shadow:0 1px 2px rgba(0,0,0,.25); transition:left .15s; }
+.toggle.on{ background:var(--good); border-color:transparent; }
+.toggle.on::after{ left:15px; }
+.pats{ margin-top:7px; display:flex; flex-wrap:wrap; gap:4px; }
+.pat{ display:inline-flex; align-items:center; gap:4px; padding:2px 4px 2px 7px; border-radius:5px; background:var(--bg-elev); }
+.pat button{ color:var(--text-faint); font-size:10px; padding:0 3px; }
+.pat button:hover{ color:var(--bad); }
+.pat.excl{ background:transparent; border:1px dashed var(--sep); color:var(--text-dim); }
+input.txt{
+  flex:1; font:inherit; font-size:12px; padding:4px 8px; border-radius:6px;
+  border:1px solid var(--sep); background:var(--bg); color:var(--text); outline:none; min-width:0;
+}
+input.txt:focus{ border-color:var(--accent); }
+.verdict{ margin-top:6px; font-size:11.5px; }
+.verdict.yes{ color:var(--good); }
+.verdict.no{ color:var(--text-dim); }
+.verdict.excl{ color:var(--warn); }
+pre.snip{
+  margin-top:8px; padding:8px 10px; border-radius:8px; background:var(--bg-sunk);
+  font: 10.5px/1.5 ui-monospace, "SF Mono", Menlo, monospace; white-space:pre; overflow:auto;
+}
+.agent{ margin-top:7px; }
+.agent .an{ font-weight:600; font-size:12px; margin-right:6px; }
+.agent .h{ margin-top:1px; }
+.quit{ padding:12px 14px 16px; display:flex; justify-content:space-between; align-items:center; font-size:11px; color:var(--text-faint); }
+</style>
+</head>
+<body>
+
+<div id="poc">
+  <h2>Prototype</h2>
+  <div id="stateList"></div>
+  <div class="note">
+    Standalone preview. The same file becomes the shipped UI —
+    it detects <code>window.ipc</code> at runtime and switches to live data.
+    <br><br>Add <code>?state=…</code> to the URL to deep-link a state.
+    <br><br>
+    <label><input type="checkbox" id="darkBar"> dark menu bar</label>
+    <br><br><b>Would send to Rust</b>
+    <div id="sent"></div>
+  </div>
+</div>
+
+<div id="stage">
+  <div class="menubar" id="menubar">
+    <span class="faux">⌃</span><span class="faux">Wi-Fi</span>
+    <span class="item open" id="trayItem"><canvas id="trayGlyph" width="36" height="32" style="width:18px;height:16px"></canvas><span id="trayTitle" class="num"></span></span>
+    <span class="faux">Tue 09:42</span>
+  </div>
+  <div class="popover" id="pop">
+    <div class="head" id="head"></div>
+    <div class="body" id="view"></div>
+    <div class="foot" id="foot"></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+/* ═══════════════════════════════════════════════════════════
+   1. Runtime bridge
+   Rust owns the facts and every decision (estimates, reasons,
+   runaway thresholds); this file only formats and sends intents.
+   ═══════════════════════════════════════════════════════════ */
+const LIVE = !!window.ipc;
+if (LIVE) document.body.classList.add("live");
+
+/** Rust calls this on every sample (1 s): window.__setState({...}) */
+window.__setState = (s) => { STATE = s; render(); };
+
+function send(msg){
+  if (LIVE) window.ipc.postMessage(JSON.stringify(msg));
+  else mockApply(msg);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   2. Formatting
+   ═══════════════════════════════════════════════════════════ */
+const GiB = 1024 ** 3;
+const gb = b => (b / GiB).toFixed(1).replace(/\.0$/, "");
+/** Profile keys are "repo path|subdir|command"; shown as "repo · subdir · command". */
+const keyLabel = k => String(k ?? "").split("|").map((p, i) => i === 0 ? p.split("/").filter(Boolean).pop() || p : p).join(" · ");
+const esc = s => String(s ?? "").replace(/[&<>"']/g,
+  c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+
+function dur(s){
+  s = Math.max(0, Math.round(s));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}`;
+  return `${Math.floor(s / 3600)}h${String(Math.floor(s % 3600 / 60)).padStart(2, "0")}`;
+}
+function ago(s){
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+  return `${Math.floor(s / 86400)} d ago`;
+}
+
+/** The queue header's one-line answer to "why is nothing starting?" */
+function reasonText(r){
+  if (!r) return "";
+  switch (r.kind){
+    case "memory":   return `next needs ${gb(r.need)} GB, ${gb(r.free)} GB free`;
+    case "pressure": return `memory pressure ${r.level.toUpperCase()}`;
+    case "cpu":      return `CPU busy, load ${r.load.toFixed(0)} / ${r.cores} cores`;
+    case "held":     return "held by you";
+    default:         return "";
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   3. UI-local state
+   Navigation, expansion and confirm timers never go to Rust:
+   they belong to this popover instance, not to the queue.
+   ═══════════════════════════════════════════════════════════ */
+let STATE = null;
+const UI = {
+  page: "main",           // main | history | profile | others | settings
+  profileKey: null,
+  expanded: new Set(),
+  confirm: null,          // { key, until } — second click within 3 s acts
+  drag: null,             // { id } while a queued row is being dragged
+  drafts: { pattern: "", test: "" },
+  snippet: false,
+};
+
+function armConfirm(key){
+  UI.confirm = { key, until: Date.now() + 3000 };
+  setTimeout(() => {
+    if (UI.confirm && UI.confirm.key === key && Date.now() >= UI.confirm.until){
+      UI.confirm = null; render();
+    }
+  }, 3050);
+}
+const confirming = key => UI.confirm && UI.confirm.key === key && Date.now() < UI.confirm.until;
+
+/* ═══════════════════════════════════════════════════════════
+   4. Render
+   ═══════════════════════════════════════════════════════════ */
+const $ = id => document.getElementById(id);
+
+function render(){
+  if (!STATE) return;
+  // Updates arrive every second. A rerender mid-drag would drop the drag, so
+  // defer it; the drop sends its own intent and the next tick catches up.
+  if (UI.drag) return;
+
+  const view = $("view");
+  const scroll = view.scrollTop;
+  const focus = document.activeElement && document.activeElement.id;
+  const caret = focus && document.activeElement.selectionStart;
+
+  $("head").innerHTML = renderHead(STATE);
+  view.innerHTML = UI.page === "main"     ? renderMain(STATE)
+                 : UI.page === "history"  ? renderHistory(STATE)
+                 : UI.page === "profile"  ? renderProfile(STATE)
+                 : UI.page === "others"   ? renderOthers(STATE)
+                 :                          renderSettings(STATE);
+  $("foot").innerHTML = UI.page === "main" ? renderFoot() : "";
+  $("foot").style.display = UI.page === "main" ? "" : "none";
+
+  // Keep the reader's place and the cursor across the 1 s rerender.
+  view.scrollTop = scroll;
+  if (focus && $(focus)){
+    $(focus).focus();
+    if (caret != null) $(focus).setSelectionRange(caret, caret);
+  }
+  if (!LIVE) renderTray(STATE);
+}
+
+function renderHead(S){
+  const m = S.system;
+  const usedPct = Math.min(100, m.mem_used / m.mem_total * 100);
+  const reservePct = Math.min(100, S.settings.headroom / m.mem_total * 100);
+  const color = { normal:"var(--accent)", warn:"var(--warn)", critical:"var(--bad)" }[m.pressure];
+  const gaps = AGENTS.filter(([k]) => S.hooks[k] && S.hooks[k] !== "installed" && S.hooks[k] !== "absent");
+  const alert = gaps.length
+    ? `<div class="alert"><span>⚠︎ ${gaps.map(([, n]) => n).join(" and ")}: heavy commands aren't gated yet.</span>
+         <button data-act="goto" data-page="settings">Set up</button></div>`
+    : "";
+  return `
+    <div class="row1">
+      <span class="lbl">Memory</span>
+      <div class="memtrack" title="Hatched: headroom kept free (${gb(S.settings.headroom)} GB)">
+        <div class="fill" style="width:${usedPct}%;background:${color}"></div>
+        <div class="reserve" style="width:${reservePct}%"></div>
+      </div>
+      <span class="memtxt num">${gb(m.mem_used)} / ${gb(m.mem_total)} GB</span>
+      <button class="btn-hold ${S.held ? "on" : ""}" data-act="hold"
+        title="${S.held ? "Start admitting jobs again" : "Stop starting new jobs; running jobs continue"}">
+        ${S.held ? "Held" : "Hold"}</button>
+    </div>
+    <div class="row2 num">
+      <span class="pill ${m.pressure}">${m.pressure.toUpperCase()}</span>
+      <span>${gb(m.mem_available)} GB available</span>·
+      <span>swap ${gb(m.swap_used)} GB</span>·
+      <span>CPU ${Math.round(m.cpu_pct)}%</span>
+    </div>
+    ${alert}`;
+}
+
+function renderMain(S){
+  return S.banners.map(renderBanner).join("") + `
+    <div class="sec">
+      <div class="sec-h">Running ${S.running.length || ""}</div>
+      ${S.running.length
+        ? S.running.map(renderRunning).join("")
+        : `<div class="empty">Nothing running · ${gb(S.system.mem_available)} GB available</div>`}
+    </div>
+    <div class="sec" id="queue">
+      <div class="sec-h">Queued ${S.queued.length || ""}
+        ${S.queued.length && S.queue_reason
+          ? `<span class="why blocked">· ${esc(reasonText(S.queue_reason))}</span>` : ""}
+      </div>
+      ${S.queued.length
+        ? S.queued.map((j, i) => renderQueued(j, i, S)).join("")
+        : `<div class="empty">Queue empty</div>`}
+    </div>`;
+}
+
+function renderBanner(b){
+  const killKey = "bkill:" + b.id;
+  const acts = b.kind === "frozen" ? `
+      <button class="chip-btn" data-act="resume" data-id="${b.job_id}">Resume</button>
+      <button class="chip-btn ${confirming(killKey) ? "confirm" : "danger"}"
+        data-act="kill" data-id="${b.job_id}" data-confirm="${killKey}">
+        ${confirming(killKey) ? "Kill?" : "Kill"}</button>`
+    : b.kind === "requeued" ? `
+      <button class="chip-btn" data-act="pin" data-id="${b.job_id}" data-on="1"
+        title="Pinned jobs are never frozen or killed">Pin it</button>`
+    : "";
+  const title = { frozen:"Froze", requeued:"Killed and requeued", gave_up:"Gave up on" }[b.kind];
+  return `
+    <div class="banner ${b.kind}">
+      <div class="t">${b.kind === "frozen" ? "❄︎" : "⚠︎"} ${title} “${esc(b.cmd)}” (${esc(b.label)})</div>
+      <div class="d">${esc(b.why)}</div>
+      ${acts ? `<div class="acts">${acts}</div>` : ""}
+      <button class="x" data-act="dismiss" data-id="${b.id}" title="Dismiss">✕</button>
+    </div>`;
+}
+
+function fpBar(j){
+  const scale = Math.max(j.footprint, j.estimate, 1) * 1.15;
+  const cls = j.state === "frozen" ? "frozen"
+            : j.footprint > j.runaway_at ? "runaway"
+            : j.footprint > j.estimate ? "over" : "";
+  return `
+    <div class="fp ${cls}" title="Live ${gb(j.footprint)} GB · estimate ${gb(j.estimate)} GB · runaway above ${gb(j.runaway_at)} GB">
+      <div class="f" style="width:${j.footprint / scale * 100}%"></div>
+      <div class="tick" style="left:${j.estimate / scale * 100}%"></div>
+    </div>`;
+}
+
+function estLabel(j){
+  return j.samples === 0
+    ? `<span class="new" title="No profile yet: default estimate">new</span>est ${gb(j.estimate)} GB`
+    : `est ${gb(j.estimate)} GB`;
+}
+
+function jobName(j){
+  return `<span class="name" data-act="expand" data-id="${j.id}" title="${esc(j.full_cmd)}">
+    <b>${esc(j.label)}</b> <span class="cmd">· ${esc(j.cmd)}</span></span>`;
+}
+
+function marks(j){
+  return (j.low ? `<span class="tag" title="Low: background CPU priority, first to freeze">🐢</span>` : "")
+       + (j.pinned ? `<span class="tag" title="Pinned: never frozen or killed">📌</span>` : "");
+}
+
+function killBtn(j){
+  const key = "kill:" + j.id;
+  return confirming(key)
+    ? `<button class="ib kill-confirm" data-act="kill" data-id="${j.id}" data-confirm="${key}">Kill?</button>`
+    : `<button class="ib" data-act="kill" data-id="${j.id}" data-confirm="${key}" title="Kill (click twice)">✕</button>`;
+}
+
+function renderRunning(j){
+  const frozen = j.state === "frozen";
+  return `
+    <div class="job ${UI.expanded.has(j.id) ? "expanded" : ""}">
+      <div class="l1">
+        ${jobName(j)}${marks(j)}
+        <span class="mem num"><b>${gb(j.footprint)}</b> / ${estLabel(j)}</span>
+      </div>
+      <div class="l2 num">
+        ${fpBar(j)}
+        <span class="meta">${frozen ? `❄︎ frozen ${dur(j.frozen_s)}` : dur(j.elapsed_s)}</span>
+        <span class="meta">CPU ${Math.round(j.cpu_pct)}%</span>
+        <span class="acts-i">
+          ${frozen
+            ? `<button class="ib" data-act="resume" data-id="${j.id}" title="Resume">▶︎</button>`
+            : `<button class="ib" data-act="freeze" data-id="${j.id}" title="Pause (freeze)">⏸︎</button>`}
+          ${killBtn(j)}
+          <button class="ib ${j.pinned ? "on" : ""}" data-act="pin" data-id="${j.id}" data-on="${j.pinned ? 0 : 1}"
+            title="${j.pinned ? "Unpin" : "Pin: never freeze or kill this job"}"><span class="emo">📌</span></button>
+        </span>
+      </div>
+      ${UI.expanded.has(j.id) ? renderDetail(j) : ""}
+    </div>`;
+}
+
+function renderQueued(j, i, S){
+  return `
+    <div class="job queued ${UI.expanded.has(j.id) ? "expanded" : ""}" data-qid="${j.id}"
+      ${j.pinned ? "" : `draggable="true"`}>
+      <div class="l1">
+        ${j.pinned ? `<span class="handle" title="Pinned: runs next">📌</span>`
+                   : `<span class="handle" title="Drag to reorder">⋮⋮</span>`}
+        <span class="pos num">${i + 1}</span>
+        ${jobName(j)}${j.low ? marks({ low:true }) : ""}
+        ${j.retry ? `<span class="tag" title="Requeued after a guard kill (retry ${j.retry}/1)">↻</span>` : ""}
+        <span class="acts-i">
+          <button class="ib" data-act="top" data-id="${j.id}" title="Move to top" ${i === 0 ? "disabled" : ""}>⤒</button>
+          <button class="ib ${j.pinned ? "on" : ""}" data-act="pin" data-id="${j.id}" data-on="${j.pinned ? 0 : 1}"
+            title="${j.pinned ? "Unpin" : "Pin: run next, skip the memory check"}"><span class="emo">📌</span></button>
+          <button class="ib ${j.low ? "on" : ""}" data-act="low" data-id="${j.id}" data-on="${j.low ? 0 : 1}"
+            title="${j.low ? "Normal priority" : "Low: background CPU priority"}"><span class="emo">🐢</span></button>
+          <button class="ib" data-act="cancel" data-id="${j.id}" title="Cancel: the command exits without running">✕</button>
+        </span>
+        <span class="mem num">${estLabel(j)} · ${dur(j.waited_s)}</span>
+      </div>
+      ${UI.expanded.has(j.id) ? renderDetail(j) : ""}
+    </div>`;
+}
+
+function renderDetail(j){
+  return `
+    <div class="detail">
+      <span class="k">command</span><span class="v mono">${esc(j.full_cmd)}</span>
+      <span class="k">cwd</span><span class="v mono">${esc(j.cwd)}</span>
+      <span class="k">session</span><span class="v mono">${esc(j.session || "—")}</span>
+      <span class="k">profile</span><span class="v">${esc(keyLabel(j.key))} · ${j.samples} run${j.samples === 1 ? "" : "s"}</span>
+      ${j.state !== "queued" ? `
+        <span class="k">processes</span><span class="v num">${j.procs}</span>
+        <span class="k">peak</span><span class="v num">${gb(j.peak)} GB</span>` : ""}
+      ${j.retry ? `<span class="k">retry</span><span class="v">requeued after a guard kill (${j.retry}/1)</span>` : ""}
+      <div class="full">
+        <button class="chip-btn" data-act="copy" data-text="${esc(j.full_cmd)}">Copy command</button>
+        <button class="chip-btn" data-act="profile" data-key="${esc(j.key)}">Profile</button>
+      </div>
+    </div>`;
+}
+
+function renderFoot(){
+  return `
+    <button data-act="goto" data-page="history">History ▸</button>
+    <button data-act="goto" data-page="others">Other apps ▸</button>
+    <button data-act="goto" data-page="settings">Settings ▸</button>`;
+}
+
+function pageHead(title, back = "main"){
+  return `<div class="pagehead"><button class="back" data-act="goto" data-page="${back}">‹ Back</button><h3>${title}</h3></div>`;
+}
+
+function outcomeTag(r){
+  if (r.guard){
+    const g = r.guard;
+    const label = { frozen:"froze", killed:"killed", requeued:"requeued", gave_up:"gave up",
+                    cancelled:"cancelled", manual_kill:"you killed", disconnected:"disconnected" }[g.action] || g.action;
+    const cls = g.action === "cancelled" || g.action === "manual_kill" || g.action === "disconnected" ? "user" : "guard";
+    return `<span class="gtag ${cls}" title="${esc(g.why || "")}">${label}</span>`;
+  }
+  return r.exit === 0 ? `<span class="gtag ok">ok</span>` : `<span class="gtag fail">exit ${r.exit}</span>`;
+}
+
+function renderHistory(S){
+  return pageHead("History") + (S.history.length ? S.history.map(r => `
+    <div class="hrow" data-act="profile" data-key="${esc(r.key)}">
+      <div class="l1"><span class="name"><b>${esc(r.label)}</b> <span class="dim">· ${esc(r.cmd)}</span></span>${outcomeTag(r)}</div>
+      <div class="l2 num">${dur(r.duration_s)} · peak ${gb(r.peak)} / est ${gb(r.estimate)} GB · ${ago(r.ended_ago_s)}
+        ${r.guard && r.guard.why ? `<br>${esc(r.guard.why)}` : ""}</div>
+    </div>`).join("") : `<div class="empty">No runs yet</div>`);
+}
+
+function sparkline(peaks, p90){
+  const W = 360, H = 64, pad = 4;
+  // Scaled to the data's own range: from zero, run-to-run variation is a flat line.
+  const hi = Math.max(...peaks, p90) * 1.08, lo = Math.min(...peaks, p90) * 0.85;
+  const x = i => peaks.length === 1 ? W / 2 : pad + i * (W - 2 * pad) / (peaks.length - 1);
+  const y = v => H - pad - (v - lo) / (hi - lo || 1) * (H - 2 * pad);
+  const pts = peaks.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+    <line x1="0" x2="${W}" y1="${y(p90)}" y2="${y(p90)}" stroke="var(--warn)" stroke-dasharray="4 3" stroke-width="1"/>
+    <polyline points="${pts}" fill="none" stroke="var(--accent)" stroke-width="1.6" vector-effect="non-scaling-stroke"/>
+    ${peaks.map((v, i) => `<circle cx="${x(i)}" cy="${y(v)}" r="2.2" fill="var(--accent)"/>`).join("")}
+  </svg>`;
+}
+
+function renderProfile(S){
+  const p = S.profiles[UI.profileKey];
+  const back = UI.profileFrom || "history";
+  if (!p) return pageHead("Profile", back) + `<div class="empty">No runs recorded for this command yet.</div>`;
+  const key = "reset:" + UI.profileKey;
+  return pageHead("Profile", back) + `
+    <div class="prof">
+      <div class="key mono" title="${esc(UI.profileKey)}">${esc(keyLabel(UI.profileKey))}</div>
+      ${p.peaks.length ? sparkline(p.peaks, p.p90) : ""}
+      <div class="faint" style="font-size:10.5px">Peak memory of the last ${p.peaks.length} runs · dashed line = p90 estimate</div>
+      <div class="stats num">
+        <div class="stat"><div class="k">estimate (p90)</div><div class="v">${gb(p.p90)} GB</div></div>
+        <div class="stat"><div class="k">median time</div><div class="v">${dur(p.median_s)}</div></div>
+        <div class="stat"><div class="k">runs</div><div class="v">${p.samples}</div></div>
+      </div>
+      <div style="margin-top:14px">
+        <button class="chip-btn ${confirming(key) ? "confirm" : "danger"}" data-act="reset_profile"
+          data-key="${esc(UI.profileKey)}" data-confirm="${key}">
+          ${confirming(key) ? "Reset? Click again" : "Reset profile"}</button>
+        <span class="faint" style="font-size:11px;margin-left:6px">Next run starts from the default estimate.</span>
+      </div>
+    </div>`;
+}
+
+function renderOthers(S){
+  const max = Math.max(1, ...S.others.map(o => o.bytes));
+  return pageHead("Other apps") + S.others.map(o => `
+    <div class="orow">
+      <div class="l1 num"><span class="name">${esc(o.name)}</span>
+        <span class="dim">${o.procs} proc${o.procs === 1 ? "" : "s"}</span><b>${gb(o.bytes)} GB</b></div>
+      <div class="bar"><div style="width:${o.bytes / max * 100}%"></div></div>
+    </div>`).join("") + `
+    <div class="note-foot">Not managed: the scheduler never pauses or kills these. They count toward
+      memory in use, so they affect when queued jobs can start.</div>`;
+}
+
+const KILL_MODES = [
+  ["off", "Off", "Never pause or kill. Under pressure, jobs just stay queued."],
+  ["freeze", "Freeze", "Pause the newest low-priority job under critical pressure. Never kills."],
+  ["freeze_kill", "Freeze + kill", "Freeze first; if pressure stays critical, kill and requeue it once."],
+];
+
+function stepper(key, value, step, fmt, min, max){
+  return `<span class="stepper num">
+    <button data-act="set" data-key="${key}" data-val="${Math.max(min, value - step)}" ${value <= min ? "disabled" : ""}>−</button>
+    <span>${fmt(value)}</span>
+    <button data-act="set" data-key="${key}" data-val="${Math.min(max, value + step)}" ${value >= max ? "disabled" : ""}>+</button>
+  </span>`;
+}
+
+function renderSettings(S){
+  const c = S.settings;
+  const gaps = AGENTS.filter(([k]) => S.hooks[k] && S.hooks[k] !== "installed" && S.hooks[k] !== "absent");
+  const mode = KILL_MODES.find(m => m[0] === c.kill_mode);
+  const v = S.classify && S.classify.text === UI.drafts.test ? S.classify : null;
+  const verdict = !UI.drafts.test ? ""
+    : !v ? `<div class="verdict no">…</div>`
+    : v.result === "heavy" ? `<div class="verdict yes">✓ gated, profiled as <span class="mono">${esc(v.key)}</span></div>`
+    : v.result === "excluded" ? `<div class="verdict excl">long-lived (${esc(v.why)}), so not gated; counts as baseline load</div>`
+    : `<div class="verdict no">not gated, runs immediately</div>`;
+  return pageHead("Settings") + `
+    <div class="set">
+      <div class="k">Headroom</div>
+      <div class="h">Memory kept free before a new job may start.</div>
+      <div class="ctl">${stepper("headroom", c.headroom, 0.5 * GiB, b => gb(b) + " GB", 0, 16 * GiB)}</div>
+    </div>
+    <div class="set">
+      <div class="k">When memory runs out</div>
+      <div class="ctl"><span class="seg">${KILL_MODES.map(([k, l]) =>
+        `<button class="${k === c.kill_mode ? "on" : ""}" data-act="set" data-key="kill_mode" data-val="${k}">${l}</button>`).join("")}</span></div>
+      <div class="h" style="margin-top:6px">${mode[2]} Pinned jobs and other apps are never touched.</div>
+    </div>
+    <div class="set">
+      <div class="k">Foreground wait limit</div>
+      <div class="h">How long an agent's command waits in the queue before it's told to retry. Background commands wait as long as needed.</div>
+      <div class="ctl">${stepper("wait_cap_s", c.wait_cap_s, 60, s => Math.round(s / 60) + " min", 60, 540)}</div>
+    </div>
+    <div class="set">
+      <div class="k">Default estimate</div>
+      <div class="h">Assumed for a command with no history yet.</div>
+      <div class="ctl">${stepper("default_estimate", c.default_estimate, 0.5 * GiB, b => gb(b) + " GB", 0.5 * GiB, 16 * GiB)}</div>
+    </div>
+    <div class="set">
+      <div class="k">Heavy commands</div>
+      <div class="h">Commands matching these are queued. Dashed ones are long-lived and never queued.</div>
+      <div class="pats mono">
+        ${c.patterns.map(p => `<span class="pat">${esc(p)}<button data-act="remove_pattern" data-pattern="${esc(p)}" title="Remove">✕</button></span>`).join("")}
+        ${c.excluded.map(p => `<span class="pat excl" title="Long-lived: not queued">${esc(p)}</span>`).join("")}
+      </div>
+      <div class="ctl">
+        <input class="txt mono" id="patIn" placeholder="add pattern, e.g. bun test" value="${esc(UI.drafts.pattern)}" data-draft="pattern">
+        <button class="chip-btn" data-act="add_pattern" ${UI.drafts.pattern.trim() ? "" : "disabled"}>Add</button>
+      </div>
+      <div class="ctl">
+        <input class="txt mono" id="testIn" placeholder="test a command: pnpm vitest run src/a.test.ts" value="${esc(UI.drafts.test)}" data-draft="test">
+      </div>
+      ${verdict}
+    </div>
+    <div class="set">
+      <div class="ctl" style="margin-top:0;justify-content:space-between">
+        <div><div class="k">Start at login</div>
+          ${c.login_managed_by_brew ? `<div class="h">Managed by Homebrew: <span class="mono">brew services stop headroom</span> turns it off.</div>` : ""}</div>
+        <button class="toggle ${c.start_at_login ? "on" : ""}" data-act="set" data-key="start_at_login" data-val="${!c.start_at_login}"${c.login_managed_by_brew ? " disabled" : ""}></button>
+      </div>
+    </div>
+    <div class="set">
+      <div class="k">Agent hooks</div>
+      <div class="h">Each agent's hook routes its heavy shell commands through <span class="mono">headroom run</span>.</div>
+      ${AGENTS.map(([k, name, where]) => {
+        const st = S.hooks[k] || "absent";
+        const [cls, label, hint] = HOOK_STATUS[st];
+        return `<div class="agent">
+          <span class="an">${name}</span><span class="gtag ${cls}">${label}</span>
+          <div class="h">${st === "absent" ? "Not found on this Mac." : hint.replace("{where}", `<span class="mono">${where}</span>`)}</div>
+        </div>`;
+      }).join("")}
+      ${gaps.length ? `<pre class="snip">headroom hook install</pre>` : ""}
+      <div class="ctl">
+        ${gaps.length ? `<button class="chip-btn" data-act="copy" data-text="headroom hook install">Copy command</button>` : ""}
+        <button class="chip-btn" data-act="snippet">${UI.snippet ? "Hide JSON" : "Show JSON (manual setup)"}</button>
+        ${UI.snippet ? `<button class="chip-btn" data-act="copy" data-text="${esc(HOOK_SNIPPET)}">Copy</button>` : ""}
+      </div>
+      ${UI.snippet ? `<pre class="snip">${esc(HOOK_SNIPPET)}</pre>` : ""}
+    </div>
+    <div class="quit">
+      <span>Quitting stops the queue; commands then run ungated.</span>
+      <button class="chip-btn" data-act="quit">Quit</button>
+    </div>`;
+}
+
+const AGENTS = [
+  ["claude", "Claude Code", "~/.claude/settings.json"],
+  ["codex", "Codex", "~/.codex/hooks.json"],
+  ["pi", "pi", "~/.pi/agent/extensions/headroom.ts"],
+];
+// [tag class, tag label, hint]. Rust decides the status; this only words it.
+const HOOK_STATUS = {
+  installed:     ["ok",   "installed",     "Gated through {where}."],
+  not_installed: ["fail", "not installed", "Run <span class=\"mono\">headroom hook install</span>; it adds only its own entry to {where}."],
+  needs_review:  ["guard","needs review",  "Installed in {where}. Approve it in Codex before it runs."],
+  stale:         ["guard","stale path",    "{where} points at a headroom binary that is gone. Re-run <span class=\"mono\">headroom hook install</span>."],
+  absent:        ["user", "not found",     ""],
+};
+
+const HOOK_SNIPPET = `"hooks": {
+  "PreToolUse": [{
+    "matcher": "Bash",
+    "hooks": [{ "type": "command", "command": "headroom hook --agent claude" }]
+  }]
+}`;
+
+/* ═══════════════════════════════════════════════════════════
+   5. Menu bar item (POC preview)
+   Rust draws the real one; this is the reference it ports:
+   4 segments filled by memory used, coloured only off-normal
+   (template image while normal), title = running·queued.
+   ═══════════════════════════════════════════════════════════ */
+function trayModel(S){
+  const segs = Math.max(0, Math.min(4, Math.round(S.system.mem_used / S.system.mem_total * 4)));
+  const frozen = S.running.some(j => j.state === "frozen");
+  const n = S.running.length, q = S.queued.length;
+  const title = ((n || q) ? `${n}·${q}` : "") + (frozen ? " ❄︎" : "") + (S.held ? " ⏸︎" : "");
+  return { segs, level: S.system.pressure, title };
+}
+
+function renderTray(S){
+  const t = trayModel(S);
+  const dark = $("darkBar").checked;
+  $("menubar").classList.toggle("dark", dark);
+  const ink = t.level === "critical" ? "#ef4444" : t.level === "warn" ? "#f59e0b" : (dark ? "#f2f2f7" : "#1c1c1e");
+  const cv = $("trayGlyph"), g = cv.getContext("2d");
+  g.clearRect(0, 0, cv.width, cv.height);
+  for (let i = 0; i < 4; i++){
+    const x = 2 + i * 8, w = 6, h = 24, y = 4;
+    g.globalAlpha = i < t.segs ? 1 : .28;
+    g.fillStyle = ink;
+    g.beginPath(); g.roundRect(x, y, w, h, 2); g.fill();
+  }
+  g.globalAlpha = 1;
+  $("trayTitle").textContent = t.title;
+  $("trayTitle").style.color = t.level === "normal" ? "" : ink;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   6. Events — one delegated listener; elements carry data-act
+   ═══════════════════════════════════════════════════════════ */
+$("pop").addEventListener("click", (e) => {
+  const t = e.target.closest("[data-act]");
+  if (!t || t.disabled) return;
+  const d = t.dataset, id = d.id;
+
+  if (d.confirm && !confirming(d.confirm)){ armConfirm(d.confirm); render(); return; }
+  if (d.confirm) UI.confirm = null;
+
+  switch (d.act){
+    case "goto":    UI.page = d.page; $("view").scrollTop = 0; break;
+    case "expand":  UI.expanded.has(id) ? UI.expanded.delete(id) : UI.expanded.add(id); break;
+    case "profile": UI.profileFrom = UI.page === "main" ? "main" : "history";
+                    UI.page = "profile"; UI.profileKey = d.key; break;
+    case "snippet": UI.snippet = !UI.snippet; break;
+    case "hold":    send({ cmd:"hold", on: !STATE.held }); return;
+    case "freeze": case "resume": case "kill": case "cancel": case "top":
+                    send({ cmd: d.act, id }); return;
+    case "pin": case "low":
+                    send({ cmd: d.act, id, on: d.on === "1" }); return;
+    case "dismiss": send({ cmd:"dismiss", id }); return;
+    case "copy":    send({ cmd:"copy", text: d.text }); return;
+    case "reset_profile": send({ cmd:"reset_profile", key: d.key }); return;
+    case "set": {
+      const v = d.val === "true" ? true : d.val === "false" ? false
+              : isNaN(Number(d.val)) ? d.val : Number(d.val);
+      send({ cmd:"set", key: d.key, value: v }); return;
+    }
+    case "add_pattern": {
+      const p = UI.drafts.pattern.trim();
+      if (p){ UI.drafts.pattern = ""; send({ cmd:"add_pattern", pattern: p }); }
+      return;
+    }
+    case "remove_pattern": send({ cmd:"remove_pattern", pattern: d.pattern }); return;
+    case "quit":    send({ cmd:"quit" }); return;
+  }
+  render();
+});
+
+$("pop").addEventListener("input", (e) => {
+  const k = e.target.dataset.draft;
+  if (!k) return;
+  UI.drafts[k] = e.target.value;
+  // The classifier lives in Rust, so the verdict is asked for, not computed here.
+  if (k === "test" && e.target.value.trim()) send({ cmd:"classify", text: e.target.value });
+  render();
+});
+$("pop").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && e.target.dataset.draft === "pattern"){
+    const p = UI.drafts.pattern.trim();
+    if (p){ UI.drafts.pattern = ""; send({ cmd:"add_pattern", pattern: p }); }
+  }
+  if (e.key === "Escape" && UI.page !== "main"){ UI.page = "main"; render(); }
+});
+
+/* Drag to reorder. Pinned rows sit above every unpinned row, so a drop
+   is clamped to just below the last pinned one. */
+function dropIndex(e){
+  const rows = [...document.querySelectorAll("[data-qid]")];
+  const over = e.target.closest("[data-qid]");
+  if (!over) return null;
+  const i = rows.indexOf(over);
+  const r = over.getBoundingClientRect();
+  const after = e.clientY > r.top + r.height / 2;
+  return { over, after, to: i + (after ? 1 : 0) };
+}
+function clearDropMarks(){
+  document.querySelectorAll(".drop-before,.drop-after").forEach(n => n.classList.remove("drop-before", "drop-after"));
+}
+$("pop").addEventListener("dragstart", (e) => {
+  const row = e.target.closest("[data-qid]");
+  if (!row) return;
+  UI.drag = { id: row.dataset.qid };
+  row.classList.add("dragging");
+  e.dataTransfer.effectAllowed = "move";
+  e.dataTransfer.setData("text/plain", row.dataset.qid);
+});
+$("pop").addEventListener("dragover", (e) => {
+  if (!UI.drag) return;
+  const d = dropIndex(e);
+  if (!d) return;
+  e.preventDefault();
+  clearDropMarks();
+  d.over.classList.add(d.after ? "drop-after" : "drop-before");
+});
+$("pop").addEventListener("drop", (e) => {
+  if (!UI.drag) return;
+  e.preventDefault();
+  const d = dropIndex(e);
+  const id = UI.drag.id;
+  UI.drag = null;
+  clearDropMarks();
+  if (!d) return render();
+  const from = STATE.queued.findIndex(j => j.id === id);
+  const pinned = STATE.queued.filter(j => j.pinned).length;
+  // Removing the row first shifts every later index up by one.
+  let to = d.to > from ? d.to - 1 : d.to;
+  to = Math.max(pinned, to);
+  if (to === from) return render();
+  send({ cmd:"move", id, to });
+});
+$("pop").addEventListener("dragend", () => {
+  if (UI.drag){ UI.drag = null; clearDropMarks(); render(); }
+});
+
+/* ═══════════════════════════════════════════════════════════
+   7. POC scenarios + mock of what Rust would do with each intent
+   Design states for review only. Tests use state captured from
+   real headless runs, not these.
+   ═══════════════════════════════════════════════════════════ */
+const G = n => Math.round(n * GiB);
+
+const BASE_SETTINGS = {
+  headroom: G(2), kill_mode: "freeze_kill", wait_cap_s: 480, default_estimate: G(1.5),
+  start_at_login: true,
+  patterns: ["vitest", "jest", "playwright", "tsc", "pnpm test", "pnpm build", "nx run", "turbo run",
+             "next build", "cargo build", "cargo test", "xcodebuild", "docker build", "pytest"],
+  excluded: ["dev", "serve", "watch", "--watch", "docker compose up -d"],
+};
+
+const OTHERS = [
+  { name:"Google Chrome", bytes:G(6.8), procs:41 },
+  { name:"Cursor", bytes:G(3.9), procs:18 },
+  { name:"Docker", bytes:G(3.1), procs:6 },
+  { name:"Slack", bytes:G(1.2), procs:7 },
+  { name:"cmux", bytes:G(0.9), procs:12 },
+  { name:"Postgres.app", bytes:G(0.6), procs:9 },
+  { name:"Finder", bytes:G(0.2), procs:1 },
+  { name:"Music", bytes:G(0.15), procs:2 },
+];
+
+const PROFILES = {
+  "browser-churchdesk · vitest run": { peaks:[3.1,3.4,3.9,3.6,4.0,3.8,3.7,4.1,3.5,3.9].map(G), p90:G(4.1), median_s:142, samples:10 },
+  "fix-main · tsc --noEmit": { peaks:[1.1,1.2,1.3,1.2,1.1].map(G), p90:G(1.3), median_s:44, samples:5 },
+  "browser-churchdesk · playwright test": { peaks:[3.8,4.2,4.0].map(G), p90:G(4.2), median_s:410, samples:3 },
+  "browser-churchdesk · pnpm build": { peaks:[1.8,2.0,1.9,2.0].map(G), p90:G(2.0), median_s:95, samples:4 },
+};
+
+function job(o){
+  return Object.assign({
+    state:"running", pinned:false, low:false, footprint:0, peak:0, samples:5,
+    elapsed_s:0, frozen_s:0, waited_s:0, cpu_pct:0, procs:1, retry:0, session:"",
+  }, o, {
+    runaway_at: o.runaway_at ?? Math.max(2 * o.estimate, G(8)),
+    peak: o.peak ?? o.footprint,
+  });
+}
+
+const J = {
+  vitest: () => job({ id:"j41", label:"sc-49123", cmd:"vitest run", key:"browser-churchdesk · vitest run",
+    full_cmd:"cd apps/web && pnpm vitest run src/features/calendar", cwd:"~/Projects/browser-churchdesk.worktrees/sc-49123",
+    session:"a7d0…2e", estimate:G(4.1), footprint:G(3.8), peak:G(3.9), samples:10, elapsed_s:134, cpu_pct:380, procs:9 }),
+  tsc: () => job({ id:"j42", label:"fix-main", cmd:"tsc --noEmit", key:"fix-main · tsc --noEmit", low:true,
+    full_cmd:"pnpm tsc --noEmit -p tsconfig.json", cwd:"~/Projects/fix-main",
+    estimate:G(1.3), footprint:G(1.1), samples:5, elapsed_s:41, cpu_pct:100, procs:2 }),
+  e2e: () => job({ id:"j43", state:"queued", label:"browser-cd", cmd:"playwright test", key:"browser-churchdesk · playwright test",
+    full_cmd:"pnpm playwright test --project=chromium", cwd:"~/Projects/browser-churchdesk", pinned:true,
+    estimate:G(4.2), samples:3, waited_s:64 }),
+  build: () => job({ id:"j44", state:"queued", label:"sc-49201", cmd:"pnpm build", key:"browser-churchdesk · pnpm build",
+    full_cmd:"pnpm build", cwd:"~/Projects/browser-churchdesk.worktrees/sc-49201", estimate:G(2.0), samples:4, waited_s:21 }),
+  jest: () => job({ id:"j45", state:"queued", label:"form-service", cmd:"jest", key:"form-service · jest",
+    full_cmd:"npx jest --runInBand", cwd:"~/Projects/form-service", estimate:G(1.5), samples:0, waited_s:4 }),
+};
+
+function base(over){
+  return Object.assign({
+    system: { pressure:"normal", mem_total:G(36), mem_used:G(27.1), mem_available:G(8.9), swap_used:G(0.4), cpu_pct:63 },
+    held:false, hooks:{ claude:"installed", codex:"installed", pi:"installed" }, queue_reason:null,
+    running:[], queued:[], banners:[],
+    history: [
+      { id:"r1", label:"sc-49123", cmd:"vitest run", key:"browser-churchdesk · vitest run", duration_s:151, peak:G(3.9), estimate:G(4.1), exit:0, ended_ago_s:420 },
+      { id:"r2", label:"fix-main", cmd:"tsc --noEmit", key:"fix-main · tsc --noEmit", duration_s:47, peak:G(1.2), estimate:G(1.3), exit:2, ended_ago_s:900 },
+      { id:"r3", label:"sc-49201", cmd:"pnpm build", key:"browser-churchdesk · pnpm build", duration_s:212, peak:G(7.1), estimate:G(2.0), exit:null, ended_ago_s:1800,
+        guard:{ action:"requeued", why:"memory critical 30 s after freeze; peak 7.1 GB vs est 2.0 GB" } },
+      { id:"r4", label:"browser-cd", cmd:"playwright test", key:"browser-churchdesk · playwright test", duration_s:30, peak:G(1.0), estimate:G(4.2), exit:null, ended_ago_s:5400,
+        guard:{ action:"cancelled", why:"cancelled from menu bar" } },
+    ],
+    profiles: PROFILES, others: OTHERS,
+    settings: structuredClone(BASE_SETTINGS), classify:null,
+  }, over);
+}
+
+const MOCK = {
+  busy: { title:"Busy queue", desc:"2 running, 3 queued on memory", make: () => base({
+    running:[J.vitest(), J.tsc()], queued:[J.e2e(), J.build(), J.jest()],
+    queue_reason:{ kind:"memory", need:G(4.2), free:G(2.9) } }) },
+  idle: { title:"Idle", desc:"nothing running", make: () => base({
+    system:{ pressure:"normal", mem_total:G(36), mem_used:G(17.6), mem_available:G(18.4), swap_used:G(0), cpu_pct:9 } }) },
+  frozen: { title:"Frozen", desc:"critical pressure, guard froze a job", make: () => {
+    const v = J.vitest(); v.state = "frozen"; v.frozen_s = 12; v.footprint = G(5.2); v.peak = G(5.2); v.cpu_pct = 0;
+    return base({
+      system:{ pressure:"critical", mem_total:G(36), mem_used:G(35.1), mem_available:G(0.9), swap_used:G(4.6), cpu_pct:88 },
+      running:[v, J.tsc()], queued:[J.e2e(), J.build()],
+      queue_reason:{ kind:"pressure", level:"critical" },
+      banners:[{ id:"b1", kind:"frozen", job_id:"j41", label:"sc-49123", cmd:"vitest run",
+        why:"Memory critical for 10 s. Frozen jobs stop growing but keep their memory. Kill frees it." }] });
+  } },
+  killed: { title:"Killed + requeued", desc:"runaway job killed, another gave up", make: () => {
+    const b = J.build(); b.retry = 1; b.waited_s = 3;
+    const t = J.tsc(); t.footprint = G(3.4); t.peak = G(3.4); t.runaway_at = G(2.6);
+    return base({
+      system:{ pressure:"warn", mem_total:G(36), mem_used:G(31.8), mem_available:G(4.2), swap_used:G(2.1), cpu_pct:71 },
+      running:[t], queued:[b, J.jest()],
+      queue_reason:{ kind:"pressure", level:"warn" },
+      banners:[
+        { id:"b2", kind:"requeued", job_id:"j44", label:"sc-49201", cmd:"pnpm build",
+          why:"Peak 7.1 GB vs est 2.0 GB, memory critical 30 s after freezing. Requeued at the front (retry 1/1)." },
+        { id:"b3", kind:"gave_up", job_id:"j39", label:"sc-48870", cmd:"jest",
+          why:"Killed twice under critical pressure. The agent was told: exit 137." }] });
+  } },
+  newjob: { title:"New command", desc:"no profile yet, over default estimate", make: () => {
+    const j = J.jest(); j.state = "running"; j.footprint = G(2.3); j.peak = G(2.4); j.elapsed_s = 38; j.cpu_pct = 240; j.procs = 6;
+    return base({ running:[J.vitest(), j], queued:[J.build()],
+      queue_reason:{ kind:"memory", need:G(2.0), free:G(1.4) } });
+  } },
+  held: { title:"Held", desc:"you paused admissions", make: () => base({
+    held:true, running:[J.tsc()], queued:[J.e2e(), J.build(), J.jest()],
+    queue_reason:{ kind:"held" } }) },
+  nohook: { title:"Hooks missing + CPU", desc:"Codex needs review, pi missing; CPU-bound", make: () => base({
+    hooks:{ claude:"installed", codex:"needs_review", pi:"not_installed" },
+    system:{ pressure:"normal", mem_total:G(36), mem_used:G(20.3), mem_available:G(15.7), swap_used:G(0), cpu_pct:97 },
+    running:[J.vitest()], queued:[J.build()],
+    queue_reason:{ kind:"cpu", load:16, cores:10 } }) },
+};
+
+let CURRENT = new URLSearchParams(location.search).get("state");
+if (!MOCK[CURRENT]) CURRENT = "busy";
+
+function load(k){
+  CURRENT = k;
+  STATE = MOCK[k].make();
+  UI.page = "main"; UI.expanded.clear(); UI.confirm = null;
+  history.replaceState(null, "", "?state=" + k);
+  renderPoc(); render();
+}
+
+function logSent(m){
+  const box = $("sent");
+  box.textContent = JSON.stringify(m) + "\n" + box.textContent;
+}
+
+/** Mock classifier for the preview only. Rust's classify.rs is the real one. */
+function mockClassify(text){
+  const s = STATE.settings;
+  const ex = s.excluded.find(p => new RegExp(`(^|\\s)${p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(\\s|$)`).test(text));
+  if (ex) return { text, result:"excluded", why: ex };
+  const hit = s.patterns.find(p => text.includes(p));
+  if (!hit) return { text, result:"light" };
+  return { text, result:"heavy", key: hit };
+}
+
+function mockApply(m){
+  logSent(m);
+  const S = STATE;
+  const all = () => [...S.running, ...S.queued];
+  const find = id => all().find(j => j.id === id);
+  const reorderPinned = () => {
+    S.queued = [...S.queued.filter(j => j.pinned), ...S.queued.filter(j => !j.pinned)];
+  };
+  switch (m.cmd){
+    case "hold":
+      S.held = m.on;
+      S.queue_reason = m.on ? { kind:"held" } : (S.queued.length ? { kind:"memory", need:S.queued[0].estimate, free:G(2.9) } : null);
+      break;
+    case "freeze": { const j = find(m.id); if (j){ j.state = "frozen"; j.frozen_s = 0; j.cpu_pct = 0; } break; }
+    case "resume": {
+      const j = find(m.id); if (j){ j.state = "running"; j.cpu_pct = 150; }
+      S.banners = S.banners.filter(b => b.job_id !== m.id || b.kind !== "frozen");
+      break;
+    }
+    case "kill": {
+      const j = S.running.find(x => x.id === m.id);
+      if (j){
+        S.running = S.running.filter(x => x !== j);
+        S.history.unshift({ id:"r" + Date.now(), label:j.label, cmd:j.cmd, key:j.key, duration_s:j.elapsed_s,
+          peak:j.peak, estimate:j.estimate, exit:null, ended_ago_s:0, guard:{ action:"manual_kill", why:"killed from menu bar" } });
+      }
+      S.banners = S.banners.filter(b => b.job_id !== m.id);
+      break;
+    }
+    case "cancel": {
+      const j = S.queued.find(x => x.id === m.id);
+      S.queued = S.queued.filter(x => x.id !== m.id);
+      if (j) S.history.unshift({ id:"r" + Date.now(), label:j.label, cmd:j.cmd, key:j.key, duration_s:0,
+        peak:0, estimate:j.estimate, exit:null, ended_ago_s:0, guard:{ action:"cancelled", why:"cancelled from menu bar" } });
+      break;
+    }
+    case "top": {
+      const i = S.queued.findIndex(j => j.id === m.id);
+      if (i > 0){ const [j] = S.queued.splice(i, 1); S.queued.unshift(j); reorderPinned(); }
+      break;
+    }
+    case "move": {
+      const i = S.queued.findIndex(j => j.id === m.id);
+      if (i >= 0){ const [j] = S.queued.splice(i, 1); S.queued.splice(m.to, 0, j); reorderPinned(); }
+      break;
+    }
+    case "pin": { const j = find(m.id); if (j){ j.pinned = m.on; reorderPinned(); }
+      if (m.on) S.banners = S.banners.filter(b => b.job_id !== m.id || b.kind !== "requeued");
+      break; }
+    case "low": { const j = find(m.id); if (j) j.low = m.on; break; }
+    case "dismiss": S.banners = S.banners.filter(b => b.id !== m.id); break;
+    case "reset_profile": delete S.profiles[m.key]; all().forEach(j => { if (j.key === m.key){ j.samples = 0; j.estimate = S.settings.default_estimate; } }); break;
+    case "set": S.settings[m.key] = m.value; break;
+    case "add_pattern": if (!S.settings.patterns.includes(m.pattern)) S.settings.patterns.push(m.pattern); break;
+    case "remove_pattern": S.settings.patterns = S.settings.patterns.filter(p => p !== m.pattern); break;
+    case "classify": S.classify = mockClassify(m.text); break;
+    case "copy": case "quit": return;
+  }
+  render();
+}
+
+function renderPoc(){
+  const box = $("stateList");
+  box.innerHTML = "";
+  Object.entries(MOCK).forEach(([k, v]) => {
+    const b = document.createElement("button");
+    b.className = "st" + (k === CURRENT ? " on" : "");
+    b.innerHTML = `${v.title}<small>${v.desc}</small>`;
+    b.onclick = () => load(k);
+    box.append(b);
+  });
+}
+
+if (!LIVE){
+  $("darkBar").checked = matchMedia("(prefers-color-scheme: dark)").matches;
+  $("darkBar").addEventListener("change", () => renderTray(STATE));
+  load(CURRENT);
+  // Make time pass so timers and footprints look alive, as they will at 1 Hz.
+  setInterval(() => {
+    if (!STATE) return;
+    STATE.running.forEach(j => {
+      if (j.state === "frozen") j.frozen_s++; else j.elapsed_s++;
+    });
+    STATE.queued.forEach(j => j.waited_s++);
+    render();
+  }, 1000);
+}
+</script>
+</body>
+</html>
