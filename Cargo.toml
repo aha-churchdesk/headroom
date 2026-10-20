@@ -1,0 +1,25 @@
+[workspace]
+resolver = "3"
+members = ["core", "headroom", "headroomd"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+headroom-core = { path = "core" }
+# preserve_order: agent settings files are rewritten in place, and reordering
+# someone's keys would turn a one-entry install into a whole-file diff.
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+serde = { version = "1.0.229", features = ["derive"] }
+libc = "0.2.189"
+directories = "6.0.0"
+
+# The CLI runs in front of every heavy command and the daemon all day, so
+# size and startup matter more than compile time.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

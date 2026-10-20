@@ -1,0 +1,746 @@
+//! Installing Headroom's hook into each agent's configuration.
+//!
+//! These files belong to the user and to other tools (Orca, graft, plannotator
+//! all keep hooks next to ours), so the rules are strict:
+//!
+//! - Add exactly one entry of our own; never edit or reorder anyone else's.
+//! - Refuse to touch a file that isn't valid JSON, rather than guess.
+//! - Write atomically, keep a backup of what was there, keep the file mode.
+//! - Re-running is a no-op; a moved binary is updated in place.
+//!
+//! Claude and Codex share the PreToolUse JSON shape. pi takes an extension
+//! file instead, which is ours alone, so nothing is merged.
+
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+
+use serde_json::{Map, Value, json};
+
+use crate::classify::basename;
+use crate::hookio::Agent;
+use crate::shell::{quote, simple_commands};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    User,
+    Project,
+    Local,
+}
+
+impl Scope {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "user" => Some(Scope::User),
+            "project" => Some(Scope::Project),
+            "local" => Some(Scope::Local),
+            _ => None,
+        }
+    }
+}
+
+/// Where an agent's hook lives for a scope; `None` if the agent has no such scope.
+pub fn settings_path(agent: Agent, scope: Scope, home: &Path, project: &Path) -> Option<PathBuf> {
+    match (agent, scope) {
+        (Agent::Claude, Scope::User) => Some(home.join(".claude/settings.json")),
+        (Agent::Claude, Scope::Project) => Some(project.join(".claude/settings.json")),
+        (Agent::Claude, Scope::Local) => Some(project.join(".claude/settings.local.json")),
+        (Agent::Codex, Scope::User) => Some(home.join(".codex/hooks.json")),
+        (Agent::Pi, Scope::User) => Some(home.join(".pi/agent/extensions/headroom.ts")),
+        (Agent::Pi, Scope::Project) => Some(project.join(".pi/extensions/headroom.ts")),
+        _ => None,
+    }
+}
+
+/// Is the agent installed on this machine at all?
+pub fn agent_present(agent: Agent, home: &Path) -> bool {
+    match agent {
+        Agent::Claude => home.join(".claude").is_dir(),
+        Agent::Codex => home.join(".codex").is_dir(),
+        Agent::Pi => home.join(".pi/agent").is_dir(),
+    }
+}
+
+pub fn hook_command(exe: &str, agent: Agent) -> String {
+    format!("{} hook --agent {}", quote(exe), agent.name())
+}
+
+/// The executable of our hook command for this agent, if `cmd` is one.
+fn ours(cmd: &str, agent: Agent) -> Option<String> {
+    // Exactly one simple command: `headroom hook … && something` is not ours.
+    let mut cmds = simple_commands(cmd);
+    if cmds.len() != 1 {
+        return None;
+    }
+    let words = cmds.remove(0);
+    let ok = words.len() == 4
+        && basename(&words[0]) == "headroom"
+        && words[1] == "hook"
+        && words[2] == "--agent"
+        && words[3] == agent.name();
+    ok.then(|| words[0].clone())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Status {
+    NotInstalled,
+    Installed,
+    /// Installed, but pointing at a binary other than this one.
+    Stale {
+        exe: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Change {
+    Added,
+    Updated,
+    Removed,
+    Unchanged,
+}
+
+fn object<'a>(v: &'a mut Value, what: &str) -> Result<&'a mut Map<String, Value>, String> {
+    v.as_object_mut()
+        .ok_or_else(|| format!("{what} is not a JSON object; not touching it"))
+}
+
+/// Every hook command in a PreToolUse list that is ours, as (entry, hook) indices.
+fn our_hooks(pre: &[Value], agent: Agent) -> Vec<(usize, usize, String)> {
+    let mut found = Vec::new();
+    for (i, entry) in pre.iter().enumerate() {
+        let Some(hooks) = entry.get("hooks").and_then(Value::as_array) else {
+            continue;
+        };
+        for (j, h) in hooks.iter().enumerate() {
+            if let Some(exe) = h
+                .get("command")
+                .and_then(Value::as_str)
+                .and_then(|c| ours(c, agent))
+            {
+                found.push((i, j, exe));
+            }
+        }
+    }
+    found
+}
+
+fn pre_tool_use(v: &Value) -> Option<&Vec<Value>> {
+    v.get("hooks")?.get("PreToolUse")?.as_array()
+}
+
+pub fn json_status(root: &Value, agent: Agent, exe: &str) -> Status {
+    let Some(pre) = pre_tool_use(root) else {
+        return Status::NotInstalled;
+    };
+    match our_hooks(pre, agent).into_iter().next() {
+        None => Status::NotInstalled,
+        Some((_, _, e)) if e == exe => Status::Installed,
+        Some((_, _, e)) => Status::Stale { exe: e },
+    }
+}
+
+pub fn json_install(root: &mut Value, agent: Agent, exe: &str) -> Result<Change, String> {
+    if root.is_null() {
+        *root = json!({});
+    }
+    let top = object(root, "the settings file")?;
+    let hooks = top.entry("hooks").or_insert_with(|| json!({}));
+    let hooks = object(hooks, "\"hooks\"")?;
+    let pre = hooks.entry("PreToolUse").or_insert_with(|| json!([]));
+    let pre = pre
+        .as_array_mut()
+        .ok_or("\"hooks.PreToolUse\" is not a list; not touching it")?;
+
+    let command = hook_command(exe, agent);
+    let found = our_hooks(pre, agent);
+    if let Some((i, j, current)) = found.first() {
+        if current == exe {
+            return Ok(Change::Unchanged);
+        }
+        pre[*i]["hooks"][*j]["command"] = Value::String(command);
+        return Ok(Change::Updated);
+    }
+    let mut entry = json!({ "hooks": [{ "type": "command", "command": command, "timeout": 10 }] });
+    // Claude can filter by tool name. Codex's shell tool name isn't
+    // pinned down, so its hook sees every tool and ignores the rest.
+    if agent == Agent::Claude {
+        entry = json!({ "matcher": "Bash", "hooks": entry["hooks"].clone() });
+    }
+    pre.push(entry);
+    Ok(Change::Added)
+}
+
+pub fn json_uninstall(root: &mut Value, agent: Agent) -> Result<Change, String> {
+    if root.is_null() {
+        return Ok(Change::Unchanged);
+    }
+    let top = object(root, "the settings file")?;
+    let Some(hooks) = top.get_mut("hooks").and_then(Value::as_object_mut) else {
+        return Ok(Change::Unchanged);
+    };
+    let Some(pre) = hooks.get_mut("PreToolUse").and_then(Value::as_array_mut) else {
+        return Ok(Change::Unchanged);
+    };
+    let found = our_hooks(pre, agent);
+    if found.is_empty() {
+        return Ok(Change::Unchanged);
+    }
+    // Back to front, so earlier indices stay valid.
+    for (i, j, _) in found.iter().rev() {
+        if let Some(list) = pre[*i].get_mut("hooks").and_then(Value::as_array_mut) {
+            list.remove(*j);
+        }
+    }
+    pre.retain(|e| {
+        e.get("hooks")
+            .and_then(Value::as_array)
+            .is_none_or(|h| !h.is_empty())
+    });
+    if pre.is_empty() {
+        hooks.remove("PreToolUse");
+    }
+    if hooks.is_empty() {
+        top.remove("hooks");
+    }
+    Ok(Change::Removed)
+}
+
+/// The pi extension. It shells out to `headroom hook --agent pi` and fails
+/// open: any error leaves the command as it was.
+pub fn pi_extension(exe: &str) -> String {
+    let exe = serde_json::to_string(exe).unwrap_or_default();
+    format!(
+        r#"// Installed by `headroom hook install`. Sends heavy bash commands through
+// Headroom's queue. Remove with `headroom hook uninstall --agent pi`.
+import type {{ ExtensionAPI }} from "@earendil-works/pi-coding-agent";
+import {{ isToolCallEventType }} from "@earendil-works/pi-coding-agent";
+import {{ execFileSync }} from "node:child_process";
+
+const HEADROOM = {exe};
+
+export default function (pi: ExtensionAPI) {{
+  pi.on("tool_call", (event, ctx) => {{
+    if (!isToolCallEventType("bash", event)) return;
+    try {{
+      const out = execFileSync(HEADROOM, ["hook", "--agent", "pi"], {{
+        input: JSON.stringify({{ command: event.input.command, timeout: event.input.timeout, cwd: ctx.cwd }}),
+        encoding: "utf8",
+        timeout: 5000,
+      }});
+      if (!out.trim()) return;
+      const answer: {{ command?: string; timeout?: number }} = JSON.parse(out);
+      if (typeof answer.command === "string") event.input.command = answer.command;
+      if (typeof answer.timeout === "number") event.input.timeout = answer.timeout;
+    }} catch {{
+      // Fail open: the command runs as it was.
+    }}
+  }});
+}}
+"#
+    )
+}
+
+/// The executable an installed pi extension points at, if the file is ours.
+pub fn pi_status(content: &str, exe: &str) -> Status {
+    let found = content
+        .lines()
+        .find_map(|l| l.strip_prefix("const HEADROOM = "))
+        .and_then(|rest| serde_json::from_str::<String>(rest.trim_end_matches(';')).ok());
+    match found {
+        None => Status::NotInstalled,
+        Some(e) if e == exe => Status::Installed,
+        Some(e) => Status::Stale { exe: e },
+    }
+}
+
+// ── IO ─────────────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Report {
+    pub path: PathBuf,
+    pub change: Change,
+    pub before: Option<String>,
+    pub after: Option<String>,
+}
+
+fn read_opt(path: &Path) -> io::Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+fn parse_json(path: &Path, text: Option<&str>) -> Result<Value, String> {
+    match text {
+        None => Ok(Value::Null),
+        Some(t) if t.trim().is_empty() => Ok(Value::Null),
+        Some(t) => serde_json::from_str(t).map_err(|e| {
+            format!(
+                "{} is not valid JSON ({e}); fix it first, nothing was changed",
+                path.display()
+            )
+        }),
+    }
+}
+
+fn pretty(v: &Value) -> String {
+    let mut s = serde_json::to_string_pretty(v).unwrap_or_default();
+    s.push('\n');
+    s
+}
+
+/// Write via a temp file and a rename, keeping a backup of the previous
+/// content and its permissions. A crash mid-write leaves the old file.
+pub fn write_atomic(path: &Path, content: &str, previous: Option<&str>) -> io::Result<()> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| io::Error::other("no parent directory"))?;
+    fs::create_dir_all(dir)?;
+    let mode = fs::metadata(path).ok().map(|m| m.permissions());
+    if let Some(prev) = previous {
+        let mut bak = path.as_os_str().to_owned();
+        bak.push(".headroom-bak");
+        fs::write(PathBuf::from(bak), prev)?;
+    }
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".headroom-tmp");
+    let tmp = PathBuf::from(tmp);
+    fs::write(&tmp, content)?;
+    if let Some(m) = mode {
+        fs::set_permissions(&tmp, m)?;
+    }
+    fs::rename(&tmp, path)
+}
+
+pub fn status(agent: Agent, path: &Path, exe: &str) -> Result<Status, String> {
+    let text = read_opt(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    match agent {
+        Agent::Pi => Ok(text.map_or(Status::NotInstalled, |t| pi_status(&t, exe))),
+        _ => Ok(json_status(&parse_json(path, text.as_deref())?, agent, exe)),
+    }
+}
+
+pub fn install(agent: Agent, path: &Path, exe: &str, dry_run: bool) -> Result<Report, String> {
+    let before = read_opt(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let (change, after) = match agent {
+        Agent::Pi => {
+            let want = pi_extension(exe);
+            match before.as_deref() {
+                Some(b) if b == want => (Change::Unchanged, want),
+                Some(b) if pi_status(b, exe) == Status::NotInstalled => {
+                    return Err(format!(
+                        "{} exists and isn't Headroom's; not overwriting it",
+                        path.display()
+                    ));
+                }
+                Some(_) => (Change::Updated, want),
+                None => (Change::Added, want),
+            }
+        }
+        _ => {
+            let mut v = parse_json(path, before.as_deref())?;
+            let change =
+                json_install(&mut v, agent, exe).map_err(|e| format!("{}: {e}", path.display()))?;
+            (change, pretty(&v))
+        }
+    };
+    if change != Change::Unchanged && !dry_run {
+        write_atomic(path, &after, before.as_deref())
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    Ok(Report {
+        path: path.to_path_buf(),
+        change,
+        before,
+        after: Some(after),
+    })
+}
+
+pub fn uninstall(agent: Agent, path: &Path, dry_run: bool) -> Result<Report, String> {
+    let before = read_opt(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let unchanged = |before| {
+        Ok(Report {
+            path: path.to_path_buf(),
+            change: Change::Unchanged,
+            before,
+            after: None,
+        })
+    };
+    match agent {
+        Agent::Pi => {
+            let Some(b) = before.as_deref() else {
+                return unchanged(None);
+            };
+            if pi_status(b, "").eq(&Status::NotInstalled) {
+                return Err(format!("{} isn't Headroom's; leaving it", path.display()));
+            }
+            if !dry_run {
+                fs::remove_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            }
+            Ok(Report {
+                path: path.to_path_buf(),
+                change: Change::Removed,
+                before,
+                after: None,
+            })
+        }
+        _ => {
+            if before.is_none() {
+                return unchanged(None);
+            }
+            let mut v = parse_json(path, before.as_deref())?;
+            let change =
+                json_uninstall(&mut v, agent).map_err(|e| format!("{}: {e}", path.display()))?;
+            if change == Change::Unchanged {
+                return unchanged(before);
+            }
+            let after = pretty(&v);
+            if !dry_run {
+                write_atomic(path, &after, before.as_deref())
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
+            }
+            Ok(Report {
+                path: path.to_path_buf(),
+                change,
+                before,
+                after: Some(after),
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EXE: &str = "/opt/homebrew/bin/headroom";
+
+    /// Shaped like a real ~/.codex/hooks.json: other tools' entries with no
+    /// matcher, and keys in a deliberate order.
+    fn codex_file() -> Value {
+        json!({
+            "hooks": {
+                "SessionStart": [{ "hooks": [{ "type": "command", "command": "node graft-hooks.cjs session-start" }] }],
+                "PreToolUse": [{ "hooks": [{ "type": "command", "command": "/bin/sh orca-hook.sh", "timeout": 10 }] }],
+                "Stop": [{ "hooks": [{ "type": "command", "command": "plannotator" }] }]
+            }
+        })
+    }
+
+    fn tmpdir(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "headroom-hooksettings-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&p);
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn install_into_nothing_creates_just_our_entry() {
+        let mut v = Value::Null;
+        assert_eq!(json_install(&mut v, Agent::Claude, EXE), Ok(Change::Added));
+        assert_eq!(
+            v,
+            json!({ "hooks": { "PreToolUse": [{ "matcher": "Bash", "hooks": [
+                { "type": "command", "command": "/opt/homebrew/bin/headroom hook --agent claude", "timeout": 10 }
+            ]}]}})
+        );
+    }
+
+    #[test]
+    fn install_beside_other_tools_leaves_them_byte_for_byte() {
+        let mut v = codex_file();
+        assert_eq!(json_install(&mut v, Agent::Codex, EXE), Ok(Change::Added));
+        let pre = v["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre.len(), 2);
+        assert_eq!(pre[0], codex_file()["hooks"]["PreToolUse"][0]);
+        assert!(pre[1].get("matcher").is_none());
+        // Key order survives, so the diff is only our entry.
+        let keys: Vec<&String> = v["hooks"].as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["SessionStart", "PreToolUse", "Stop"]);
+        assert_eq!(v["hooks"]["Stop"], codex_file()["hooks"]["Stop"]);
+    }
+
+    #[test]
+    fn install_twice_is_a_no_op() {
+        let mut v = Value::Null;
+        json_install(&mut v, Agent::Claude, EXE).unwrap();
+        let once = v.clone();
+        assert_eq!(
+            json_install(&mut v, Agent::Claude, EXE),
+            Ok(Change::Unchanged)
+        );
+        assert_eq!(v, once);
+    }
+
+    #[test]
+    fn a_moved_binary_is_reported_stale_and_updated_in_place() {
+        let mut v = Value::Null;
+        json_install(&mut v, Agent::Claude, "/old/bin/headroom").unwrap();
+        assert_eq!(
+            json_status(&v, Agent::Claude, EXE),
+            Status::Stale {
+                exe: "/old/bin/headroom".into()
+            }
+        );
+        assert_eq!(
+            json_install(&mut v, Agent::Claude, EXE),
+            Ok(Change::Updated)
+        );
+        assert_eq!(json_status(&v, Agent::Claude, EXE), Status::Installed);
+        assert_eq!(v["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn agents_do_not_see_each_others_hooks() {
+        let mut v = Value::Null;
+        json_install(&mut v, Agent::Claude, EXE).unwrap();
+        assert_eq!(json_status(&v, Agent::Codex, EXE), Status::NotInstalled);
+    }
+
+    #[test]
+    fn uninstall_restores_the_original() {
+        let mut v = codex_file();
+        json_install(&mut v, Agent::Codex, EXE).unwrap();
+        assert_eq!(json_uninstall(&mut v, Agent::Codex), Ok(Change::Removed));
+        assert_eq!(v, codex_file());
+        let mut empty = Value::Null;
+        json_install(&mut empty, Agent::Claude, EXE).unwrap();
+        json_uninstall(&mut empty, Agent::Claude).unwrap();
+        assert_eq!(empty, json!({}));
+    }
+
+    #[test]
+    fn uninstall_when_absent_changes_nothing() {
+        let mut v = codex_file();
+        assert_eq!(json_uninstall(&mut v, Agent::Codex), Ok(Change::Unchanged));
+        assert_eq!(v, codex_file());
+        assert_eq!(
+            json_uninstall(&mut Value::Null, Agent::Claude),
+            Ok(Change::Unchanged)
+        );
+    }
+
+    #[test]
+    fn uninstall_keeps_a_neighbour_sharing_our_entry() {
+        let mut v = json!({ "hooks": { "PreToolUse": [{ "matcher": "Bash", "hooks": [
+            { "type": "command", "command": "safety-net" },
+            { "type": "command", "command": "/x/headroom hook --agent claude" }
+        ]}]}});
+        json_uninstall(&mut v, Agent::Claude).unwrap();
+        assert_eq!(
+            v,
+            json!({ "hooks": { "PreToolUse": [{ "matcher": "Bash", "hooks": [
+                { "type": "command", "command": "safety-net" }
+            ]}]}})
+        );
+    }
+
+    #[test]
+    fn unexpected_shapes_are_refused_not_overwritten() {
+        for mut v in [
+            json!([1, 2]),
+            json!({ "hooks": "nope" }),
+            json!({ "hooks": { "PreToolUse": {} } }),
+        ] {
+            let before = v.clone();
+            assert!(json_install(&mut v, Agent::Claude, EXE).is_err());
+            assert_eq!(v, before);
+        }
+    }
+
+    #[test]
+    fn lookalike_commands_are_not_ours() {
+        assert_eq!(
+            ours("/x/headroom hook --agent claude", Agent::Claude),
+            Some("/x/headroom".into())
+        );
+        assert_eq!(
+            ours("'/My Apps/headroom' hook --agent pi", Agent::Pi),
+            Some("/My Apps/headroom".into())
+        );
+        assert_eq!(
+            ours("headroom hook --agent claude && rm -rf x", Agent::Claude),
+            None
+        );
+        assert_eq!(
+            ours("not-headroom hook --agent claude", Agent::Claude),
+            None
+        );
+        assert_eq!(
+            ours("headroom hook --agent claude --extra", Agent::Claude),
+            None
+        );
+    }
+
+    #[test]
+    fn pi_extension_round_trips_its_executable() {
+        let ext = pi_extension("/Users/me/My \"Tools\"/headroom");
+        assert_eq!(
+            pi_status(&ext, "/Users/me/My \"Tools\"/headroom"),
+            Status::Installed
+        );
+        assert_eq!(
+            pi_status(&ext, EXE),
+            Status::Stale {
+                exe: "/Users/me/My \"Tools\"/headroom".into()
+            }
+        );
+        assert_eq!(
+            pi_status("export default () => {}", EXE),
+            Status::NotInstalled
+        );
+    }
+
+    #[test]
+    fn file_install_backs_up_keeps_mode_and_is_idempotent() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tmpdir("file");
+        let path = d.join("settings.json");
+        let original = "{\n  \"model\": \"opus\"\n}\n";
+        fs::write(&path, original).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let r = install(Agent::Claude, &path, EXE, false).unwrap();
+        assert_eq!(r.change, Change::Added);
+        assert_eq!(
+            fs::read_to_string(d.join("settings.json.headroom-bak")).unwrap(),
+            original
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let written: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["model"], "opus");
+        assert_eq!(status(Agent::Claude, &path, EXE), Ok(Status::Installed));
+
+        let again = install(Agent::Claude, &path, EXE, false).unwrap();
+        assert_eq!(again.change, Change::Unchanged);
+        assert!(!d.join("settings.json.headroom-tmp").exists());
+    }
+
+    #[test]
+    fn invalid_json_is_refused_and_left_untouched() {
+        let d = tmpdir("invalid");
+        let path = d.join("hooks.json");
+        fs::write(&path, "{ \"hooks\": [ }").unwrap();
+        let e = install(Agent::Codex, &path, EXE, false).unwrap_err();
+        assert!(
+            e.contains("is not valid JSON") && e.contains("nothing was changed"),
+            "{e}"
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{ \"hooks\": [ }");
+        assert!(!d.join("hooks.json.headroom-bak").exists());
+    }
+
+    #[test]
+    fn dry_run_reports_without_writing() {
+        let d = tmpdir("dry");
+        let path = d.join(".claude/settings.json");
+        let r = install(Agent::Claude, &path, EXE, true).unwrap();
+        assert_eq!(r.change, Change::Added);
+        assert!(r.after.unwrap().contains("hook --agent claude"));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn missing_file_and_directory_are_created() {
+        let d = tmpdir("missing");
+        let path = d.join(".claude/settings.json");
+        install(Agent::Claude, &path, EXE, false).unwrap();
+        assert_eq!(status(Agent::Claude, &path, EXE), Ok(Status::Installed));
+        assert!(!d.join(".claude/settings.json.headroom-bak").exists());
+    }
+
+    #[test]
+    fn read_only_file_fails_with_its_path_and_keeps_content() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tmpdir("ro");
+        let path = d.join("settings.json");
+        fs::write(&path, "{}").unwrap();
+        // A read-only directory stops the temp file and the rename.
+        fs::set_permissions(&d, fs::Permissions::from_mode(0o500)).unwrap();
+        let r = install(Agent::Claude, &path, EXE, false);
+        fs::set_permissions(&d, fs::Permissions::from_mode(0o700)).unwrap();
+        let e = r.unwrap_err();
+        assert!(e.contains("settings.json"), "{e}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{}");
+    }
+
+    #[test]
+    fn pi_install_uninstall_and_foreign_file() {
+        let d = tmpdir("pi");
+        let path = d.join("headroom.ts");
+        assert_eq!(
+            install(Agent::Pi, &path, EXE, false).unwrap().change,
+            Change::Added
+        );
+        assert_eq!(
+            install(Agent::Pi, &path, EXE, false).unwrap().change,
+            Change::Unchanged
+        );
+        assert_eq!(
+            install(Agent::Pi, &path, "/new/headroom", false)
+                .unwrap()
+                .change,
+            Change::Updated
+        );
+        assert_eq!(
+            uninstall(Agent::Pi, &path, false).unwrap().change,
+            Change::Removed
+        );
+        assert!(!path.exists());
+        assert_eq!(
+            uninstall(Agent::Pi, &path, false).unwrap().change,
+            Change::Unchanged
+        );
+
+        fs::write(&path, "// someone else's extension\n").unwrap();
+        assert!(install(Agent::Pi, &path, EXE, false).is_err());
+        assert!(uninstall(Agent::Pi, &path, false).is_err());
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "// someone else's extension\n"
+        );
+    }
+
+    #[test]
+    fn file_uninstall_round_trip() {
+        let d = tmpdir("uninst");
+        let path = d.join("hooks.json");
+        let original = pretty(&codex_file());
+        fs::write(&path, &original).unwrap();
+        install(Agent::Codex, &path, EXE, false).unwrap();
+        assert_eq!(
+            uninstall(Agent::Codex, &path, false).unwrap().change,
+            Change::Removed
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        assert_eq!(
+            uninstall(Agent::Codex, &path, false).unwrap().change,
+            Change::Unchanged
+        );
+    }
+
+    #[test]
+    fn scopes_map_to_the_documented_files() {
+        let (h, p) = (Path::new("/h"), Path::new("/p"));
+        assert_eq!(
+            settings_path(Agent::Claude, Scope::Local, h, p),
+            Some(PathBuf::from("/p/.claude/settings.local.json"))
+        );
+        assert_eq!(
+            settings_path(Agent::Codex, Scope::User, h, p),
+            Some(PathBuf::from("/h/.codex/hooks.json"))
+        );
+        assert_eq!(settings_path(Agent::Codex, Scope::Project, h, p), None);
+        assert_eq!(
+            settings_path(Agent::Pi, Scope::User, h, p),
+            Some(PathBuf::from("/h/.pi/agent/extensions/headroom.ts"))
+        );
+    }
+}

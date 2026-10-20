@@ -1,0 +1,9 @@
+[package]
+name = "headroom-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+directories.workspace = true
