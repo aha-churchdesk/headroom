@@ -305,7 +305,7 @@ button:disabled{ cursor:default; opacity:.4; }
 .orow.open .l1 .name::before{ content:"▾ "; }
 .ototal{ display:flex; align-items:baseline; gap:8px; padding:4px 14px 10px; border-bottom:1px solid var(--sep); }
 .ototal b{ font-size:15px; }
-.ototal .dim{ font-size:11px; }
+.ototal .sep{ width:10px; }
 .odetail{ margin:6px 0 2px 12px; font-size:11px; }
 .odetail .where{ color:var(--text-faint); word-break:break-all; }
 .oproc{ padding:6px 0 0; border-top:1px solid var(--sep); margin-top:6px; }
@@ -745,10 +745,14 @@ function renderProfile(S){
 
 function renderOthers(S){
   const max = Math.max(1, ...S.others.map(o => o.bytes));
-  const t = S.others_total, pct = t.bytes / S.system.mem_total * 100;
+  // The apps below add up to the first figure. The second is the rest of
+  // memory in use: macOS, apps too small to list, and Headroom's own jobs.
+  // Footprints count compressed memory, so the apps can exceed "in use".
+  const apps = S.others.reduce((n, o) => n + o.bytes, 0);
+  const rest = Math.max(0, S.system.mem_used - apps);
   const total = `
-    <div class="ototal num"><span>All other apps</span><b>${gb(t.bytes)} GB</b>
-      <span class="dim">${t.procs} proc${t.procs === 1 ? "" : "s"} · ${t.bytes && pct < 1 ? "under 1" : Math.round(pct)}% of ${gb(S.system.mem_total)} GB</span></div>`;
+    <div class="ototal num"><span>Other apps</span><b>${gb(apps)} GB</b><span class="sep"></span>
+      <span title="macOS, apps too small to list, and Headroom's jobs">System</span><b>${gb(rest)} GB</b></div>`;
   return pageHead("Other apps") + total + S.others.map(o => {
     const open = UI.openApps.has(o.name);
     const top = o.top || [];
@@ -1123,7 +1127,7 @@ function base(over){
       { id:"r4", label:"browser-cd", cmd:"playwright test", key:"browser-churchdesk · playwright test", duration_s:30, peak:G(1.0), estimate:G(4.2), exit:null, ended_ago_s:5400,
         guard:{ action:"cancelled", why:"cancelled from menu bar" } },
     ],
-    profiles: PROFILES, others: OTHERS, others_total: { bytes:G(21.4), procs:412 },
+    profiles: PROFILES, others: OTHERS,
     settings: structuredClone(BASE_SETTINGS), classify:null,
   }, over);
 }

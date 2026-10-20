@@ -13,15 +13,6 @@ use headroom_core::profile::Profiles;
 use headroom_core::protocol::Listing;
 use serde_json::{Value, json};
 
-/// The "Other apps" page: every process Headroom doesn't manage, added up,
-/// and the largest apps among them.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Others {
-    pub bytes: Bytes,
-    pub procs: u32,
-    pub apps: Vec<AppUsage>,
-}
-
 /// One unmanaged app's memory, for the "Other apps" page.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppUsage {
@@ -58,7 +49,7 @@ pub enum Login {
 pub struct Extras<'a> {
     pub cfg: &'a Config,
     pub profiles: &'a Profiles,
-    pub others: &'a Others,
+    pub others: &'a [AppUsage],
     /// Per agent: installed | not_installed | stale | absent.
     pub hooks: &'a [(&'static str, &'static str)],
     pub classify: Option<Value>,
@@ -242,8 +233,7 @@ pub fn state(l: &Listing, x: &Extras) -> Value {
         "banners": banners(l, x),
         "history": history,
         "profiles": profiles,
-        "others_total": { "bytes": x.others.bytes, "procs": x.others.procs },
-        "others": x.others.apps.iter().map(|o| json!({
+        "others": x.others.iter().map(|o| json!({
             "name": o.name,
             "bytes": o.bytes,
             "procs": o.procs,
@@ -380,15 +370,10 @@ mod tests {
     }
 
     fn extras<'a>(cfg: &'a Config, p: &'a Profiles, d: &'a HashSet<String>) -> Extras<'a> {
-        static NONE: Others = Others {
-            bytes: 0,
-            procs: 0,
-            apps: Vec::new(),
-        };
         Extras {
             cfg,
             profiles: p,
-            others: &NONE,
+            others: &[],
             hooks: &[("claude", "installed"), ("codex", "absent")],
             classify: None,
             dismissed: d,

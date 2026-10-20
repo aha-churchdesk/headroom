@@ -51,7 +51,7 @@
       "cmd": "vitest run",
       "key": "~/Projects/work-scheduler-mcp|headroom|vitest run",
       "duration_s": 4,
-      "peak": 538510056,
+      "peak": 538526440,
       "estimate": 423115044,
       "exit": 0,
       "ended_ago_s": 0,
@@ -81,16 +81,12 @@
     "~/Projects/work-scheduler-mcp|headroom|vitest run": {
       "peaks": [
         538510056,
-        538510056
+        538526440
       ],
-      "p90": 895877616,
+      "p90": 895888538,
       "median_s": 4,
       "samples": 2
     }
-  },
-  "others_total": {
-    "bytes": 0,
-    "procs": 0
   },
   "others": [],
   "settings": {

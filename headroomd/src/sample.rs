@@ -18,7 +18,7 @@ use std::time::Instant;
 use headroom_core::model::{Bytes, Pressure, Snapshot};
 use headroom_core::scheduler::Usage;
 
-use crate::view::{AppUsage, Others, ProcInfo};
+use crate::view::{AppUsage, ProcInfo};
 
 const PROC_ALL_PIDS: u32 = 1;
 const PROC_PGRP_ONLY: u32 = 2;
@@ -407,9 +407,9 @@ pub fn all_pids() -> Vec<i32> {
 
 /// Memory by app among `pids`, largest first, leaving out the process
 /// groups Headroom manages. Processes we may not inspect (other users',
-/// the kernel's) are skipped. The total covers every app, not only the
-/// `limit` largest; those get their largest processes listed in detail.
-pub fn top_apps(pids: &[i32], skip_pgids: &[i32], limit: usize) -> Others {
+/// the kernel's) are skipped. The largest apps get their largest processes
+/// listed in detail.
+pub fn top_apps(pids: &[i32], skip_pgids: &[i32], limit: usize) -> Vec<AppUsage> {
     // (pid, footprint, executable path)
     type Proc = (i32, Bytes, String);
     let mut by_app: HashMap<String, Vec<Proc>> = HashMap::new();
@@ -428,11 +428,8 @@ pub fn top_apps(pids: &[i32], skip_pgids: &[i32], limit: usize) -> Others {
     let mut v: Vec<(String, Vec<Proc>)> = by_app.into_iter().collect();
     let total = |p: &[Proc]| p.iter().map(|x| x.1).sum::<Bytes>();
     v.sort_by(|a, b| total(&b.1).cmp(&total(&a.1)).then_with(|| a.0.cmp(&b.0)));
-    let bytes = v.iter().map(|a| total(&a.1)).sum();
-    let procs = v.iter().map(|a| a.1.len() as u32).sum();
     v.truncate(limit);
-    let apps = v
-        .into_iter()
+    v.into_iter()
         .map(|(name, mut procs)| {
             procs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
             AppUsage {
@@ -447,8 +444,7 @@ pub fn top_apps(pids: &[i32], skip_pgids: &[i32], limit: usize) -> Others {
                 name,
             }
         })
-        .collect();
-    Others { bytes, procs, apps }
+        .collect()
 }
 
 fn pids_in_group(pgid: i32) -> Vec<i32> {
@@ -542,17 +538,17 @@ mod tests {
 
     #[test]
     fn top_apps_finds_this_test_and_respects_the_skip_list() {
-        let apps = top_apps(&all_pids(), &[], 1000).apps;
+        let apps = top_apps(&all_pids(), &[], 1000);
         assert!(!apps.is_empty());
         assert!(
             apps.windows(2).all(|w| w[0].bytes >= w[1].bytes),
             "largest first"
         );
         let me = unsafe { libc::getpgid(0) };
-        let without_me = top_apps(&all_pids(), &[me], 1000).apps;
+        let without_me = top_apps(&all_pids(), &[me], 1000);
         let procs = |v: &[AppUsage]| v.iter().map(|a| a.procs).sum::<u32>();
         assert!(procs(&without_me) < procs(&apps));
-        assert_eq!(top_apps(&all_pids(), &[], 3).apps.len(), 3);
+        assert_eq!(top_apps(&all_pids(), &[], 3).len(), 3);
         assert!(
             apps.iter()
                 .all(|a| !a.top.is_empty() && a.top.len() <= PER_APP)
@@ -569,7 +565,7 @@ mod tests {
             .spawn()
             .unwrap();
         let pid = child.id() as i32;
-        let apps = top_apps(&[pid], &[], 10).apps;
+        let apps = top_apps(&[pid], &[], 10);
         assert_eq!(apps.len(), 1);
         let (app, p) = (&apps[0], &apps[0].top[0]);
         assert_eq!(
@@ -583,40 +579,7 @@ mod tests {
         assert_eq!(p.started_by.first(), Some(&me), "{:?}", p.started_by);
         child.kill().unwrap();
         child.wait().unwrap();
-        assert_eq!(top_apps(&[pid], &[], 10), Others::default(), "gone");
-    }
-
-    #[test]
-    fn the_total_counts_the_apps_left_off_the_list() {
-        let spawn = |prog: &str, args: &[&str]| Command::new(prog).args(args).spawn().unwrap();
-        let mut kids = [
-            spawn("/bin/sleep", &["30"]),
-            spawn("/bin/sleep", &["30"]),
-            spawn("/usr/bin/tail", &["-f", "/dev/null"]),
-        ];
-        let pids: Vec<i32> = kids.iter().map(|c| c.id() as i32).collect();
-
-        let all = top_apps(&pids, &[], 10);
-        assert_eq!((all.apps.len(), all.procs), (2, 3));
-        assert_eq!(all.bytes, all.apps.iter().map(|a| a.bytes).sum::<Bytes>());
-
-        let one = top_apps(&pids, &[], 1);
-        assert_eq!((one.apps.len(), one.procs), (1, 3));
-        assert!(one.bytes > one.apps[0].bytes, "{one:?}");
-
-        let none = top_apps(&pids, &[], 0);
-        assert_eq!((none.apps.len(), none.procs), (0, 3));
-        assert!(none.bytes > 0);
-
-        // Managed jobs are neither listed nor counted.
-        let me = unsafe { libc::getpgid(0) };
-        assert_eq!(top_apps(&pids, &[me], 10), Others::default());
-        assert_eq!(top_apps(&[], &[], 10), Others::default());
-
-        for k in &mut kids {
-            k.kill().unwrap();
-            k.wait().unwrap();
-        }
+        assert!(top_apps(&[pid], &[], 10).is_empty(), "gone");
     }
 
     #[test]

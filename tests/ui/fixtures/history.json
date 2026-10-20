@@ -18,7 +18,7 @@
   "queued": [],
   "banners": [
     {
-      "id": "h4-1792501666",
+      "id": "h4-1792501872",
       "kind": "gave_up",
       "job_id": "4",
       "label": "sc-49201",
@@ -26,7 +26,7 @@
       "why": "memory still critical 1 s after freezing; peak 0.2 GB vs est 1.5 GB. The agent was told: exit 137."
     },
     {
-      "id": "h4-1792501661",
+      "id": "h4-1792501868",
       "kind": "requeued",
       "job_id": "4",
       "label": "sc-49201",
@@ -40,8 +40,8 @@
       "label": "sc-49201",
       "cmd": "headroom-hog",
       "key": "~/Projects/work-scheduler-mcp|headroom|headroom-hog",
-      "duration_s": 4,
-      "peak": 216252944,
+      "duration_s": 3,
+      "peak": 216236536,
       "estimate": 1610612736,
       "exit": null,
       "ended_ago_s": 2,
@@ -61,7 +61,7 @@
       "peak": 216236536,
       "estimate": 1610612736,
       "exit": null,
-      "ended_ago_s": 7,
+      "ended_ago_s": 6,
       "tuned": null,
       "ahead_of": null,
       "guard": {
@@ -109,7 +109,7 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": 3,
-      "ended_ago_s": 11,
+      "ended_ago_s": 10,
       "tuned": null,
       "ahead_of": null,
       "guard": null
@@ -138,10 +138,6 @@
       "median_s": 0,
       "samples": 0
     }
-  },
-  "others_total": {
-    "bytes": 0,
-    "procs": 0
   },
   "others": [],
   "settings": {

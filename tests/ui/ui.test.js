@@ -139,16 +139,21 @@ test('other apps expand to what each process runs, where, and who started it', (
   eq(ui.sent, [], 'expanding stays in the page');
 });
 
-test('other apps open with what all of them use together', () => {
+test('other apps open with what the listed apps add up to, and the rest', () => {
   ui.setState(others);
   ui.click({ act: 'goto', page: 'others' });
-  const v = ui.view();
-  eq(others.others_total.procs, 2, 'the capture counts the shell and the hog');
-  has(v, 'All other apps 0.3 GB 2 procs · under 1% of 64 GB');
-  ui.setState({ ...others, others_total: { bytes: others.system.mem_total / 4, procs: 1 } });
-  has(ui.view(), 'All other apps 16 GB 1 proc · 25% of 64 GB');
-  ui.setState({ ...others, others: [], others_total: { bytes: 0, procs: 0 } });
-  has(ui.view(), 'All other apps 0 GB 0 procs · 0% of 64 GB');
+  const sum = others.others.reduce((n, o) => n + o.bytes, 0);
+  const gb = b => +(b / 2 ** 30).toFixed(1);
+  has(ui.view(), `Other apps ${gb(sum)} GB System ${gb(others.system.mem_used - sum)} GB`);
+  const sys = { ...others.system, mem_used: 2 ** 30 * 10 };
+  const two = [{ ...others.others[0], bytes: 2 ** 30 * 3 }, { ...others.others[1], bytes: 2 ** 30 * 1.5 }];
+  ui.setState({ ...others, system: sys, others: two });
+  has(ui.view(), 'Other apps 4.5 GB System 5.5 GB');
+  ui.setState({ ...others, system: sys, others: [] });
+  has(ui.view(), 'Other apps 0 GB System 10 GB');
+  // Compressed and swapped memory counts in a footprint but not in use.
+  ui.setState({ ...others, system: sys, others: [{ ...two[0], bytes: 2 ** 30 * 12 }] });
+  has(ui.view(), 'Other apps 12 GB System 0 GB');
 });
 
 test('an app with more processes than listed says how many are left out', () => {
