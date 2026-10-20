@@ -19,8 +19,12 @@ use crate::protocol::{Control, DaemonMsg, Listing};
 
 pub type ConnId = u64;
 
-/// History entries kept.
+/// History entries shown, and kept whatever their age.
 pub const HISTORY: usize = 50;
+/// Older entries are kept for a day, for the popover's summary of it…
+pub const HISTORY_DAY_S: u64 = 86_400;
+/// …up to this many in all.
+pub const HISTORY_MAX: usize = 2_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sig {
@@ -604,7 +608,12 @@ impl Scheduler {
                 .unwrap_or(self.clock)
                 .saturating_sub(j.enqueued_at),
         });
-        self.history.truncate(HISTORY);
+        let mut i = 0;
+        self.history.retain(|h| {
+            i += 1;
+            i <= HISTORY || h.ended_at + HISTORY_DAY_S >= wall
+        });
+        self.history.truncate(HISTORY_MAX);
     }
 
     /// Pinned jobs first, otherwise keeping the current order.
@@ -1491,15 +1500,42 @@ mod tests {
         assert_eq!(s.list().running[0].guard_note, None);
     }
 
+    fn ended_at(s: &mut Scheduler, conn: ConnId, wall: u64) {
+        s.enqueue(conn, spec("a"), 0);
+        s.exited(conn, Some(0), None, 0, wall);
+    }
+
     #[test]
-    fn history_is_capped_newest_first() {
+    fn history_keeps_the_last_runs_and_the_last_day_newest_first() {
         let mut s = sched(20);
+        // A busy day: more than HISTORY runs, all of them kept.
         for c in 0..(HISTORY as u64 + 5) {
-            s.enqueue(c, spec("a"), 0);
-            s.exited(c, Some(0), None, 0, c);
+            ended_at(&mut s, c, 1_000 + c);
         }
+        assert_eq!(s.history.len(), HISTORY + 5);
+        assert_eq!(s.history[0].ended_at, 1_000 + HISTORY as u64 + 4);
+        // A day after 1 005: beyond the last HISTORY, only the run exactly a
+        // day old stays.
+        let next = 1_005 + HISTORY_DAY_S;
+        ended_at(&mut s, 900, next);
+        assert_eq!(s.history.len(), HISTORY + 1);
+        assert_eq!(s.history.back().unwrap().ended_at, 1_005);
+        // Four seconds on, everything past the last HISTORY is over a day old.
+        ended_at(&mut s, 901, next + 4);
         assert_eq!(s.history.len(), HISTORY);
-        assert_eq!(s.history[0].ended_at, HISTORY as u64 + 4);
+        assert_eq!(s.history.back().unwrap().ended_at, 1_007);
+    }
+
+    #[test]
+    fn history_never_grows_past_its_cap() {
+        let mut s = sched(20);
+        for c in 0..(HISTORY_MAX as u64 + 3) {
+            ended_at(&mut s, c, 5_000);
+        }
+        assert_eq!(s.history.len(), HISTORY_MAX);
+        // The same run recorded again is a new entry, not a replacement.
+        ended_at(&mut s, 1, 5_000);
+        assert_eq!(s.history.len(), HISTORY_MAX);
     }
 
     #[test]

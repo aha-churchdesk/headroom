@@ -11,7 +11,7 @@ use headroom_core::config::Config;
 use headroom_core::model::{Bytes, HistoryEntry, Job, JobState, Outcome, Pressure};
 use headroom_core::profile::Profiles;
 use headroom_core::protocol::Listing;
-use headroom_core::scheduler::HISTORY;
+use headroom_core::scheduler::{HISTORY, HISTORY_DAY_S, HISTORY_MAX};
 use serde_json::{Value, json};
 
 /// One unmanaged app's memory, for the "Other apps" page.
@@ -68,11 +68,11 @@ fn secs(ms: u64) -> u64 {
     ms / 1000
 }
 
-/// What finished in the hour before `wall`, from the history (newest
-/// first). The history keeps only the last `HISTORY` runs; when all of them
-/// are inside the hour the counts are a floor, and `more` says so.
-fn last_hour(history: &[HistoryEntry], wall: u64) -> Value {
-    let since = wall.saturating_sub(3600);
+/// What finished in the day before `wall`, from the history (newest
+/// first). The history keeps at most `HISTORY_MAX` runs; when all of them
+/// are inside the day the counts are a floor, and `more` says so.
+fn last_day(history: &[HistoryEntry], wall: u64) -> Value {
+    let since = wall.saturating_sub(HISTORY_DAY_S);
     let recent: Vec<&HistoryEntry> = history.iter().filter(|h| h.ended_at >= since).collect();
     let count = |f: &dyn Fn(&HistoryEntry) -> bool| recent.iter().filter(|h| f(h)).count();
     json!({
@@ -83,7 +83,7 @@ fn last_hour(history: &[HistoryEntry], wall: u64) -> Value {
         "longest_wait_s": secs(recent.iter().map(|h| h.waited_ms).max().unwrap_or(0)),
         "shrunk": count(&|h| h.tuned.is_some()),
         "went_first": count(&|h| h.ahead_of.is_some()),
-        "more": history.len() >= HISTORY && recent.len() == history.len(),
+        "more": history.len() >= HISTORY_MAX && recent.len() == history.len(),
     })
 }
 
@@ -151,7 +151,7 @@ fn banners(l: &Listing, x: &Extras) -> Vec<Value> {
             }
         }
     }
-    for h in &l.history {
+    for h in l.history.iter().take(HISTORY) {
         let kind = match h.outcome {
             Outcome::Requeued => "requeued",
             Outcome::GaveUp => "gave_up",
@@ -188,7 +188,7 @@ pub fn state(l: &Listing, x: &Extras) -> Value {
         .chain(&l.queued)
         .map(|j| j.spec.key.as_str())
         .collect();
-    keys.extend(l.history.iter().map(|h| h.key.as_str()));
+    keys.extend(l.history.iter().take(HISTORY).map(|h| h.key.as_str()));
     let profiles: BTreeMap<&str, Value> = keys
         .into_iter()
         .filter_map(|k| {
@@ -214,6 +214,7 @@ pub fn state(l: &Listing, x: &Extras) -> Value {
     let history: Vec<Value> = l
         .history
         .iter()
+        .take(HISTORY)
         .map(|h| {
             json!({
                 "id": h.id.to_string(),
@@ -252,7 +253,7 @@ pub fn state(l: &Listing, x: &Extras) -> Value {
         "queued": l.queued.iter().map(|j| job_json(j, l.now, cfg)).collect::<Vec<_>>(),
         "banners": banners(l, x),
         "history": history,
-        "last_hour": last_hour(&l.history, x.wall),
+        "last_day": last_day(&l.history, x.wall),
         "profiles": profiles,
         "others": x.others.iter().map(|o| json!({
             "name": o.name,
@@ -432,7 +433,7 @@ mod tests {
         assert_eq!(v["history"][0]["guard"]["action"], "requeued");
         assert_eq!(v["history"][0]["ended_ago_s"], 100);
         assert!(v["history"][1]["guard"].is_null());
-        assert_eq!(v["last_hour"]["runs"], 2);
+        assert_eq!(v["last_day"]["runs"], 2);
     }
 
     fn ended(at: u64, outcome: Outcome, exit: Option<i32>, waited_ms: u64) -> HistoryEntry {
@@ -455,27 +456,27 @@ mod tests {
     }
 
     #[test]
-    fn last_hour_sums_what_finished_in_it() {
-        let wall = 10_000;
-        let mut shrunk = ended(9_000, Outcome::Exited, Some(0), 90_000);
+    fn last_day_sums_what_finished_in_it() {
+        let wall = 100_000;
+        let mut shrunk = ended(90_000, Outcome::Exited, Some(0), 90_000);
         shrunk.tuned = Some(Tuned {
             workers: 3,
             default: 9,
         });
-        let mut first = ended(8_000, Outcome::Exited, Some(1), 0);
+        let mut first = ended(80_000, Outcome::Exited, Some(1), 0);
         first.ahead_of = Some("r · e2e".into());
         let h = vec![
-            ended(9_990, Outcome::Requeued, None, 30_000),
+            ended(99_990, Outcome::Requeued, None, 30_000),
             shrunk,
             first,
-            ended(7_000, Outcome::Cancelled, None, 20_000),
-            ended(6_500, Outcome::Exited, None, 0),
-            ended(6_400, Outcome::GaveUp, None, 0),
-            ended(wall - 3600, Outcome::Exited, Some(0), 1_000),
-            ended(wall - 3601, Outcome::Exited, Some(2), 500_000),
+            ended(70_000, Outcome::Cancelled, None, 20_000),
+            ended(65_000, Outcome::Exited, None, 0),
+            ended(64_000, Outcome::GaveUp, None, 0),
+            ended(wall - HISTORY_DAY_S, Outcome::Exited, Some(0), 1_000),
+            ended(wall - HISTORY_DAY_S - 1, Outcome::Exited, Some(2), 500_000),
         ];
         assert_eq!(
-            last_hour(&h, wall),
+            last_day(&h, wall),
             json!({
                 "runs": 6, "failed": 2, "killed": 2,
                 "waited_s": 141, "longest_wait_s": 90,
@@ -485,26 +486,38 @@ mod tests {
     }
 
     #[test]
-    fn last_hour_says_when_the_history_is_too_short_to_cover_it() {
-        let quiet = last_hour(&[], 5_000);
+    fn last_day_says_when_the_history_is_too_short_to_cover_it() {
+        let quiet = last_day(&[], 5_000);
         assert_eq!(
             (quiet["runs"].as_u64(), quiet["waited_s"].as_u64()),
             (Some(0), Some(0))
         );
         assert_eq!(quiet["more"], false);
-        let full: Vec<_> = (0..HISTORY as u64)
-            .map(|i| ended(5_000 - i, Outcome::Exited, Some(0), 0))
+        let full: Vec<_> = (0..HISTORY_MAX as u64)
+            .map(|i| ended(500_000 - i, Outcome::Exited, Some(0), 0))
             .collect();
-        assert_eq!(last_hour(&full, 5_000)["more"], true);
+        assert_eq!(last_day(&full, 500_000)["more"], true);
         let mut older = full.clone();
         older.last_mut().unwrap().ended_at = 1_000;
-        let v = last_hour(&older, 5_000);
+        let v = last_day(&older, 500_000);
         assert_eq!(
             (v["more"].as_bool(), v["runs"].as_u64()),
-            (Some(false), Some(HISTORY as u64 - 1))
+            (Some(false), Some(HISTORY_MAX as u64 - 1))
         );
-        // Early in the clock's life the hour starts at zero, not before it.
-        assert_eq!(last_hour(&full, 30)["runs"], HISTORY as u64);
+        // Early in the clock's life the day starts at zero, not before it.
+        assert_eq!(last_day(&full[..3], 30)["runs"], 3);
+    }
+
+    #[test]
+    fn the_history_page_shows_the_last_runs_and_the_summary_counts_the_day() {
+        let (cfg, p, d) = (Config::default(), Profiles::default(), HashSet::new());
+        let mut l = listing();
+        l.history = (0..HISTORY as u64 + 10)
+            .map(|i| ended(1_000 - i, Outcome::Exited, Some(0), 0))
+            .collect();
+        let v = state(&l, &extras(&cfg, &p, &d));
+        assert_eq!(v["history"].as_array().unwrap().len(), HISTORY);
+        assert_eq!(v["last_day"]["runs"], HISTORY as u64 + 10);
     }
 
     #[test]

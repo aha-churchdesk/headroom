@@ -94,6 +94,8 @@ function loadUI() {
     setState: s => window.__setState(JSON.parse(JSON.stringify(s))),
     fixture: name => JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', name + '.json'), 'utf8')),
     view: () => text(byId.view._html),
+    /** The view's markup, for what only shows on hover (titles). */
+    html: () => byId.view._html,
     head: () => text(byId.head._html),
     page: () => text(page()),
     find,

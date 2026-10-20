@@ -547,10 +547,12 @@ mod tests {
             apps.windows(2).all(|w| w[0].bytes >= w[1].bytes),
             "largest first"
         );
+        // Only this test's own group, so other processes coming and going
+        // between two walks of the whole machine can't change the answer.
         let me = unsafe { libc::getpgid(0) };
-        let without_me = top_apps(&all_pids(), &[me], 1000);
-        let procs = |v: &[AppUsage]| v.iter().map(|a| a.procs).sum::<u32>();
-        assert!(procs(&without_me) < procs(&apps));
+        let mine = pids_in_group(me);
+        assert!(!top_apps(&mine, &[], 1000).is_empty());
+        assert!(top_apps(&mine, &[me], 1000).is_empty());
         assert_eq!(top_apps(&all_pids(), &[], 3).len(), 3);
         assert!(
             apps.iter()

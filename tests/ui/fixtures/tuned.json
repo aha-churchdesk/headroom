@@ -45,17 +45,17 @@
       "id": "3",
       "label": "sc-49123",
       "cmd": "vitest run",
-      "full_cmd": "/var/folders/g3/qjbw6xys4_1cb6zs26vqbjkr0000gn/T/hr-ui-tune-bin-59499/vitest run",
+      "full_cmd": "/var/folders/g3/qjbw6xys4_1cb6zs26vqbjkr0000gn/T/hr-ui-tune-bin-7196/vitest run",
       "cwd": "~/Projects/work-scheduler-mcp/headroom",
       "session": null,
       "key": "~/Projects/work-scheduler-mcp|headroom|vitest run",
       "state": "running",
       "pinned": false,
       "low": false,
-      "estimate": 423115044,
+      "estimate": 423127920,
       "samples": 1,
-      "footprint": 538510056,
-      "peak": 538510056,
+      "footprint": 538526440,
+      "peak": 538526440,
       "runaway_at": 8589934592,
       "elapsed_s": 0,
       "frozen_s": 0,
@@ -80,16 +80,16 @@
       "cmd": "vitest run",
       "key": "~/Projects/work-scheduler-mcp|headroom|vitest run",
       "duration_s": 4,
-      "peak": 538510056,
+      "peak": 538526440,
       "estimate": 1610612736,
       "exit": 0,
-      "ended_ago_s": 1,
+      "ended_ago_s": 0,
       "tuned": null,
       "ahead_of": null,
       "guard": null
     }
   ],
-  "last_hour": {
+  "last_day": {
     "runs": 1,
     "failed": 0,
     "killed": 0,
@@ -102,9 +102,9 @@
   "profiles": {
     "~/Projects/work-scheduler-mcp|headroom|vitest run": {
       "peaks": [
-        538510056
+        538526440
       ],
-      "p90": 1253245176,
+      "p90": 1253250637,
       "median_s": 4,
       "samples": 1
     }

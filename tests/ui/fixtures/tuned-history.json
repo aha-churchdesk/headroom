@@ -51,8 +51,8 @@
       "cmd": "vitest run",
       "key": "~/Projects/work-scheduler-mcp|headroom|vitest run",
       "duration_s": 4,
-      "peak": 538510056,
-      "estimate": 423115044,
+      "peak": 538526440,
+      "estimate": 423127920,
       "exit": 0,
       "ended_ago_s": 0,
       "tuned": {
@@ -68,16 +68,16 @@
       "cmd": "vitest run",
       "key": "~/Projects/work-scheduler-mcp|headroom|vitest run",
       "duration_s": 4,
-      "peak": 538510056,
+      "peak": 538526440,
       "estimate": 1610612736,
       "exit": 0,
-      "ended_ago_s": 4,
+      "ended_ago_s": 5,
       "tuned": null,
       "ahead_of": null,
       "guard": null
     }
   ],
-  "last_hour": {
+  "last_day": {
     "runs": 2,
     "failed": 0,
     "killed": 0,
@@ -90,10 +90,10 @@
   "profiles": {
     "~/Projects/work-scheduler-mcp|headroom|vitest run": {
       "peaks": [
-        538510056,
-        538510056
+        538526440,
+        538526440
       ],
-      "p90": 895877616,
+      "p90": 895888538,
       "median_s": 4,
       "samples": 2
     }

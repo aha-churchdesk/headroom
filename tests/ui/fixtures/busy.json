@@ -32,8 +32,8 @@
       "low": false,
       "estimate": 1610612736,
       "samples": 0,
-      "footprint": 323650112,
-      "peak": 323650112,
+      "footprint": 323666496,
+      "peak": 323666496,
       "runaway_at": 8589934592,
       "elapsed_s": 1,
       "frozen_s": 0,
@@ -128,7 +128,7 @@
   ],
   "banners": [],
   "history": [],
-  "last_hour": {
+  "last_day": {
     "runs": 0,
     "failed": 0,
     "killed": 0,

@@ -113,33 +113,35 @@ test('a head passed over says how often and until when; the job that went first 
   has(ui.view(), `started ahead of ${head.label} · ${head.cmd}`);
 });
 
-test('the last hour sums up what finished, above what is running', () => {
+test('one line above what is running sums up the last 24 hours', () => {
   ui.setState(history);
-  const v = ui.view();
-  has(v, 'Last hour 5 runs 1 failed · 2 killed 0s queued 0 shrunk 0 went first Running');
+  has(ui.view(), '24h 5 runs · 1 failed · 2 killed Running');
   ui.setState(tunedHistory);
-  has(ui.view(), '2 runs 0s queued 1 shrunk');
+  has(ui.view(), '24h 2 runs · 1 shrunk Running');
   ui.setState(backfill);
-  has(ui.view(), '1 went first');
+  has(ui.view(), '· 1 went first');
 });
 
-test('the last hour shows time spent queued and the longest wait', () => {
-  ui.setState({ ...history, last_hour: { ...history.last_hour, runs: 1, failed: 0, killed: 0, waited_s: 254, longest_wait_s: 131 } });
-  has(ui.view(), 'Last hour 1 run 4m14 queued longest 2m11');
+test('the 24 hours show time spent queued, and the longest wait on hover', () => {
+  ui.setState({ ...history, last_day: { ...history.last_day, runs: 1, failed: 0, killed: 0, waited_s: 254, longest_wait_s: 131 } });
+  has(ui.view(), '24h 1 run · queued 4m14 Running');
+  has(ui.html(), 'Longest wait in the queue: 2m11');
+  ui.setState(history);
+  lacks(ui.html(), 'Longest wait');
 });
 
-test('a quiet hour says so in one line', () => {
-  eq(busy.last_hour.runs, 0, 'the capture has nothing finished yet');
+test('a quiet day says so', () => {
+  eq(busy.last_day.runs, 0, 'the capture has nothing finished yet');
   ui.setState(busy);
-  has(ui.view(), 'Last hour · nothing finished Running');
+  has(ui.view(), '24h nothing finished Running');
   // Cancelled jobs are not runs, but their wait still counts.
-  ui.setState({ ...busy, last_hour: { ...busy.last_hour, waited_s: 40, longest_wait_s: 40 } });
-  has(ui.view(), '0 runs 40s queued longest 40s');
+  ui.setState({ ...busy, last_day: { ...busy.last_day, waited_s: 40, longest_wait_s: 40 } });
+  has(ui.view(), '24h 0 runs · queued 40s');
 });
 
-test('a busier hour than the history holds is a floor', () => {
-  ui.setState({ ...history, last_hour: { ...history.last_hour, runs: 50, more: true } });
-  has(ui.view(), '50+ runs');
+test('a busier day than the history holds is a floor', () => {
+  ui.setState({ ...history, last_day: { ...history.last_day, runs: 2000, more: true } });
+  has(ui.view(), '24h 2000+ runs');
 });
 
 test('a head never passed over shows no count', () => {

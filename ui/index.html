@@ -198,11 +198,8 @@ button:disabled{ cursor:default; opacity:.4; }
 }
 .sec-h .why{ text-transform:none; letter-spacing:0; font-weight:500; font-size:11.5px; color:var(--text-dim); }
 .sec-h .why.blocked{ color:var(--warn); }
-.hour{ display:grid; grid-template-columns:repeat(4, 1fr); gap:8px; padding:2px 14px 6px; }
-.hour > div{ display:flex; flex-direction:column; min-width:0; }
-.hour b{ font-size:15px; }
-.hour span{ font-size:11px; color:var(--text-dim); }
-.hour .sub{ color:var(--text-faint); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.sec.day{ padding:7px 0 2px; }
+.sec.day .why{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; }
 .empty{ padding:6px 14px 10px; color:var(--text-faint); font-size:12px; }
 
 /* Job rows */
@@ -533,30 +530,23 @@ function renderHead(S){
     ${alert}`;
 }
 
-function renderLastHour(h){
-  if (!h.runs && !h.waited_s) return `
-    <div class="sec"><div class="sec-h">Last hour <span class="why">· nothing finished</span></div></div>`;
-  const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
-  const bad = [h.failed && `${h.failed} failed`, h.killed && `${h.killed} killed`].filter(Boolean).join(" · ");
-  const cell = (value, label, sub, tip) => `
-      <div ${tip ? `title="${tip}"` : ""}><b class="num">${value}</b><span>${label}</span>
-        ${sub ? `<span class="sub">${sub}</span>` : ""}</div>`;
+function renderLastDay(h){
+  const parts = !h.runs && !h.waited_s ? ["nothing finished"] : [
+    `${h.runs}${h.more ? "+" : ""} ${h.runs === 1 ? "run" : "runs"}`,
+    h.failed && `${h.failed} failed`,
+    h.killed && `${h.killed} killed`,
+    h.waited_s && `queued ${dur(h.waited_s)}`,
+    h.shrunk && `${h.shrunk} shrunk`,
+    h.went_first && `${h.went_first} went first`,
+  ].filter(Boolean);
+  const tip = `Jobs that finished in the last 24 hours${h.longest_wait_s ? `. Longest wait in the queue: ${dur(h.longest_wait_s)}` : ""}`;
   return `
-    <div class="sec">
-      <div class="sec-h">Last hour</div>
-      <div class="hour">
-        ${cell(`${h.runs}${h.more ? "+" : ""}`, h.runs === 1 ? "run" : "runs", bad,
-          h.more ? "History keeps the last 50 runs; more than that finished this hour" : "")}
-        ${cell(dur(h.waited_s), "queued", h.longest_wait_s ? `longest ${dur(h.longest_wait_s)}` : "",
-          "Time jobs spent waiting for memory before they started")}
-        ${cell(h.shrunk, "shrunk", "", "Started with fewer workers so they fit")}
-        ${cell(h.went_first, "went first", "", "Short jobs that started ahead of a bigger one waiting for memory")}
-      </div>
-    </div>`;
+    <div class="sec day" title="${tip}"><div class="sec-h">24h
+      <span class="why">${parts.join(" · ")}</span></div></div>`;
 }
 
 function renderMain(S){
-  return S.banners.map(renderBanner).join("") + renderLastHour(S.last_hour) + `
+  return S.banners.map(renderBanner).join("") + renderLastDay(S.last_day) + `
     <div class="sec">
       <div class="sec-h">Running ${S.running.length || ""}</div>
       ${S.running.length
@@ -1146,7 +1136,7 @@ function base(over){
     system: { pressure:"normal", mem_total:G(36), mem_used:G(27.1), mem_available:G(8.9), swap_used:G(0.4), cpu_pct:63 },
     held:false, hooks:{ claude:"installed", codex:"installed", pi:"installed" }, queue_reason:null,
     running:[], queued:[], banners:[],
-    last_hour: { runs:3, failed:1, killed:1, waited_s:254, longest_wait_s:131, shrunk:1, went_first:1, more:false },
+    last_day: { runs:3, failed:1, killed:1, waited_s:254, longest_wait_s:131, shrunk:1, went_first:1, more:false },
     history: [
       { id:"r1", label:"sc-49123", cmd:"vitest run", key:"browser-churchdesk · vitest run", duration_s:151, peak:G(3.9), estimate:G(4.1), exit:0, ended_ago_s:420 },
       { id:"r2", label:"fix-main", cmd:"tsc --noEmit", key:"fix-main · tsc --noEmit", duration_s:47, peak:G(1.2), estimate:G(1.3), exit:2, ended_ago_s:900 },
@@ -1165,7 +1155,7 @@ const MOCK = {
     running:[J.vitest(), J.tsc()], queued:[J.e2e(), J.build(), J.jest()],
     queue_reason:{ kind:"memory", need:G(4.2), free:G(2.9) } }) },
   idle: { title:"Idle", desc:"nothing running", make: () => base({
-    last_hour:{ runs:0, failed:0, killed:0, waited_s:0, longest_wait_s:0, shrunk:0, went_first:0, more:false },
+    last_day:{ runs:0, failed:0, killed:0, waited_s:0, longest_wait_s:0, shrunk:0, went_first:0, more:false },
     system:{ pressure:"normal", mem_total:G(36), mem_used:G(17.6), mem_available:G(18.4), swap_used:G(0), cpu_pct:9 } }) },
   frozen: { title:"Frozen", desc:"critical pressure, guard froze a job", make: () => {
     const v = J.vitest(); v.state = "frozen"; v.frozen_s = 12; v.footprint = G(5.2); v.peak = G(5.2); v.cpu_pct = 0;

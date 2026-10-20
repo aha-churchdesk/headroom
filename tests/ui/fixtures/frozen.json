@@ -28,8 +28,8 @@
       "low": false,
       "estimate": 1610612736,
       "samples": 0,
-      "footprint": 216236536,
-      "peak": 216236536,
+      "footprint": 216252920,
+      "peak": 216252920,
       "runaway_at": 8589934592,
       "elapsed_s": 1,
       "frozen_s": 0,
@@ -63,7 +63,7 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": null,
-      "ended_ago_s": 2,
+      "ended_ago_s": 1,
       "tuned": null,
       "ahead_of": null,
       "guard": {
@@ -80,7 +80,7 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": 0,
-      "ended_ago_s": 2,
+      "ended_ago_s": 1,
       "tuned": null,
       "ahead_of": null,
       "guard": null
@@ -94,13 +94,13 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": 3,
-      "ended_ago_s": 2,
+      "ended_ago_s": 1,
       "tuned": null,
       "ahead_of": null,
       "guard": null
     }
   ],
-  "last_hour": {
+  "last_day": {
     "runs": 3,
     "failed": 1,
     "killed": 0,
