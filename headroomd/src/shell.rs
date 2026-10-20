@@ -2,11 +2,12 @@
 //! act on them.
 //!
 //! Every bug that reached the user so far lived here rather than in the
-//! tracking core: the popover toggling twice per click, and dismissing itself
-//! the instant it opened. Neither was reachable by a test while the logic sat
-//! inside the event loop. These functions are the same rules, made checkable.
+//! tracking core: the popover toggling twice per click, dismissing itself
+//! the instant it opened, and reopening when its icon was clicked to close
+//! it. None was reachable by a test while the logic sat inside the event
+//! loop. These functions are the same rules, made checkable.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Event-loop wake interval while the popover is open, so clicks feel instant.
 pub const AWAKE_POLL: Duration = Duration::from_millis(120);
@@ -14,6 +15,9 @@ pub const AWAKE_POLL: Duration = Duration::from_millis(120);
 pub const IDLE_POLL: Duration = Duration::from_secs(5);
 /// Focus loss within this window of opening is opening churn, not dismissal.
 pub const FOCUS_GRACE: Duration = Duration::from_millis(400);
+/// A press on the icon this soon after focus loss hid the popover is the
+/// press that took the focus: a click meant to close it.
+pub const CLOSE_CLICK: Duration = Duration::from_millis(300);
 /// Gap between the menu bar and the popover's top edge.
 pub const POPOVER_GAP: f64 = 4.0;
 /// Keep the popover clear of the screen edges.
@@ -34,13 +38,59 @@ pub enum ButtonState {
     Down,
 }
 
-/// Should a tray click toggle the popover?
+/// What a tray click does to the popover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Toggle {
+    Show,
+    Hide,
+}
+
+/// Turns tray clicks into show and hide.
 ///
 /// `tray_icon` emits a `Click` for **both** press and release, so reacting to
-/// every one toggles twice per physical click — the popover appears and
-/// vanishes in the same frame. Only the left button's release counts.
-pub fn should_toggle(button: Button, state: ButtonState) -> bool {
-    button == Button::Left && state == ButtonState::Up
+/// every one toggles twice per physical click. Only the left button's
+/// release acts. Whether it shows or hides is decided at the press: pressing
+/// the icon of an open popover takes its focus, and focus loss may hide it
+/// before the release arrives. Deciding at the release would see it hidden
+/// and open it again.
+#[derive(Debug, Default)]
+pub struct TrayClicks {
+    closing: bool,
+    dismissed_at: Option<Instant>,
+}
+
+impl TrayClicks {
+    /// Focus loss hid the popover.
+    pub fn dismissed(&mut self, now: Instant) {
+        self.dismissed_at = Some(now);
+    }
+
+    pub fn click(
+        &mut self,
+        button: Button,
+        state: ButtonState,
+        visible: bool,
+        now: Instant,
+    ) -> Option<Toggle> {
+        if button != Button::Left {
+            return None;
+        }
+        match state {
+            ButtonState::Down => {
+                let just_hidden = self
+                    .dismissed_at
+                    .is_some_and(|t| now.saturating_duration_since(t) < CLOSE_CLICK);
+                self.closing = visible || just_hidden;
+                None
+            }
+            // A release without its press (none seen) toggles as before.
+            ButtonState::Up => Some(if std::mem::take(&mut self.closing) || visible {
+                Toggle::Hide
+            } else {
+                Toggle::Show
+            }),
+        }
+    }
 }
 
 /// Should focus loss dismiss the popover?
@@ -179,26 +229,77 @@ pub fn glyph_segments(used: u64, total: u64) -> u32 {
 mod tests {
     use super::*;
 
+    const L: Button = Button::Left;
+    const DOWN: ButtonState = ButtonState::Down;
+    const UP: ButtonState = ButtonState::Up;
+    const MS: fn(u64) -> Duration = Duration::from_millis;
+
     /// Regression: one physical click used to toggle twice, so the popover
     /// opened on press and closed again on release.
     #[test]
     fn a_click_toggles_exactly_once() {
-        let sequence = [
-            (Button::Left, ButtonState::Down),
-            (Button::Left, ButtonState::Up),
-        ];
-        let toggles = sequence
-            .iter()
-            .filter(|(b, s)| should_toggle(*b, *s))
-            .count();
-        assert_eq!(toggles, 1, "press and release must not both count");
+        let (mut c, t) = (TrayClicks::default(), Instant::now());
+        assert_eq!(c.click(L, DOWN, false, t), None);
+        assert_eq!(c.click(L, UP, false, t + MS(80)), Some(Toggle::Show));
+        assert_eq!(c.click(L, DOWN, true, t + MS(2000)), None);
+        assert_eq!(c.click(L, UP, true, t + MS(2080)), Some(Toggle::Hide));
     }
 
     #[test]
     fn other_buttons_do_not_toggle() {
-        assert!(!should_toggle(Button::Right, ButtonState::Up));
-        assert!(!should_toggle(Button::Middle, ButtonState::Up));
-        assert!(!should_toggle(Button::Left, ButtonState::Down));
+        let (mut c, t) = (TrayClicks::default(), Instant::now());
+        for b in [Button::Right, Button::Middle] {
+            assert_eq!(c.click(b, DOWN, false, t), None);
+            assert_eq!(c.click(b, UP, false, t), None);
+        }
+    }
+
+    /// Regression: clicking the icon to close the popover sometimes opened
+    /// it again. The press took the popover's focus, focus loss hid it, and
+    /// the release then saw it hidden.
+    #[test]
+    fn a_closing_click_stays_closed_whichever_event_comes_first() {
+        let t = Instant::now();
+        // Press first, then focus loss hides it, then the release.
+        let mut c = TrayClicks::default();
+        c.click(L, DOWN, true, t);
+        c.dismissed(t + MS(5));
+        assert_eq!(c.click(L, UP, false, t + MS(90)), Some(Toggle::Hide));
+        // Focus loss first: by the press it is already hidden.
+        let mut c = TrayClicks::default();
+        c.dismissed(t);
+        c.click(L, DOWN, false, t + MS(10));
+        assert_eq!(c.click(L, UP, false, t + MS(90)), Some(Toggle::Hide));
+    }
+
+    #[test]
+    fn a_click_after_clicking_elsewhere_opens_it() {
+        let t = Instant::now();
+        let mut c = TrayClicks::default();
+        c.dismissed(t);
+        c.click(L, DOWN, false, t + CLOSE_CLICK - MS(1));
+        assert_eq!(c.click(L, UP, false, t + CLOSE_CLICK), Some(Toggle::Hide));
+        c.click(L, DOWN, false, t + CLOSE_CLICK);
+        assert_eq!(
+            c.click(L, UP, false, t + CLOSE_CLICK + MS(80)),
+            Some(Toggle::Show)
+        );
+        // The next click closes it again: nothing carried over.
+        c.click(L, DOWN, true, t + MS(5000));
+        assert_eq!(c.click(L, UP, true, t + MS(5080)), Some(Toggle::Hide));
+    }
+
+    #[test]
+    fn a_release_without_a_press_toggles() {
+        let t = Instant::now();
+        assert_eq!(
+            TrayClicks::default().click(L, UP, false, t),
+            Some(Toggle::Show)
+        );
+        assert_eq!(
+            TrayClicks::default().click(L, UP, true, t),
+            Some(Toggle::Hide)
+        );
     }
 
     /// Regression: the popover dismissed itself during the focus churn of

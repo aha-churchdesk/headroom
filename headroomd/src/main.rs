@@ -235,6 +235,7 @@ fn main() -> wry::Result<()> {
     let mut last_scale: Option<f64> = None;
     // Showing a window causes focus churn; ignore focus loss for a moment.
     let mut shown_at = Instant::now();
+    let mut clicks = shell::TrayClicks::default();
     let mut next_list = Instant::now();
     let mut next_settings = Instant::now();
     let mut next_hooks = Instant::now();
@@ -256,6 +257,7 @@ fn main() -> wry::Result<()> {
                 if shell::should_dismiss(visible, shown_at.elapsed()) {
                     window.set_visible(false);
                     visible = false;
+                    clicks.dismissed(Instant::now());
                 }
             }
             Event::WindowEvent {
@@ -294,8 +296,8 @@ fn main() -> wry::Result<()> {
                     MouseButtonState::Up => shell::ButtonState::Up,
                     MouseButtonState::Down => shell::ButtonState::Down,
                 };
-                if shell::should_toggle(btn, st) {
-                    visible = !visible;
+                if let Some(toggle) = clicks.click(btn, st, visible, Instant::now()) {
+                    visible = toggle == shell::Toggle::Show;
                     if visible {
                         // Clamp to the screen the icon is on (not the one
                         // the window was last on), in physical pixels.
