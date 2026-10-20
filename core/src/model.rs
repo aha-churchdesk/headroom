@@ -122,6 +122,18 @@ pub struct Job {
     /// The worker count it was started with, if admission lowered it.
     #[serde(default)]
     pub tuned: Option<Tuned>,
+    /// Typical run time from its profile; what backfilling plans with.
+    #[serde(default)]
+    pub median_ms: Option<u64>,
+    /// Times a later job started ahead of it while it waited on memory,
+    /// and when that first happened.
+    #[serde(default)]
+    pub skipped: u32,
+    #[serde(default)]
+    pub skipped_since: Option<Millis>,
+    /// The job it started ahead of, as "label · cmd".
+    #[serde(default)]
+    pub ahead_of: Option<String>,
 }
 
 impl Job {
@@ -148,6 +160,10 @@ impl Job {
             pgid: None,
             scaling: None,
             tuned: None,
+            median_ms: None,
+            skipped: 0,
+            skipped_since: None,
+            ahead_of: None,
         }
     }
 
@@ -199,4 +215,6 @@ pub struct HistoryEntry {
     pub why: Option<String>,
     #[serde(default)]
     pub tuned: Option<Tuned>,
+    #[serde(default)]
+    pub ahead_of: Option<String>,
 }

@@ -527,6 +527,8 @@ function renderMain(S){
       <div class="sec-h">Queued ${S.queued.length || ""}
         ${S.queued.length && S.queue_reason
           ? `<span class="why blocked">· ${esc(reasonText(S.queue_reason))}</span>` : ""}
+        ${S.queued.length && S.queued[0].skipped
+          ? `<span class="why" title="Shorter jobs that fit started ahead of it. After ${S.settings.backfill_skips ?? 3} times or ${dur(S.settings.backfill_wait_s ?? 300)}, the queue waits for it.">· passed over ${S.queued[0].skipped}×${S.queued[0].strict_in_s ? ` · strict in ${dur(S.queued[0].strict_in_s)}` : ""}</span>` : ""}
       </div>
       ${S.queued.length
         ? S.queued.map((j, i) => renderQueued(j, i, S)).join("")
@@ -685,7 +687,7 @@ function renderHistory(S){
   return pageHead("History") + (S.history.length ? S.history.map(r => `
     <div class="hrow" data-act="profile" data-key="${esc(r.key)}">
       <div class="l1"><span class="name"><b>${esc(r.label)}</b> <span class="dim">· ${esc(r.cmd)}</span></span>${outcomeTag(r)}</div>
-      <div class="l2 num">${dur(r.duration_s)} · peak ${gb(r.peak)} / est ${gb(r.estimate)} GB${r.tuned ? ` · ${r.tuned.workers}/${r.tuned.default} workers` : ""} · ${ago(r.ended_ago_s)}
+      <div class="l2 num">${dur(r.duration_s)} · peak ${gb(r.peak)} / est ${gb(r.estimate)} GB${r.tuned ? ` · ${r.tuned.workers}/${r.tuned.default} workers` : ""}${r.ahead_of ? ` · started ahead of ${esc(r.ahead_of)}` : ""} · ${ago(r.ended_ago_s)}
         ${r.guard && r.guard.why ? `<br>${esc(r.guard.why)}` : ""}</div>
     </div>`).join("") : `<div class="empty">No runs yet</div>`);
 }
@@ -807,6 +809,13 @@ function renderSettings(S){
         <div><div class="k">Shrink jobs to fit</div>
           <div class="h">When the next job doesn't fit, start it with fewer workers (vitest, turbo, cargo) instead of waiting. Never below 2, and never when you set a worker count yourself.</div></div>
         <button class="toggle ${c.tune ? "on" : ""}" data-act="set" data-key="tune" data-val="${!c.tune}"></button>
+      </div>
+    </div>
+    <div class="set">
+      <div class="ctl" style="margin-top:0;justify-content:space-between">
+        <div><div class="k">Let short jobs go first</div>
+          <div class="h">While the next job waits on memory, start a later one that fits and should finish before it could start. At most ${c.backfill_skips ?? 3} times or ${dur(c.backfill_wait_s ?? 300)}, then the queue waits for it.</div></div>
+        <button class="toggle ${c.backfill ? "on" : ""}" data-act="set" data-key="backfill" data-val="${!c.backfill}"></button>
       </div>
     </div>
     <div class="set">
@@ -1012,6 +1021,7 @@ const BASE_SETTINGS = {
   headroom: G(2), kill_mode: "freeze_kill", wait_cap_s: 480, default_estimate: G(1.5),
   start_at_login: true,
   tune: true,
+  backfill: true, backfill_skips: 3, backfill_wait_s: 300,
   patterns: ["vitest", "jest", "playwright", "tsc", "pnpm test", "pnpm build", "nx run", "turbo run",
              "next build", "cargo build", "cargo test", "xcodebuild", "docker build", "pytest"],
   excluded: ["dev", "serve", "watch", "--watch", "docker compose up -d"],

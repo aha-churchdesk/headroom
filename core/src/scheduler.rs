@@ -140,8 +140,9 @@ impl Scheduler {
         let id = self.next_id;
         self.next_id += 1;
         let scaling = self.scaling_for(&spec);
+        let median = self.median_for(&spec);
         let mut job = Job::queued(id, spec, est.bytes, est.samples, now);
-        job.scaling = scaling;
+        (job.scaling, job.median_ms) = (scaling, median);
         self.jobs.insert(
             id,
             Entry {
@@ -521,6 +522,10 @@ impl Scheduler {
         self.profiles.get(&spec.key)?.scaling()
     }
 
+    fn median_for(&self, spec: &JobSpec) -> Option<u64> {
+        self.profiles.get(&spec.key)?.median_ms()
+    }
+
     /// After the settings or a profile changed: queued jobs' estimates.
     fn reestimate(&mut self, key: Option<&str>) {
         let ids: Vec<JobId> = self
@@ -536,8 +541,10 @@ impl Scheduler {
                 self.profiles
                     .estimate(&spec.key, &spec.fallback_key, self.cfg.default_estimate);
             let scaling = self.scaling_for(&spec);
+            let median = self.median_for(&spec);
             let j = &mut self.jobs.get_mut(&id).expect("queued").job;
             (j.estimate, j.samples, j.scaling) = (est.bytes, est.samples, scaling);
+            j.median_ms = median;
         }
     }
 
@@ -548,7 +555,9 @@ impl Scheduler {
             self.cfg.default_estimate,
         );
         let scaling = self.scaling_for(&e.job.spec);
+        let median = self.median_for(&e.job.spec);
         let j = &mut e.job;
+        (j.median_ms, j.ahead_of) = (median, None);
         j.state = JobState::Queued;
         j.retry += 1;
         j.estimate = est.bytes;
@@ -587,6 +596,7 @@ impl Scheduler {
             outcome,
             why,
             tuned: j.tuned,
+            ahead_of: j.ahead_of.clone(),
         });
         self.history.truncate(HISTORY);
     }
@@ -629,8 +639,17 @@ impl Scheduler {
             .map(|e| &e.job)
             .collect();
         let queue: Vec<&Job> = self.order.iter().map(|id| &self.jobs[id].job).collect();
-        let d = admission::decide(&self.snap, &running, &queue, self.held, &self.cfg);
+        let d = admission::decide(&self.snap, &running, &queue, self.held, &self.cfg, now);
         self.blocked = d.blocked;
+        if let Some(h) = d.skipped {
+            let head = &mut self.jobs.get_mut(&h).expect("queued").job;
+            head.skipped += 1;
+            head.skipped_since.get_or_insert(now);
+            let name = format!("{} · {}", head.spec.label, head.spec.cmd);
+            for id in &d.backfilled {
+                self.jobs.get_mut(id).expect("queued").job.ahead_of = Some(name.clone());
+            }
+        }
         for id in d.admit {
             self.order.retain(|&q| q != id);
             let swap = self.snap.swap_used;
@@ -948,6 +967,53 @@ mod tests {
         assert!(fx.contains(&Effect::SaveConfig));
         let later = s.tick(snap(12), &HashMap::new(), 1_000);
         assert!(granted(&fx, 1) || granted(&later, 1));
+    }
+
+    /// Three clean runs of `cmd`, each `gb` GB for `secs` seconds.
+    fn learned(s: &mut Scheduler, cmd: &str, gb: u64, secs: u64) {
+        let sp = spec(cmd);
+        for _ in 0..3 {
+            let run = Run {
+                peak: gb * GIB,
+                duration_ms: secs * 1000,
+                exit: Some(0),
+                flagged: false,
+                at: 0,
+                workers: None,
+            };
+            s.profiles.record(&sp.key, &format!("/r|own-{cmd}"), run);
+        }
+    }
+
+    fn own(cmd: &str) -> JobSpec {
+        JobSpec {
+            fallback_key: format!("/r|own-{cmd}"),
+            ..spec(cmd)
+        }
+    }
+
+    #[test]
+    fn a_short_job_starts_ahead_of_a_blocked_head_and_history_says_so() {
+        // 8 GB available, 2 kept free. A 6 GB build that takes 60 s runs;
+        // the 7 GB e2e run must wait for it; a 1 GB lint taking 10 s need not.
+        let mut s = sched(8);
+        learned(&mut s, "build", 6, 60);
+        learned(&mut s, "e2e", 7, 300);
+        learned(&mut s, "lint", 1, 10);
+        s.enqueue(1, own("build"), 0);
+        s.started(1, 100);
+        s.tick(snap(8), &usage(100, 6.0), 1_000);
+        s.enqueue(2, own("e2e"), 1_000);
+        let fx = s.enqueue(3, own("lint"), 1_000);
+        assert!(granted(&fx, 3) && !granted(&fx, 2));
+        let head = s.list().queued[0].clone();
+        assert_eq!(
+            (head.id, head.skipped, head.skipped_since),
+            (2, 1, Some(1_000))
+        );
+        s.started(3, 300);
+        s.exited(3, Some(0), None, 5_000, 9);
+        assert_eq!(s.history[0].ahead_of.as_deref(), Some("repo · e2e"));
     }
 
     fn s_cfg() -> Config {

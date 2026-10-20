@@ -894,4 +894,45 @@ fn capture_ui_states() {
     save(&mut app, "tuned-history");
     d.output(&["kill", &d.ls().running[0].id.to_string()]);
     finish(blocker);
+    drop(d);
+
+    // Backfill: a 1 GB, 3 s job runs; another waits on memory; a quick one
+    // starts ahead of it. Each has three runs behind it first.
+    let bin = tmp("ui-backfill-bin");
+    let script = |name: &str, body: String| {
+        let p = bin.join(name);
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        p.display().to_string()
+    };
+    let big = script("e2e.sh", format!("exec {HOG} 1 3"));
+    let quick = script("lint.sh", "true".into());
+    let d = Daemon::start(
+        "ui-backfill",
+        Config {
+            headroom: 47 * GIB + GIB / 2,
+            ..Config::default()
+        },
+    );
+    let mut app = app_for(&d, "ui-backfill", false);
+    for _ in 0..3 {
+        d.output(&["run", "--", &big]);
+        d.output(&["run", "--", &quick]);
+    }
+    let running = d.spawn(&["run", "--label", "sc-49123", "--", &big]);
+    d.running();
+    let head = d.spawn(&["run", "--label", "browser-cd", "--", &big]);
+    d.queued_id();
+    let ahead = d.spawn(&["run", "--label", "fix-main", "--", &quick]);
+    wait_for("the quick job to run ahead", 5, || {
+        d.ls()
+            .history
+            .iter()
+            .any(|h| h.ahead_of.is_some())
+            .then_some(())
+    });
+    save(&mut app, "backfill");
+    for c in [running, head, ahead] {
+        finish(c);
+    }
 }

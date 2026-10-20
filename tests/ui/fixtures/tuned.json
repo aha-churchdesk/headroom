@@ -37,23 +37,25 @@
       "cpu_pct": 0.0,
       "procs": 1,
       "retry": 0,
-      "tuned": null
+      "tuned": null,
+      "skipped": 0,
+      "strict_in_s": null
     },
     {
       "id": "3",
       "label": "sc-49123",
       "cmd": "vitest run",
-      "full_cmd": "/var/folders/g3/qjbw6xys4_1cb6zs26vqbjkr0000gn/T/hr-ui-tune-bin-59356/vitest run",
+      "full_cmd": "/var/folders/g3/qjbw6xys4_1cb6zs26vqbjkr0000gn/T/hr-ui-tune-bin-11909/vitest run",
       "cwd": "~/Projects/work-scheduler-mcp/headroom",
       "session": null,
       "key": "~/Projects/work-scheduler-mcp|headroom|vitest run",
       "state": "running",
       "pinned": false,
       "low": false,
-      "estimate": 423127920,
+      "estimate": 423102178,
       "samples": 1,
-      "footprint": 538526440,
-      "peak": 538526440,
+      "footprint": 538510056,
+      "peak": 538510056,
       "runaway_at": 8589934592,
       "elapsed_s": 0,
       "frozen_s": 0,
@@ -64,7 +66,9 @@
       "tuned": {
         "workers": 10,
         "default": 14
-      }
+      },
+      "skipped": 0,
+      "strict_in_s": null
     }
   ],
   "queued": [],
@@ -76,20 +80,21 @@
       "cmd": "vitest run",
       "key": "~/Projects/work-scheduler-mcp|headroom|vitest run",
       "duration_s": 4,
-      "peak": 538526440,
+      "peak": 538493672,
       "estimate": 1610612736,
       "exit": 0,
       "ended_ago_s": 1,
       "tuned": null,
+      "ahead_of": null,
       "guard": null
     }
   ],
   "profiles": {
     "~/Projects/work-scheduler-mcp|headroom|vitest run": {
       "peaks": [
-        538526440
+        538493672
       ],
-      "p90": 1253250637,
+      "p90": 1253239714,
       "median_s": 4,
       "samples": 1
     }
@@ -102,6 +107,9 @@
     "default_estimate": 1610612736,
     "start_at_login": false,
     "tune": true,
+    "backfill": true,
+    "backfill_skips": 3,
+    "backfill_wait_s": 300,
     "login_managed_by_brew": false,
     "patterns": [
       "* test",

@@ -1,0 +1,244 @@
+{
+  "system": {
+    "pressure": "normal",
+    "mem_total": 68719476736,
+    "mem_used": 17179869184,
+    "mem_available": 51539607552,
+    "swap_used": 0,
+    "cpu_pct": 0.0
+  },
+  "held": false,
+  "hooks": {
+    "claude": "installed",
+    "codex": "not_installed",
+    "pi": "absent"
+  },
+  "queue_reason": {
+    "kind": "memory",
+    "need": 1075643496,
+    "free": 0
+  },
+  "running": [
+    {
+      "id": "7",
+      "label": "sc-49123",
+      "cmd": "e2e.sh",
+      "full_cmd": "/var/folders/g3/qjbw6xys4_1cb6zs26vqbjkr0000gn/T/hr-ui-backfill-bin-11909/e2e.sh",
+      "cwd": "~/Projects/work-scheduler-mcp/headroom",
+      "session": null,
+      "key": "~/Projects/work-scheduler-mcp|headroom|e2e.sh",
+      "state": "running",
+      "pinned": false,
+      "low": false,
+      "estimate": 1075643496,
+      "samples": 3,
+      "footprint": 0,
+      "peak": 0,
+      "runaway_at": 8589934592,
+      "elapsed_s": 0,
+      "frozen_s": 0,
+      "waited_s": 0,
+      "cpu_pct": 0.0,
+      "procs": 0,
+      "retry": 0,
+      "tuned": null,
+      "skipped": 0,
+      "strict_in_s": null
+    }
+  ],
+  "queued": [
+    {
+      "id": "8",
+      "label": "browser-cd",
+      "cmd": "e2e.sh",
+      "full_cmd": "/var/folders/g3/qjbw6xys4_1cb6zs26vqbjkr0000gn/T/hr-ui-backfill-bin-11909/e2e.sh",
+      "cwd": "~/Projects/work-scheduler-mcp/headroom",
+      "session": null,
+      "key": "~/Projects/work-scheduler-mcp|headroom|e2e.sh",
+      "state": "queued",
+      "pinned": false,
+      "low": false,
+      "estimate": 1075643496,
+      "samples": 3,
+      "footprint": 0,
+      "peak": 0,
+      "runaway_at": 8589934592,
+      "elapsed_s": 0,
+      "frozen_s": 0,
+      "waited_s": 0,
+      "cpu_pct": 0.0,
+      "procs": 0,
+      "retry": 0,
+      "tuned": null,
+      "skipped": 1,
+      "strict_in_s": 300
+    }
+  ],
+  "banners": [],
+  "history": [
+    {
+      "id": "9",
+      "label": "fix-main",
+      "cmd": "lint.sh",
+      "key": "~/Projects/work-scheduler-mcp|headroom|lint.sh",
+      "duration_s": 0,
+      "peak": 0,
+      "estimate": 0,
+      "exit": 0,
+      "ended_ago_s": 0,
+      "tuned": null,
+      "ahead_of": "browser-cd · e2e.sh",
+      "guard": null
+    },
+    {
+      "id": "6",
+      "label": "work-scheduler-mcp",
+      "cmd": "lint.sh",
+      "key": "~/Projects/work-scheduler-mcp|headroom|lint.sh",
+      "duration_s": 0,
+      "peak": 0,
+      "estimate": 536870912,
+      "exit": 0,
+      "ended_ago_s": 0,
+      "tuned": null,
+      "ahead_of": null,
+      "guard": null
+    },
+    {
+      "id": "5",
+      "label": "work-scheduler-mcp",
+      "cmd": "e2e.sh",
+      "key": "~/Projects/work-scheduler-mcp|headroom|e2e.sh",
+      "duration_s": 3,
+      "peak": 1075643496,
+      "estimate": 1253966576,
+      "exit": 0,
+      "ended_ago_s": 0,
+      "tuned": null,
+      "ahead_of": null,
+      "guard": null
+    },
+    {
+      "id": "4",
+      "label": "work-scheduler-mcp",
+      "cmd": "lint.sh",
+      "key": "~/Projects/work-scheduler-mcp|headroom|lint.sh",
+      "duration_s": 0,
+      "peak": 0,
+      "estimate": 1073741824,
+      "exit": 0,
+      "ended_ago_s": 4,
+      "tuned": null,
+      "ahead_of": null,
+      "guard": null
+    },
+    {
+      "id": "3",
+      "label": "work-scheduler-mcp",
+      "cmd": "e2e.sh",
+      "key": "~/Projects/work-scheduler-mcp|headroom|e2e.sh",
+      "duration_s": 3,
+      "peak": 1075643496,
+      "estimate": 1432289656,
+      "exit": 0,
+      "ended_ago_s": 4,
+      "tuned": null,
+      "ahead_of": null,
+      "guard": null
+    },
+    {
+      "id": "2",
+      "label": "work-scheduler-mcp",
+      "cmd": "lint.sh",
+      "key": "~/Projects/work-scheduler-mcp|headroom|lint.sh",
+      "duration_s": 0,
+      "peak": 0,
+      "estimate": 1610612736,
+      "exit": 0,
+      "ended_ago_s": 7,
+      "tuned": null,
+      "ahead_of": null,
+      "guard": null
+    },
+    {
+      "id": "1",
+      "label": "work-scheduler-mcp",
+      "cmd": "e2e.sh",
+      "key": "~/Projects/work-scheduler-mcp|headroom|e2e.sh",
+      "duration_s": 3,
+      "peak": 1075643496,
+      "estimate": 1610612736,
+      "exit": 0,
+      "ended_ago_s": 7,
+      "tuned": null,
+      "ahead_of": null,
+      "guard": null
+    }
+  ],
+  "profiles": {
+    "~/Projects/work-scheduler-mcp|headroom|e2e.sh": {
+      "peaks": [
+        1075643496,
+        1075643496,
+        1075643496
+      ],
+      "p90": 1075643496,
+      "median_s": 3,
+      "samples": 3
+    },
+    "~/Projects/work-scheduler-mcp|headroom|lint.sh": {
+      "peaks": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "p90": 0,
+      "median_s": 0,
+      "samples": 4
+    }
+  },
+  "others": [],
+  "settings": {
+    "headroom": 51002736640,
+    "kill_mode": "freeze_kill",
+    "wait_cap_s": 480,
+    "default_estimate": 1610612736,
+    "start_at_login": false,
+    "tune": true,
+    "backfill": true,
+    "backfill_skips": 3,
+    "backfill_wait_s": 300,
+    "login_managed_by_brew": false,
+    "patterns": [
+      "* test",
+      "* build",
+      "* e2e",
+      "* typecheck",
+      "vitest",
+      "jest",
+      "playwright",
+      "tsc",
+      "nx",
+      "turbo",
+      "next build",
+      "xcodebuild",
+      "cargo clippy",
+      "gradle",
+      "pytest"
+    ],
+    "excluded": [
+      "dev",
+      "serve",
+      "start",
+      "watch",
+      "preview",
+      "storybook",
+      "--watch",
+      "--watchAll",
+      "--ui",
+      "docker compose up"
+    ]
+  },
+  "classify": null
+}

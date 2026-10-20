@@ -41,6 +41,7 @@ const frozen = ui.fixture('frozen');
 const history = ui.fixture('history');
 const tuned = ui.fixture('tuned');
 const tunedHistory = ui.fixture('tuned-history');
+const backfill = ui.fixture('backfill');
 
 // ── the main view ─────────────────────────────────────────────────────────
 
@@ -101,6 +102,19 @@ test('a job started with fewer workers says so in its row, detail and history', 
   ui.click({ act: 'goto', page: 'history' });
   has(ui.view(), `${workers}/${dflt} workers`);
   eq((ui.view().match(/workers/g) || []).length, 1, 'only the tuned run mentions workers');
+});
+
+test('a head passed over says how often and until when; the job that went first says so', () => {
+  ui.setState(backfill);
+  const head = backfill.queued[0];
+  has(ui.view(), `passed over ${head.skipped}× · strict in ${Math.floor(head.strict_in_s / 60)}m`);
+  ui.click({ act: 'goto', page: 'history' });
+  has(ui.view(), `started ahead of ${head.label} · ${head.cmd}`);
+});
+
+test('a head never passed over shows no count', () => {
+  ui.setState(busy);
+  lacks(ui.view(), 'passed over');
 });
 
 // ── intents ───────────────────────────────────────────────────────────────
@@ -291,6 +305,14 @@ test('shrinking jobs to fit can be switched off and on', () => {
   ui.setState({ ...tuned, settings: { ...tuned.settings, tune: false } });
   ui.click({ act: 'set', key: 'tune' });
   eq(ui.sent, [{ cmd: 'set', key: 'tune', value: false }, { cmd: 'set', key: 'tune', value: true }]);
+});
+
+test('letting short jobs go first can be switched off', () => {
+  ui.setState(backfill);
+  ui.click({ act: 'goto', page: 'settings' }, 0);
+  has(ui.view(), 'At most 3 times or 5m00, then the queue waits for it.');
+  ui.click({ act: 'set', key: 'backfill' });
+  eq(ui.sent, [{ cmd: 'set', key: 'backfill', value: false }]);
 });
 
 test('quit is sent as an intent', () => {

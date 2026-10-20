@@ -28,16 +28,18 @@
       "low": false,
       "estimate": 1610612736,
       "samples": 0,
-      "footprint": 216252920,
-      "peak": 216252920,
+      "footprint": 216236536,
+      "peak": 216236536,
       "runaway_at": 8589934592,
-      "elapsed_s": 2,
+      "elapsed_s": 1,
       "frozen_s": 0,
-      "waited_s": 2,
+      "waited_s": 1,
       "cpu_pct": 0.0,
       "procs": 1,
       "retry": 0,
-      "tuned": null
+      "tuned": null,
+      "skipped": 0,
+      "strict_in_s": null
     }
   ],
   "queued": [],
@@ -48,7 +50,7 @@
       "job_id": "4",
       "label": "sc-49201",
       "cmd": "headroom-hog",
-      "why": "memory critical for 2 s. Frozen jobs stop growing but keep their memory; kill frees it."
+      "why": "memory critical for 1 s. Frozen jobs stop growing but keep their memory; kill frees it."
     }
   ],
   "history": [
@@ -61,8 +63,9 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": null,
-      "ended_ago_s": 3,
+      "ended_ago_s": 2,
       "tuned": null,
+      "ahead_of": null,
       "guard": {
         "action": "disconnected",
         "why": null
@@ -77,8 +80,9 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": 0,
-      "ended_ago_s": 3,
+      "ended_ago_s": 2,
       "tuned": null,
+      "ahead_of": null,
       "guard": null
     },
     {
@@ -90,8 +94,9 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": 3,
-      "ended_ago_s": 3,
+      "ended_ago_s": 2,
       "tuned": null,
+      "ahead_of": null,
       "guard": null
     }
   ],
@@ -121,6 +126,9 @@
     "default_estimate": 1610612736,
     "start_at_login": true,
     "tune": true,
+    "backfill": true,
+    "backfill_skips": 3,
+    "backfill_wait_s": 300,
     "login_managed_by_brew": true,
     "patterns": [
       "* test",

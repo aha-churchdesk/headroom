@@ -18,7 +18,7 @@
   "queued": [],
   "banners": [
     {
-      "id": "h4-1792493241",
+      "id": "h4-1792493661",
       "kind": "gave_up",
       "job_id": "4",
       "label": "sc-49201",
@@ -26,7 +26,7 @@
       "why": "memory still critical 1 s after freezing; peak 0.2 GB vs est 1.5 GB. The agent was told: exit 137."
     },
     {
-      "id": "h4-1792493237",
+      "id": "h4-1792493656",
       "kind": "requeued",
       "job_id": "4",
       "label": "sc-49201",
@@ -40,12 +40,13 @@
       "label": "sc-49201",
       "cmd": "headroom-hog",
       "key": "~/Projects/work-scheduler-mcp|headroom|headroom-hog",
-      "duration_s": 3,
-      "peak": 216252920,
+      "duration_s": 4,
+      "peak": 216236536,
       "estimate": 1610612736,
       "exit": null,
-      "ended_ago_s": 1,
+      "ended_ago_s": 2,
       "tuned": null,
+      "ahead_of": null,
       "guard": {
         "action": "gave_up",
         "why": "memory still critical 1 s after freezing; peak 0.2 GB vs est 1.5 GB"
@@ -56,12 +57,13 @@
       "label": "sc-49201",
       "cmd": "headroom-hog",
       "key": "~/Projects/work-scheduler-mcp|headroom|headroom-hog",
-      "duration_s": 3,
-      "peak": 216252920,
+      "duration_s": 2,
+      "peak": 216236536,
       "estimate": 1610612736,
       "exit": null,
-      "ended_ago_s": 5,
+      "ended_ago_s": 7,
       "tuned": null,
+      "ahead_of": null,
       "guard": {
         "action": "requeued",
         "why": "memory still critical 1 s after freezing; peak 0.2 GB vs est 1.5 GB"
@@ -76,8 +78,9 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": null,
-      "ended_ago_s": 9,
+      "ended_ago_s": 10,
       "tuned": null,
+      "ahead_of": null,
       "guard": {
         "action": "disconnected",
         "why": null
@@ -92,8 +95,9 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": 0,
-      "ended_ago_s": 9,
+      "ended_ago_s": 10,
       "tuned": null,
+      "ahead_of": null,
       "guard": null
     },
     {
@@ -105,8 +109,9 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": 3,
-      "ended_ago_s": 9,
+      "ended_ago_s": 10,
       "tuned": null,
+      "ahead_of": null,
       "guard": null
     }
   ],
@@ -142,6 +147,9 @@
     "default_estimate": 1610612736,
     "start_at_login": true,
     "tune": true,
+    "backfill": true,
+    "backfill_skips": 3,
+    "backfill_wait_s": 300,
     "login_managed_by_brew": true,
     "patterns": [
       "* test",

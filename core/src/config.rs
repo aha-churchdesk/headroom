@@ -58,6 +58,13 @@ pub struct Config {
     pub tune_floor: u32,
     /// Tools (`vitest`, `turbo`, `cargo`) or repository paths never tuned.
     pub tune_off: Vec<String>,
+    /// Let a short job start ahead of a head that waits on memory, when it
+    /// fits now and should finish before the head could start anyway.
+    pub backfill: bool,
+    /// After this many jobs started ahead of it, or this long since the
+    /// first one did, the head is waited for strictly.
+    pub backfill_skips: u32,
+    pub backfill_wait_s: u64,
 }
 
 impl Default for Config {
@@ -112,6 +119,9 @@ impl Default for Config {
             tune: true,
             tune_floor: 2,
             tune_off: Vec::new(),
+            backfill: true,
+            backfill_skips: 3,
+            backfill_wait_s: 300,
         }
     }
 }

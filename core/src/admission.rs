@@ -10,11 +10,16 @@
 //!
 //! A head that doesn't fit may still start with fewer workers, when its tool
 //! can be told so and its profile says how memory scales with workers.
+//!
+//! Or a later job may start first, if it fits now and its profile says it
+//! will be done before the head could start anyway (EASY backfilling). The
+//! head is passed over a bounded number of times, for a bounded time; then
+//! the queue is strict again until it starts.
 
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
-use crate::model::{Bytes, Job, JobId, JobState, Pressure, Snapshot};
+use crate::model::{Bytes, Job, JobId, JobState, Millis, Pressure, Snapshot};
 
 /// Why the head of the queue is waiting. Shown to the user and the agent.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -47,7 +52,58 @@ pub struct Decision {
     pub admit: Vec<JobId>,
     /// Admitted jobs that start with fewer workers: (id, workers, estimate).
     pub tuned: Vec<(JobId, u32, Bytes)>,
+    /// Admitted jobs that start ahead of `skipped`, the head waiting on memory.
+    pub backfilled: Vec<JobId>,
+    pub skipped: Option<JobId>,
     pub blocked: Option<Blocked>,
+}
+
+/// When the head could start, in ms from now: running jobs are expected to
+/// end at their median run time, each freeing what it holds or is still
+/// expected to grow into. `None` if any end can't be predicted, or if even
+/// all of them ending wouldn't make room.
+fn shadow(
+    running: &[&Job],
+    admitted: &[(&Job, Bytes)],
+    need: Bytes,
+    free: Bytes,
+    now: Millis,
+) -> Option<u64> {
+    let mut ends: Vec<(u64, Bytes)> = Vec::new();
+    for j in running {
+        match j.state {
+            // A frozen job holds its memory until someone acts on it.
+            JobState::Frozen => continue,
+            _ => {
+                let elapsed = j.started_at.map_or(0, |t| now.saturating_sub(t));
+                ends.push((
+                    j.median_ms?.saturating_sub(elapsed),
+                    j.estimate.max(j.footprint),
+                ));
+            }
+        }
+    }
+    for (j, est) in admitted {
+        ends.push((j.median_ms?, *est));
+    }
+    ends.sort_unstable();
+    let mut free = free;
+    for (at, freed) in ends {
+        free += freed;
+        if free >= need {
+            return Some(at);
+        }
+    }
+    None
+}
+
+/// Has the head been passed over enough?
+fn strict(head: &Job, cfg: &Config, now: Millis) -> bool {
+    !cfg.backfill
+        || head.skipped >= cfg.backfill_skips
+        || head
+            .skipped_since
+            .is_some_and(|t| now.saturating_sub(t) >= cfg.backfill_wait_s * 1000)
 }
 
 /// The most workers, below the tool's default and not below the floor, at
@@ -81,6 +137,7 @@ pub fn decide(
     queue: &[&Job],
     held: bool,
     cfg: &Config,
+    now: Millis,
 ) -> Decision {
     let mut d = Decision::default();
     if queue.is_empty() {
@@ -96,7 +153,9 @@ pub fn decide(
     let mut load = snap.load1;
     let cpu_limit = snap.perf_cores as f64 * cfg.cpu_factor;
 
-    for job in queue {
+    let mut admitted: Vec<(&Job, Bytes)> = Vec::new();
+    let mut waiting_head: Option<(usize, Bytes)> = None;
+    for (i, job) in queue.iter().enumerate() {
         // With nothing of ours running, holding back can't help: an
         // estimate bigger than the machine would otherwise wait forever.
         let idle = running.is_empty() && d.admit.is_empty();
@@ -125,6 +184,7 @@ pub fn decide(
                 need: job.estimate,
                 free,
             });
+            waiting_head = Some((i, free));
             break;
         }
         let cpu_ok = idle || job.low() || snap.perf_cores == 0 || load < cpu_limit;
@@ -136,14 +196,43 @@ pub fn decide(
             break;
         }
         d.admit.push(job.id);
-        growth += match tuned {
+        let est = match tuned {
             Some((n, est)) => {
                 d.tuned.push((job.id, n, est));
                 est
             }
             None => job.estimate,
         };
+        growth += est;
+        admitted.push((job, est));
         load += 1.0;
+    }
+
+    let Some((i, mut free)) = waiting_head else {
+        return d;
+    };
+    let head = queue[i];
+    if strict(head, cfg, now) {
+        return d;
+    }
+    let Some(head_starts_in) = shadow(running, &admitted, head.estimate, free, now) else {
+        return d;
+    };
+    for job in &queue[i + 1..] {
+        // A job with no history makes no promise about when it ends.
+        let Some(takes) = job.median_ms.filter(|_| job.samples > 0) else {
+            continue;
+        };
+        let cpu_ok = job.low() || snap.perf_cores == 0 || load < cpu_limit;
+        if takes <= head_starts_in && job.estimate <= free && cpu_ok {
+            d.admit.push(job.id);
+            d.backfilled.push(job.id);
+            free -= job.estimate;
+            load += 1.0;
+        }
+    }
+    if !d.backfilled.is_empty() {
+        d.skipped = Some(head.id);
     }
     d
 }
@@ -182,7 +271,7 @@ mod tests {
     fn run(s: &Snapshot, r: &[Job], q: &[Job], held: bool) -> Decision {
         let r: Vec<&Job> = r.iter().collect();
         let q: Vec<&Job> = q.iter().collect();
-        decide(s, &r, &q, held, &Config::default())
+        decide(s, &r, &q, held, &Config::default(), 0)
     }
 
     /// A vitest job estimated at 6 GB, needing 1 GB plus 0.5 GB a worker.
@@ -255,7 +344,7 @@ mod tests {
             tune: false,
             ..Config::default()
         };
-        let d = decide(&snap(5.0), &[&busy()[0]], &[&tunable(1)], false, &off);
+        let d = decide(&snap(5.0), &[&busy()[0]], &[&tunable(1)], false, &off, 0);
         assert!(d.admit.is_empty());
         // Pinned jobs skip the memory check, so they start untouched.
         let d = run(&snap(5.0), &busy(), &[pinned], false);
@@ -277,6 +366,134 @@ mod tests {
             npm: false,
         });
         assert!(run(&snap(3.0), &busy(), &[j], false).admit.is_empty());
+    }
+
+    /// 6 GB available, 2 kept free; a 3 GB job running that is done in 60 s.
+    /// The 5 GB head can start once it ends.
+    fn backfill_case(skipped: u32, since: Option<Millis>) -> (Snapshot, Job, Job) {
+        let mut r = running(9, 3.0, 3.0);
+        r.median_ms = Some(60_000);
+        let mut head = job(1, 5.0);
+        (head.skipped, head.skipped_since) = (skipped, since);
+        (snap(6.0), r, head)
+    }
+
+    fn short(id: JobId, est_gb: f64, takes_ms: u64) -> Job {
+        let mut j = job(id, est_gb);
+        j.median_ms = Some(takes_ms);
+        j
+    }
+
+    fn at(s: &Snapshot, r: &[Job], q: &[Job], now: Millis) -> Decision {
+        let r: Vec<&Job> = r.iter().collect();
+        let q: Vec<&Job> = q.iter().collect();
+        decide(s, &r, &q, false, &Config::default(), now)
+    }
+
+    #[test]
+    fn a_short_job_that_fits_starts_ahead_of_a_head_waiting_on_memory() {
+        let (s, r, head) = backfill_case(0, None);
+        let d = at(&s, &[r], &[head, short(2, 2.0, 30_000)], 0);
+        assert_eq!(
+            (d.admit, d.backfilled, d.skipped),
+            (vec![2], vec![2], Some(1))
+        );
+        assert_eq!(
+            d.blocked,
+            Some(Blocked::Memory {
+                need: 5 * GIB,
+                free: 4 * GIB
+            }),
+            "the head still waits, and says why"
+        );
+    }
+
+    #[test]
+    fn it_must_be_done_by_the_time_the_head_could_start() {
+        let (s, r, head) = backfill_case(0, None);
+        let exactly = at(
+            &s,
+            std::slice::from_ref(&r),
+            &[head.clone(), short(2, 2.0, 60_000)],
+            0,
+        );
+        assert_eq!(exactly.backfilled, vec![2]);
+        let over = at(
+            &s,
+            std::slice::from_ref(&r),
+            &[head.clone(), short(2, 2.0, 60_001)],
+            0,
+        );
+        assert!(over.admit.is_empty());
+        // 20 s into the running job, the head can start in 40 s.
+        let mut started = r;
+        started.started_at = Some(0);
+        let later = at(&s, &[started], &[head, short(2, 2.0, 45_000)], 20_000);
+        assert!(later.admit.is_empty());
+    }
+
+    #[test]
+    fn backfilled_jobs_must_fit_now_one_after_another() {
+        let (s, r, head) = backfill_case(0, None);
+        let q = [
+            head,
+            short(2, 3.0, 1_000),
+            short(3, 2.0, 1_000),
+            short(4, 1.0, 1_000),
+        ];
+        // 4 GB free: 3 GB fits, then 2 GB doesn't, then 1 GB does.
+        assert_eq!(at(&s, &[r], &q, 0).backfilled, vec![2, 4]);
+    }
+
+    #[test]
+    fn no_promise_no_backfill() {
+        let (s, r, head) = backfill_case(0, None);
+        // A new command has no run time to go by.
+        let mut new = short(2, 1.0, 1_000);
+        new.samples = 0;
+        assert!(
+            at(&s, std::slice::from_ref(&r), &[head.clone(), new], 0)
+                .admit
+                .is_empty()
+        );
+        // Nor can it be planned if a running job's end is unknown.
+        let mut unknown = r.clone();
+        unknown.median_ms = None;
+        let q = [head.clone(), short(2, 1.0, 1_000)];
+        assert!(at(&s, &[unknown], &q, 0).admit.is_empty());
+        // A frozen job won't end by itself: the head has no start to plan for.
+        let mut frozen = r;
+        frozen.state = JobState::Frozen;
+        assert!(at(&s, &[frozen], &q, 0).admit.is_empty());
+    }
+
+    #[test]
+    fn a_head_passed_over_three_times_or_for_five_minutes_is_waited_for() {
+        let q = |head: Job| [head, short(2, 1.0, 1_000)];
+        let (s, r, head) = backfill_case(2, Some(0));
+        assert_eq!(
+            at(&s, std::slice::from_ref(&r), &q(head), 0).backfilled,
+            vec![2]
+        );
+        let (s, r, head) = backfill_case(3, Some(0));
+        assert!(at(&s, &[r], &q(head), 0).admit.is_empty());
+        let (s, r, head) = backfill_case(1, Some(0));
+        assert_eq!(
+            at(&s, std::slice::from_ref(&r), &q(head.clone()), 299_999).backfilled,
+            vec![2]
+        );
+        assert!(at(&s, &[r], &q(head), 300_000).admit.is_empty());
+    }
+
+    #[test]
+    fn backfill_can_be_switched_off() {
+        let (s, r, head) = backfill_case(0, None);
+        let off = Config {
+            backfill: false,
+            ..Config::default()
+        };
+        let d = decide(&s, &[&r], &[&head, &short(2, 1.0, 1_000)], false, &off, 0);
+        assert!(d.admit.is_empty());
     }
 
     #[test]

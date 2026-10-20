@@ -98,6 +98,7 @@ pub fn translate(cmd: UiCmd, cfg: &Config) -> Result<Do, String> {
                 "default_estimate" => c.default_estimate = num()?,
                 "wait_cap_s" => c.wait_cap_s = num()?,
                 "tune" => c.tune = value.as_bool().ok_or("tune needs true or false")?,
+                "backfill" => c.backfill = value.as_bool().ok_or("backfill needs true or false")?,
                 "kill_mode" => {
                     c.kill_mode = serde_json::from_value::<KillMode>(value.clone())
                         .map_err(|e| e.to_string())?
@@ -183,6 +184,8 @@ mod tests {
         let c = config_of(t(r#"{"cmd":"set","key":"tune","value":false}"#));
         assert!(!c.tune);
         assert!(t(r#"{"cmd":"set","key":"tune","value":0}"#).is_err());
+        let c = config_of(t(r#"{"cmd":"set","key":"backfill","value":false}"#));
+        assert!(!c.backfill);
         assert_eq!(
             t(r#"{"cmd":"set","key":"start_at_login","value":false}"#),
             Ok(Do::Login(false))

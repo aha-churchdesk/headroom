@@ -78,6 +78,10 @@ fn job_json(j: &Job, now: u64, cfg: &Config) -> Value {
         "procs": j.procs,
         "retry": j.retry,
         "tuned": j.tuned,
+        "skipped": j.skipped,
+        "strict_in_s": j.skipped_since.map(|t| {
+            cfg.backfill_wait_s.saturating_sub(secs(now.saturating_sub(t)))
+        }),
     })
 }
 
@@ -184,6 +188,7 @@ pub fn state(l: &Listing, x: &Extras) -> Value {
                 "exit": h.exit,
                 "ended_ago_s": x.wall.saturating_sub(h.ended_at),
                 "tuned": h.tuned,
+                "ahead_of": h.ahead_of,
                 "guard": outcome_guard(&h.outcome).map(|a| json!({ "action": a, "why": h.why })),
             })
         })
@@ -218,6 +223,9 @@ pub fn state(l: &Listing, x: &Extras) -> Value {
             "default_estimate": cfg.default_estimate,
             "start_at_login": x.login != Login::Off,
             "tune": cfg.tune,
+            "backfill": cfg.backfill,
+            "backfill_skips": cfg.backfill_skips,
+            "backfill_wait_s": cfg.backfill_wait_s,
             "login_managed_by_brew": x.login == Login::Brew,
             "patterns": cfg.patterns,
             "excluded": cfg.excluded,
@@ -309,6 +317,7 @@ mod tests {
                     outcome: Outcome::Requeued,
                     why: Some("memory still critical".into()),
                     tuned: None,
+                    ahead_of: None,
                 },
                 HistoryEntry {
                     id: 4,
@@ -323,6 +332,7 @@ mod tests {
                     outcome: Outcome::Exited,
                     why: None,
                     tuned: None,
+                    ahead_of: None,
                 },
             ],
         }

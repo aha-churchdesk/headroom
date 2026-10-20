@@ -32,8 +32,8 @@
       "low": false,
       "estimate": 1610612736,
       "samples": 0,
-      "footprint": 323666496,
-      "peak": 323666496,
+      "footprint": 323650112,
+      "peak": 323650112,
       "runaway_at": 8589934592,
       "elapsed_s": 1,
       "frozen_s": 0,
@@ -41,7 +41,9 @@
       "cpu_pct": 0.0,
       "procs": 1,
       "retry": 0,
-      "tuned": null
+      "tuned": null,
+      "skipped": 0,
+      "strict_in_s": null
     },
     {
       "id": "3",
@@ -65,7 +67,9 @@
       "cpu_pct": 0.0,
       "procs": 1,
       "retry": 0,
-      "tuned": null
+      "tuned": null,
+      "skipped": 0,
+      "strict_in_s": null
     }
   ],
   "queued": [
@@ -91,7 +95,9 @@
       "cpu_pct": 0.0,
       "procs": 0,
       "retry": 0,
-      "tuned": null
+      "tuned": null,
+      "skipped": 0,
+      "strict_in_s": null
     },
     {
       "id": "4",
@@ -115,7 +121,9 @@
       "cpu_pct": 0.0,
       "procs": 0,
       "retry": 0,
-      "tuned": null
+      "tuned": null,
+      "skipped": 0,
+      "strict_in_s": null
     }
   ],
   "banners": [],
@@ -129,6 +137,9 @@
     "default_estimate": 1610612736,
     "start_at_login": false,
     "tune": true,
+    "backfill": true,
+    "backfill_skips": 3,
+    "backfill_wait_s": 300,
     "login_managed_by_brew": false,
     "patterns": [
       "* test",
