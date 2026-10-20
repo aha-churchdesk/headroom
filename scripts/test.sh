@@ -34,9 +34,15 @@ else
   $RUN cargo llvm-cov clean --workspace >/dev/null 2>&1
   # main.rs files are argument parsing and the event loop; their decisions
   # live in tested modules.
-  if ! $RUN cargo llvm-cov --workspace --quiet \
+  $RUN cargo llvm-cov --workspace --quiet \
       --ignore-filename-regex '(main\.rs|headroom-hog\.rs)$' \
-      --summary-only 2>&1 | tee target/coverage-summary.txt | grep -E '^(Filename|TOTAL|core/|headroom/|headroomd/)'; then
+      --summary-only > target/coverage-summary.txt 2>&1
+  cov=$?
+  grep -E '^(Filename|TOTAL|core/|headroom/|headroomd/)' target/coverage-summary.txt
+  if [ $cov -ne 0 ]; then
+    # Only the table is shown on success; on failure, show what went wrong.
+    echo "cargo llvm-cov failed (exit $cov):"
+    grep -vE '^(Filename|TOTAL|core/|headroom/|headroomd/|-+$)' target/coverage-summary.txt | tail -80
     status=1
   fi
   $RUN cargo llvm-cov report --html --ignore-filename-regex '(main\.rs|headroom-hog\.rs)$' >/dev/null 2>&1 \
