@@ -157,6 +157,7 @@ test('the commands page ranks what ran by time, with runs, memory and failures',
   has(ui.view(), 'headroom-hog · work-scheduler-mcp · headroom 1 run');
   has(ui.view(), '<0.1 GB·h');
   has(ui.view(), '1 failed');
+  lacks(ui.html(), 'class="bad"');
   lacks(ui.view(), 'of 4 commands');
 });
 

@@ -328,7 +328,6 @@ button:disabled{ cursor:default; opacity:.4; }
 .crow .l1 .n b{ color:var(--text); font-weight:600; }
 .crow .cbar{ height:3px; border-radius:2px; background:var(--track); margin:4px 0 3px; }
 .crow .cbar i{ display:block; height:100%; border-radius:2px; background:var(--accent); }
-.crow .bad{ color:var(--bad); }
 .cmd-note{ padding:8px 14px 12px; font-size:11px; color:var(--text-faint); }
 .prof{ padding:12px 14px; }
 .prof .key{ font-size:11.5px; color:var(--text-dim); word-break:break-all; }
@@ -895,7 +894,7 @@ function renderCommands(S){
       <div class="cbar"><i style="width:${(r[key] / top * 100).toFixed(1)}%"></i></div>
       <div class="l2 num">${dur(r.run_s)} running · ${gbh(r.gb_h)} GB·h · peak ${gb(r.peak)} GB${
         r.wait_s ? ` · waited ${dur(r.wait_s)}` : ""}${
-        r.failed ? ` · <span class="bad">${r.failed} failed</span>` : ""}</div>
+        r.failed ? ` · ${r.failed} failed` : ""}</div>
     </div>`).join("") + `
     <div class="cmd-note">${w.count > rows.length ? `The ${rows.length} with the most time running, of ${w.count} commands. ` : ""}Kept for ${wins[wins.length - 1].days} days. GB·h is peak memory × run time.</div>`;
 }
