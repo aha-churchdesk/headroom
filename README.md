@@ -120,7 +120,7 @@ The Commands page ranks the commands that ran in the last 7, 30 or 90 days by ti
 ## CLI
 
 ```
-headroom run [--background] [--wait-cap SECS] [--low] [--label L] (--sh 'LINE' | -- CMD ARGS…)
+headroom run [--background] [--wait-cap SECS] [--low] [--label L] ([--shell PATH] --sh 'LINE' | -- CMD ARGS…)
 headroom ls
 headroom hold on|off
 headroom pin|unpin|low|normal|top|cancel|kill|freeze|resume ID
@@ -130,6 +130,8 @@ headroom hook install|uninstall|status [--agent claude|codex|pi|all] [--scope us
 headroom shims install|uninstall|status [--dir DIR]
 headroom mcp
 ```
+
+`--sh` uses `$SHELL`, defaulting to `/bin/zsh`. `--shell PATH` selects another shell. The Claude Code and pi hooks select Bash so a different login shell does not change their commands' syntax.
 
 Exit codes from `headroom run`: the command's own, or 75 (still queued when the wait cap ran out), 130 (cancelled from the queue), 137 (killed twice to free memory).
 

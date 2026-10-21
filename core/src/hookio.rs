@@ -171,6 +171,10 @@ pub fn wrap(agent: Agent, call: &Call, exe: &str, cfg: &Config, hooked: HookProb
         Some(w) => cmd += &format!(" --wait-cap {w}"),
         None => cmd += " --background",
     }
+    // Bash tool syntax must survive a user's fish or zsh login shell.
+    if matches!(agent, Agent::Claude | Agent::Pi) {
+        cmd += " --shell /bin/bash";
+    }
     cmd += &format!(" --sh {}", quote(&call.command));
     Some(Wrap {
         command: cmd,
@@ -263,7 +267,7 @@ mod tests {
         assert_eq!(input["description"], "Run tests");
         assert_eq!(
             input["command"],
-            "/opt/homebrew/bin/headroom run --agent claude --session abc123 --wait-cap 480 --sh 'pnpm test'"
+            "/opt/homebrew/bin/headroom run --agent claude --session abc123 --wait-cap 480 --shell /bin/bash --sh 'pnpm test'"
         );
         // 120 s default + 480 s budget = the 600 s maximum.
         assert_eq!(input["timeout"], 600_000);
@@ -323,7 +327,7 @@ mod tests {
             input["command"]
                 .as_str()
                 .unwrap()
-                .contains(" --background --sh ")
+                .contains(" --background --shell /bin/bash --sh ")
         );
         assert!(input.get("timeout").is_none());
         assert_eq!(input["run_in_background"], true);
@@ -400,7 +404,7 @@ mod tests {
         );
         assert_eq!(
             o["command"],
-            "/opt/homebrew/bin/headroom run --agent pi --wait-cap 480 --sh 'pnpm test'"
+            "/opt/homebrew/bin/headroom run --agent pi --wait-cap 480 --shell /bin/bash --sh 'pnpm test'"
         );
         assert!(o.get("timeout").is_none());
         let o = out(

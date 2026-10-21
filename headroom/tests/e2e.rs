@@ -225,6 +225,28 @@ fn without_a_daemon_the_command_runs_directly() {
 }
 
 #[test]
+fn an_explicit_bash_shell_survives_a_different_login_shell() {
+    let d = Daemon::start("bash-shell", Config::default());
+    let absent = tmp("bash-direct");
+    for home in [&d.home, &absent] {
+        let output = d
+            .cmd(&[
+                "run",
+                "--shell",
+                "/bin/bash",
+                "--sh",
+                "items=(first second); printf '%s' \"${items[0]}\"",
+            ])
+            .env("HEADROOM_HOME", home)
+            .env("SHELL", "/bin/false")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+        assert_eq!(text(&output.stdout), "first");
+    }
+}
+
+#[test]
 fn the_wait_cap_gives_up_with_75_and_nothing_runs() {
     let d = Daemon::start("cap", Config::default());
     assert!(d.output(&["hold", "on"]).status.success());

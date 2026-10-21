@@ -15,7 +15,7 @@ const USAGE: &str = "\
 headroom — queue heavy commands so parallel agents don't exhaust memory
 
 usage:
-  headroom run [--background] [--wait-cap SECS] [--low] [--label L] (--sh 'LINE' | -- CMD ARGS…)
+  headroom run [--background] [--wait-cap SECS] [--low] [--label L] ([--shell PATH] --sh 'LINE' | -- CMD ARGS…)
   headroom ls
   headroom hold on|off
   headroom pin|unpin|low|normal|top|cancel|kill|freeze|resume ID
@@ -43,6 +43,10 @@ fn parse_run(args: &[String]) -> Option<run::RunOpts> {
             "--low" => o.low = true,
             "--sh" => {
                 o.sh = Some(val()?);
+                i += 1;
+            }
+            "--shell" => {
+                o.shell = Some(val()?);
                 i += 1;
             }
             "--wait-cap" => {
@@ -228,12 +232,15 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!((o.wait_cap, o.sh.as_deref()), (Some(60), Some("pnpm test")));
+        let o = parse_run(&v(&["--shell", "/bin/bash", "--sh", "pnpm test"])).unwrap();
+        assert_eq!(o.shell.as_deref(), Some("/bin/bash"));
     }
 
     #[test]
     fn bad_run_flags_are_refused() {
         assert!(parse_run(&v(&["--wait-cap", "soon"])).is_none());
         assert!(parse_run(&v(&["--sh"])).is_none());
+        assert!(parse_run(&v(&["--shell"])).is_none());
         assert!(parse_run(&v(&["--frobnicate"])).is_none());
     }
 

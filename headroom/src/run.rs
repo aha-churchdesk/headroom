@@ -34,6 +34,8 @@ pub const EXIT_GAVE_UP: i32 = 137;
 #[derive(Clone, Debug, Default)]
 pub struct RunOpts {
     pub sh: Option<String>,
+    /// The originating tool's shell. Standalone --sh uses the login shell.
+    pub shell: Option<String>,
     pub argv: Vec<String>,
     pub background: bool,
     pub session: Option<String>,
@@ -107,8 +109,10 @@ impl RunOpts {
     fn command(&self, low: bool, knob: Option<&Knob>) -> Command {
         let (prog, mut args): (String, Vec<String>) = match &self.sh {
             Some(line) => {
-                let shell = std::env::var("SHELL")
-                    .ok()
+                let shell = self
+                    .shell
+                    .clone()
+                    .or_else(|| std::env::var("SHELL").ok())
                     .filter(|s| !s.is_empty())
                     .unwrap_or("/bin/zsh".into());
                 let line = knob.map_or_else(|| line.clone(), |k| tweaks::apply_line(line, k));
@@ -150,7 +154,7 @@ fn direct(o: &RunOpts) -> i32 {
 pub fn run(o: RunOpts) -> i32 {
     if o.sh.as_deref().is_none_or(|s| s.trim().is_empty()) && o.argv.is_empty() {
         eprintln!(
-            "usage: headroom run [--background] [--wait-cap SECS] [--low] (--sh 'LINE' | -- CMD ARGS…)"
+            "usage: headroom run [--background] [--wait-cap SECS] [--low] ([--shell PATH] --sh 'LINE' | -- CMD ARGS…)"
         );
         return 2;
     }
