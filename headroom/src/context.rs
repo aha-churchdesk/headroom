@@ -1,5 +1,6 @@
 //! Where a command runs: its repository, worktree and our own executable.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -173,6 +174,7 @@ fn command_configs(
     line: &str,
     cwd: &Path,
     script: Option<&(PathBuf, String)>,
+    env: &dyn Fn(&str) -> Option<OsString>,
 ) -> Option<String> {
     let (dir, words) = if let Some((dir, script)) = script {
         let (dir, mut words) = config_command(script, dir)?;
@@ -188,7 +190,13 @@ fn command_configs(
     while i < words.len() {
         let word = &words[i];
         if tool == Tool::Cargo {
-            if word == "--config" || word.starts_with("--config=") {
+            if word == "--config"
+                || word.starts_with("--config=")
+                // Inline assignments can select a different global config,
+                // including inside npm scripts. Leave those commands alone.
+                || word.starts_with("CARGO_HOME=")
+                || word.starts_with("HOME=")
+            {
                 return None;
             }
             i += 1;
@@ -234,6 +242,39 @@ fn command_configs(
         }
         i += 1;
     }
+    if tool == Tool::Cargo {
+        // Cargo searches past repository boundaries, then its global home.
+        // Relative CARGO_HOME paths are relative to the command's directory.
+        let home = env("CARGO_HOME")
+            .filter(|v| !v.is_empty())
+            .map(|v| dir.join(v))
+            .or_else(|| {
+                env("HOME")
+                    .filter(|v| !v.is_empty())
+                    .map(PathBuf::from)
+                    .or_else(std::env::home_dir)
+                    .map(|p| p.join(".cargo"))
+            })?;
+        let mut configs = Vec::new();
+        for config_dir in dir
+            .ancestors()
+            .map(|d| d.join(".cargo"))
+            .chain(std::iter::once(home))
+        {
+            for name in ["config", "config.toml"] {
+                match std::fs::read_to_string(config_dir.join(name)) {
+                    Ok(text) => {
+                        configs.push(text);
+                        // Cargo prefers the extensionless file if both exist.
+                        break;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => return None,
+                }
+            }
+        }
+        return Some(configs.join("\n"));
+    }
     let mut configs = explicit_configs;
     configs.extend(up_to_top(&root).iter().flat_map(|d| {
         tool.config_files()
@@ -244,11 +285,20 @@ fn command_configs(
 }
 
 /// Can this command be told to use fewer workers? Reads the npm script it
-/// runs and the tool's config files between `cwd` and the checkout's top.
+/// runs and the tool's config files. Cargo also reads above the checkout and
+/// from its global home.
 pub fn tunable(line: &str, cwd: &Path) -> Option<Tunable> {
+    tunable_with_env(line, cwd, &|v| std::env::var_os(v))
+}
+
+fn tunable_with_env(
+    line: &str,
+    cwd: &Path,
+    env: &dyn Fn(&str) -> Option<OsString>,
+) -> Option<Tunable> {
     let script = tweaks::script_name(line).and_then(|n| npm_script(cwd, &n));
     let script_text = script.as_ref().map(|(_, text)| text.as_str());
-    let env_set = |v: &str| std::env::var_os(v).is_some_and(|x| !x.is_empty());
+    let env_set = |v: &str| env(v).is_some_and(|x| !x.is_empty());
     let cores = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
     let candidate = tweaks::detect(&Probe {
         line,
@@ -258,7 +308,13 @@ pub fn tunable(line: &str, cwd: &Path) -> Option<Tunable> {
         cores,
     })?;
     let located_configs = if matches!(candidate.tool, Tool::Vitest | Tool::Cargo) {
-        Some(command_configs(candidate.tool, line, cwd, script.as_ref())?)
+        Some(command_configs(
+            candidate.tool,
+            line,
+            cwd,
+            script.as_ref(),
+            env,
+        )?)
     } else {
         None
     };
@@ -501,6 +557,23 @@ mod tests {
     }
 
     #[test]
+    fn vitest_commonjs_configs_preserve_worker_settings() {
+        let root = checkout("commonjs-config");
+        for name in [
+            "vitest.config.cjs",
+            "vitest.config.cts",
+            "vite.config.cjs",
+            "vite.config.cts",
+        ] {
+            let config = root.join(name);
+            assert!(tunable("vitest run", &root).is_some(), "{name}");
+            std::fs::write(&config, "module.exports = { test: { maxWorkers: 1 } }").unwrap();
+            assert_eq!(tunable("vitest run", &root), None, "{name}");
+            std::fs::remove_file(config).unwrap();
+        }
+    }
+
+    #[test]
     fn config_lookup_follows_literal_cd_in_commands_and_scripts() {
         let root = checkout("cd-config");
         assert!(tunable("cd apps/web && vitest run", &root).is_some());
@@ -571,6 +644,87 @@ mod tests {
         )
         .unwrap();
         assert_eq!(tunable("cd apps/web && cargo build", &root), None);
+    }
+
+    #[test]
+    fn cargo_checks_global_configs_and_ancestors_above_the_checkout() {
+        let root = tmp("cargo-global-config");
+        let repo = root.join("repo");
+        let home = root.join("home");
+        let cargo_home = root.join("cargo-home");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        for config_dir in [root.join(".cargo"), home.join(".cargo"), cargo_home.clone()] {
+            std::fs::create_dir_all(&config_dir).unwrap();
+            for filename in ["config.toml", "config"] {
+                let env = |key: &str| match key {
+                    "HOME" => Some(home.clone().into_os_string()),
+                    "CARGO_HOME" if config_dir == cargo_home => {
+                        Some(cargo_home.clone().into_os_string())
+                    }
+                    _ => None,
+                };
+                assert!(tunable_with_env("cargo build", &repo, &env).is_some());
+                let path = config_dir.join(filename);
+                std::fs::write(&path, "[build]\njobs = 1\n").unwrap();
+                assert_eq!(
+                    tunable_with_env("cargo build", &repo, &env),
+                    None,
+                    "{path:?}"
+                );
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn cargo_home_can_be_relative_to_the_command_directory() {
+        let root = checkout("cargo-relative-home");
+        let cargo_home = root.join("apps/web/cargo-home");
+        std::fs::create_dir_all(&cargo_home).unwrap();
+        std::fs::write(cargo_home.join("config.toml"), "[build]\njobs = 1\n").unwrap();
+        let env = |key: &str| (key == "CARGO_HOME").then(|| OsString::from("cargo-home"));
+        assert_eq!(
+            tunable_with_env("cd apps/web && cargo build", &root, &env),
+            None
+        );
+    }
+
+    #[test]
+    fn cargo_prefers_legacy_config_and_skips_unreadable_configs() {
+        let root = checkout("cargo-config-precedence");
+        let cargo_home = root.join("cargo-home");
+        std::fs::create_dir_all(&cargo_home).unwrap();
+        let env = |key: &str| (key == "CARGO_HOME").then(|| cargo_home.clone().into_os_string());
+        std::fs::write(cargo_home.join("config.toml"), "[build]\njobs = 1\n").unwrap();
+        std::fs::write(cargo_home.join("config"), "[build]\nincremental = true\n").unwrap();
+        assert!(tunable_with_env("cargo build", &root, &env).is_some());
+        std::fs::remove_file(cargo_home.join("config")).unwrap();
+        std::fs::create_dir(cargo_home.join("config")).unwrap();
+        assert_eq!(tunable_with_env("cargo build", &root, &env), None);
+    }
+
+    #[test]
+    fn cargo_inline_home_overrides_are_not_tuned() {
+        let root = checkout("cargo-inline-home");
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"scripts":{"build":"cargo build"}}"#,
+        )
+        .unwrap();
+        for line in [
+            "CARGO_HOME=elsewhere cargo build",
+            "HOME=elsewhere cargo build",
+            "CARGO_HOME=elsewhere npm run build",
+            "HOME=elsewhere npm run build",
+        ] {
+            assert_eq!(tunable(line, &root), None, "{line}");
+        }
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"scripts":{"build":"CARGO_HOME=elsewhere cargo build"}}"#,
+        )
+        .unwrap();
+        assert_eq!(tunable("npm run build", &root), None);
     }
 
     #[test]
