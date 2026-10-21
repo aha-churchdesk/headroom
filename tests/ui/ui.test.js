@@ -245,15 +245,25 @@ test('the graphs say they are collecting before the first point, and leave gaps 
   lacks(ui.head(), 'Swap');
 });
 
-test('zeros are dimmed and failures stand out', () => {
+test('zeros are dimmed, failures are not coloured, and every stat explains itself on hover', () => {
   ui.setState(history);
   const html = ui.html();
-  has(html, 'class="bad" title="1 exited');
-  has(html, 'class="zero" title="Started with fewer workers');
+  has(html, 'class="" data-tip="1 exited with an error');
+  has(html, 'class="zero" data-tip="Started with fewer workers');
+  eq((html.match(/data-tip=/g) || []).length, 6, 'one tooltip per stat');
+  lacks(html, 'class="bad"');
   ui.setState(busy);
   eq(busy.last_day.runs, 0, 'the capture has nothing finished yet');
   has(ui.view(), 'Last 24h 0 runs 0 failed 0s wait p50');
-  lacks(ui.html(), 'class="bad"');
+});
+
+test('the pressure level is coloured text with a tooltip, and so are the header stats', () => {
+  ui.setState(busy);
+  const head = ui.headHtml();
+  has(head, `class="level ${busy.system.pressure}" data-tip="Memory pressure ${busy.system.pressure}`);
+  lacks(head, 'pill');
+  has(head, 'data-tip="Memory moved to disk.');
+  has(head, 'data-tip="CPU in use across all cores"');
 });
 
 test('a busier day than the history holds is a floor', () => {

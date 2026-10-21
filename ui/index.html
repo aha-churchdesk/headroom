@@ -153,13 +153,18 @@ button:disabled{ cursor:default; opacity:.4; }
 }
 .btn-hold.on{ background:var(--warn); border-color:transparent; color:#1c1c1e; }
 .head .row2{ display:flex; align-items:center; gap:8px; margin-top:7px; font-size:11.5px; color:var(--text-dim); }
-.pill{
-  font-size:10px; font-weight:700; letter-spacing:.06em; padding:1px 7px; border-radius:9px;
-  color:#fff;
+.level{ font-size:10.5px; font-weight:700; letter-spacing:.06em; }
+.level.normal{ color:var(--good); }
+.level.warn{ color:var(--warn); }
+.level.critical{ color:var(--bad); }
+/* One tooltip for every [data-tip], shown at once and kept inside the popover. */
+.tip{
+  position:fixed; z-index:20; max-width:240px; padding:5px 8px; border-radius:6px;
+  background:var(--text); color:var(--bg); font-size:11px; line-height:1.35;
+  pointer-events:none; opacity:0; transition:opacity .08s;
 }
-.pill.normal{ background:var(--good); }
-.pill.warn{ background:var(--warn); color:#1c1c1e; }
-.pill.critical{ background:var(--bad); }
+.tip.on{ opacity:1; }
+[data-tip]{ cursor:default; }
 .head .gbtn{ margin-left:auto; font-size:11px; color:var(--text-dim); padding:1px 6px; border-radius:5px; }
 .head .gbtn:hover, .head .gbtn.on{ background:var(--bg-sunk); color:var(--text); }
 .graphs{ margin-top:9px; }
@@ -223,7 +228,6 @@ button:disabled{ cursor:default; opacity:.4; }
 .day-row b{ font-size:14px; font-weight:650; }
 .day-row span{ font-size:10px; color:var(--text-dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .day-row .zero b{ color:var(--text-faint); font-weight:500; }
-.day-row .bad b{ color:var(--bad); }
 .empty{ padding:6px 14px 10px; color:var(--text-faint); font-size:12px; }
 
 /* Job rows */
@@ -418,6 +422,7 @@ pre.snip{
     <div class="head" id="head"></div>
     <div class="body" id="view"></div>
     <div class="foot" id="foot"></div>
+    <div class="tip" id="tip"></div>
   </div>
 </div>
 
@@ -542,6 +547,12 @@ function render(){
   if (!LIVE) renderTray(STATE);
 }
 
+const PRESSURE_TIP = {
+  normal: "Memory pressure normal: jobs start when their estimate fits.",
+  warn: "Memory pressure warn: a job starts only when nothing else of Headroom's is running.",
+  critical: "Memory pressure critical: nothing starts, and the guard may freeze the newest job.",
+};
+
 function renderHead(S){
   const m = S.system;
   const usedPct = Math.min(100, m.mem_used / m.mem_total * 100);
@@ -565,10 +576,10 @@ function renderHead(S){
         ${S.held ? "Held" : "Hold"}</button>
     </div>
     <div class="row2 num">
-      <span class="pill ${m.pressure}">${m.pressure.toUpperCase()}</span>
-      <span>${gb(m.mem_available)} GB available</span>·
-      <span>swap ${gb(m.swap_used)} GB</span>·
-      <span>CPU ${Math.round(m.cpu_pct)}%</span>
+      <span class="level ${m.pressure}" data-tip="${PRESSURE_TIP[m.pressure]}">${m.pressure.toUpperCase()}</span>
+      <span data-tip="Memory macOS can hand out now without swapping. Jobs start when their estimate fits in this, minus the ${gb(S.settings.headroom)} GB kept free.">${gb(m.mem_available)} GB available</span>·
+      <span data-tip="Memory moved to disk. It grows when RAM runs short; a lot of it makes everything slow.">swap ${gb(m.swap_used)} GB</span>·
+      <span data-tip="CPU in use across all cores">CPU ${Math.round(m.cpu_pct)}%</span>
       <button class="gbtn ${UI.graph ? "on" : ""}" data-act="graph" title="Memory, swap and CPU over time">Graph ${UI.graph ? "▴" : "▾"}</button>
     </div>
     ${UI.graph ? renderGraphs(S) : ""}
@@ -645,7 +656,7 @@ function renderGraphs(S){
 function renderLastDay(h){
   const bad = h.failed + h.killed;
   const cell = (value, label, tip, cls = "") => `
-        <div class="${cls}" title="${tip}"><b>${value}</b><span>${label}</span></div>`;
+        <div class="${cls}" data-tip="${tip}"><b>${value}</b><span>${label}</span></div>`;
   const waits = h.waited_s
     ? `Time in the queue before starting: ${dur(h.waited_s)} in all, longest ${dur(h.longest_wait_s)}`
     : "No job had to wait";
@@ -655,7 +666,7 @@ function renderLastDay(h){
       <div class="day-row num">
         ${cell(`${h.runs}${h.more ? "+" : ""}`, h.runs === 1 ? "run" : "runs",
           h.more ? "History keeps 2,000 runs; more than that finished today" : "Jobs that finished", h.runs ? "" : "zero")}
-        ${cell(bad, "failed", `${h.failed} exited with an error, ${h.killed} killed to free memory`, bad ? "bad" : "zero")}
+        ${cell(bad, "failed", `${h.failed} exited with an error, ${h.killed} killed to free memory`, bad ? "" : "zero")}
         ${cell(dur(h.wait_p50_s), "wait p50", `Half the jobs waited this long or less. ${waits}`, h.wait_p50_s ? "" : "zero")}
         ${cell(dur(h.wait_p99_s), "wait p99", `99 in 100 jobs waited this long or less. ${waits}`, h.wait_p99_s ? "" : "zero")}
         ${cell(h.shrunk, "shrunk", "Started with fewer workers so they fit", h.shrunk ? "" : "zero")}
@@ -862,7 +873,7 @@ function renderCommands(S){
   const seg = (items, cur, act) => `<span class="seg">${items.map(([v, l]) =>
     `<button class="${v === cur ? "on" : ""}" data-act="${act}" data-val="${v}">${l}</button>`).join("")}</span>`;
   const t = w.total;
-  const cell = (value, label, tip, cls = "") => `<div class="${cls}" title="${tip}"><b>${value}</b><span>${label}</span></div>`;
+  const cell = (value, label, tip, cls = "") => `<div class="${cls}" data-tip="${tip}"><b>${value}</b><span>${label}</span></div>`;
   const key = UI.cmdSort;
   const rows = [...w.rows].sort((a, b) => b[key] - a[key] || b.run_s - a.run_s);
   const top = Math.max(...rows.map(r => r[key])) || 1;
@@ -873,7 +884,7 @@ function renderCommands(S){
     </div>
     <div class="day-row five num cmd-total">
       ${cell(t.runs, t.runs === 1 ? "run" : "runs", "Runs that finished, of every command")}
-      ${cell(t.failed, "failed", "Exited with an error, or killed twice to free memory", t.failed ? "bad" : "zero")}
+      ${cell(t.failed, "failed", "Exited with an error, or killed twice to free memory", t.failed ? "" : "zero")}
       ${cell(dur(t.run_s), "running", "Time the commands ran")}
       ${cell(dur(t.wait_s), "waiting", "Time in the queue before starting", t.wait_s ? "" : "zero")}
       ${cell(gbh(t.gb_h), "GB·h", "Peak memory × run time, summed: the memory held from other work")}
@@ -1200,6 +1211,19 @@ function dropIndex(e){
 function clearDropMarks(){
   document.querySelectorAll(".drop-before,.drop-after").forEach(n => n.classList.remove("drop-before", "drop-after"));
 }
+$("pop").addEventListener("mouseover", (e) => {
+  const tip = $("tip"), t = e.target.closest && e.target.closest("[data-tip]");
+  if (!t){ tip.classList.remove("on"); return; }
+  tip.textContent = t.dataset.tip;
+  tip.classList.add("on");
+  // Below the element, or above it near the bottom; never past the sides.
+  const r = t.getBoundingClientRect(), box = $("pop").getBoundingClientRect();
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  tip.style.left = Math.max(box.left + 6, Math.min(r.left + r.width / 2 - w / 2, box.right - w - 6)) + "px";
+  tip.style.top = (r.bottom + 6 + h <= box.bottom ? r.bottom + 6 : r.top - h - 6) + "px";
+});
+$("pop").addEventListener("mouseleave", () => $("tip").classList.remove("on"));
+
 // Hovering a graph moves the crosshair on all three. Only the header is
 // redrawn, so the rest of the popover keeps its own hover and scroll.
 $("head").addEventListener("mousemove", (e) => {
