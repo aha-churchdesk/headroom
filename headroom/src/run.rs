@@ -50,7 +50,47 @@ extern "C" fn on_signal(sig: libc::c_int) {
 }
 
 fn note(msg: &str) {
-    eprintln!("headroom: {msg}");
+    eprintln!("headroom: {} {msg}", clock());
+}
+
+/// The local time of day as HH:MM:SS.
+fn clock() -> String {
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let now = unsafe { libc::time(std::ptr::null_mut()) };
+    if unsafe { libc::localtime_r(&now, &mut tm) }.is_null() {
+        return "--:--:--".to_string();
+    }
+    format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
+}
+
+/// How long a queued job keeps quiet when only the numbers in its status
+/// changed. The daemon sends a new status whenever free memory moves, which
+/// can be every second.
+const RESAY_AFTER: Duration = Duration::from_secs(30);
+
+/// Which queue updates get a line on stderr: a move in the queue at once,
+/// anything else at most once per [`RESAY_AFTER`].
+#[derive(Default)]
+struct Chatter {
+    said: String,
+    pos: Option<usize>,
+    at: Option<Instant>,
+}
+
+impl Chatter {
+    fn say(&mut self, pos: usize, line: String, now: Instant) -> Option<String> {
+        let moved = self.pos != Some(pos);
+        let due = self.at.is_none_or(|t| now.duration_since(t) >= RESAY_AFTER);
+        if line == self.said || !(moved || due) {
+            return None;
+        }
+        (self.said, self.pos, self.at) = (line.clone(), Some(pos), Some(now));
+        Some(line)
+    }
+
+    fn said_anything(&self) -> bool {
+        self.at.is_some()
+    }
 }
 
 fn code_of(status: ExitStatus) -> i32 {
@@ -208,7 +248,7 @@ impl Session {
         }
         let mut daemon_gone = false;
         let mut queued_since = Instant::now();
-        let mut last_said = String::new();
+        let mut chatter = Chatter::default();
         let mut pos = (0usize, None::<String>);
         let mut waited_total = Duration::ZERO;
 
@@ -249,9 +289,8 @@ impl Session {
                             "queued #{p} of {of}{} (needs ~{gb:.1} GB)",
                             reason.map(|r| format!(" · {r}")).unwrap_or_default()
                         );
-                        if said != last_said {
-                            note(&said);
-                            last_said = said;
+                        if let Some(line) = chatter.say(p, said, Instant::now()) {
+                            note(&line);
                         }
                     }
                     Ok(Some(DaemonMsg::Granted {
@@ -280,7 +319,7 @@ impl Session {
                 }
             };
             waited_total += queued_since.elapsed();
-            if waited_total >= Duration::from_secs(1) && !last_said.is_empty() {
+            if waited_total >= Duration::from_secs(1) && chatter.said_anything() {
                 note(&format!(
                     "starting after {}s in the queue",
                     waited_total.as_secs()
@@ -326,7 +365,7 @@ impl Session {
                         "killed to free memory ({why}); requeued, will run again"
                     ));
                     queued_since = Instant::now();
-                    last_said.clear();
+                    chatter = Chatter::default();
                     continue;
                 }
                 Some((why, false)) if why != "killed by you" => {
@@ -404,5 +443,56 @@ impl Foreground {
 impl Drop for Foreground {
     fn drop(&mut self) {
         unsafe { libc::tcsetpgrp(0, self.ours) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line(pos: usize, free: &str) -> String {
+        format!("queued #{pos} of 2 · next needs 1.5 GB, {free} GB free")
+    }
+
+    #[test]
+    fn a_status_that_only_changes_its_numbers_is_said_twice_a_minute() {
+        let t = Instant::now();
+        let mut c = Chatter::default();
+        assert!(!c.said_anything());
+        assert!(c.say(2, line(2, "0.5"), t).is_some());
+        assert!(c.said_anything());
+        for s in 1..30 {
+            let free = format!("0.{}", s % 9);
+            assert_eq!(c.say(2, line(2, &free), t + Duration::from_secs(s)), None);
+        }
+        assert!(c.say(2, line(2, "0.4"), t + RESAY_AFTER).is_some());
+    }
+
+    #[test]
+    fn a_move_in_the_queue_is_said_at_once() {
+        let t = Instant::now();
+        let mut c = Chatter::default();
+        c.say(2, line(2, "0.5"), t);
+        let moved = c.say(1, line(1, "0.5"), t + Duration::from_millis(10));
+        assert_eq!(moved, Some(line(1, "0.5")));
+    }
+
+    #[test]
+    fn the_same_status_is_never_repeated() {
+        let t = Instant::now();
+        let mut c = Chatter::default();
+        c.say(1, line(1, "0.5"), t);
+        assert_eq!(c.say(1, line(1, "0.5"), t + Duration::from_secs(600)), None);
+    }
+
+    #[test]
+    fn the_clock_reads_as_hours_minutes_and_seconds() {
+        let c = clock();
+        let parts: Vec<u32> = c.split(':').map(|p| p.parse().unwrap()).collect();
+        assert_eq!(c.len(), 8, "{c}");
+        assert!(
+            parts.len() == 3 && parts[0] < 24 && parts[1] < 60 && parts[2] < 61,
+            "{c}"
+        );
     }
 }
