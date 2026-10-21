@@ -846,6 +846,54 @@ fn a_job_that_does_not_fit_runs_with_fewer_workers() {
     finish(blocker);
 }
 
+#[test]
+fn a_quick_job_starts_ahead_while_the_running_one_overruns() {
+    // The same 1 GB job takes 1 s three times, then runs on. Past its usual
+    // second it is expected to take as long again, so a job that is done at
+    // once may start ahead of another 1 GB one waiting for it.
+    let bin = tmp("overrun-bin");
+    let secs = bin.join("secs");
+    let script = |name: &str, body: String| {
+        let p = bin.join(name);
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        p.display().to_string()
+    };
+    let big = script("e2e.sh", format!("exec {HOG} 1 $(cat {})", secs.display()));
+    let quick = script("lint.sh", "true".into());
+    let d = Daemon::start(
+        "overrun",
+        Config {
+            headroom: 47 * GIB + GIB / 2,
+            ..Config::default()
+        },
+    );
+    std::fs::write(&secs, "1").unwrap();
+    for _ in 0..3 {
+        d.output(&["run", "--", &big]);
+        d.output(&["run", "--", &quick]);
+    }
+    std::fs::write(&secs, "8").unwrap();
+    let running = d.spawn(&["run", "--", &big]);
+    d.running();
+    std::thread::sleep(Duration::from_millis(2500));
+    let head = d.spawn(&["run", "--", &big]);
+    let head_id = d.queued_id();
+    let ahead = d.output(&["run", "--wait-cap", "4", "--", &quick]);
+    assert_eq!(ahead.status.code(), Some(0), "{}", text(&ahead.stderr));
+    assert_eq!(d.ls().queued.first().map(|j| j.id), Some(head_id));
+    wait_for("the quick run in history", 5, || {
+        d.ls()
+            .history
+            .iter()
+            .any(|h| h.cmd.ends_with("lint.sh") && h.ahead_of.is_some())
+            .then_some(())
+    });
+    for c in [running, head] {
+        assert_eq!(finish(c).0, 0);
+    }
+}
+
 /// Writes the popover states the node UI tests render, from real runs.
 /// Not part of the suite: rerun it when the state contract changes, with
 /// `cargo test -p headroom --test e2e capture_ui_states -- --ignored`.
