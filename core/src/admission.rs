@@ -222,7 +222,11 @@ pub fn decide(
     let Some(head_starts_in) = shadow(running, &admitted, head.estimate, free, now) else {
         return d;
     };
+    let remaining = cfg.backfill_skips.saturating_sub(head.skipped) as usize;
     for job in &queue[i + 1..] {
+        if d.backfilled.len() >= remaining {
+            break;
+        }
         // A job with no history makes no promise about when it ends.
         let Some(takes) = job.median_ms.filter(|_| job.samples > 0) else {
             continue;
@@ -462,6 +466,16 @@ mod tests {
         ];
         // 4 GB free: 3 GB fits, then 2 GB doesn't, then 1 GB does.
         assert_eq!(at(&s, &[r], &q, 0).backfilled, vec![2, 4]);
+    }
+
+    #[test]
+    fn one_batch_cannot_exceed_the_remaining_backfill_allowance() {
+        for skipped in 0..=3 {
+            let (s, r, head) = backfill_case(skipped, None);
+            let mut q = vec![head];
+            q.extend((2..12).map(|id| short(id, 0.1, 1_000)));
+            assert_eq!(at(&s, &[r], &q, 0).backfilled.len(), (3 - skipped) as usize);
+        }
     }
 
     #[test]

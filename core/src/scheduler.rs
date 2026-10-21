@@ -689,7 +689,7 @@ impl Scheduler {
         self.blocked = d.blocked;
         if let Some(h) = d.skipped {
             let head = &mut self.jobs.get_mut(&h).expect("queued").job;
-            head.skipped += 1;
+            head.skipped += d.backfilled.len() as u32;
             head.skipped_since.get_or_insert(now);
             let name = format!("{} · {}", head.spec.label, head.spec.cmd);
             for id in &d.backfilled {
@@ -1154,6 +1154,28 @@ mod tests {
         s.started(3, 300);
         s.exited(3, Some(0), None, 5_000, 9);
         assert_eq!(s.history[0].ahead_of.as_deref(), Some("repo · e2e"));
+    }
+
+    #[test]
+    fn a_batch_counts_every_job_against_the_heads_backfill_limit() {
+        let mut s = sched(8);
+        learned(&mut s, "build", 6, 60);
+        learned(&mut s, "e2e", 7, 300);
+        learned(&mut s, "lint", 1, 10);
+        s.enqueue(1, own("build"), 0);
+        s.started(1, 100);
+        s.tick(snap(8), &usage(100, 6.0), 1_000);
+        s.control(99, Control::Hold { on: true }, 1_000, 0);
+        s.enqueue(2, own("e2e"), 1_000);
+        for conn in 3..13 {
+            s.enqueue(conn, own("lint"), 1_000);
+        }
+        s.control(99, Control::Hold { on: false }, 1_000, 0);
+        assert_eq!(s.list().queued[0].skipped, 3);
+        assert_eq!(s.list().running.len(), 4);
+        // Another settle cannot spend the same allowance again.
+        s.tick(snap(8), &usage(100, 6.0), 2_000);
+        assert_eq!(s.list().running.len(), 4);
     }
 
     fn s_cfg() -> Config {
