@@ -338,6 +338,63 @@ mod tests {
     }
 
     #[test]
+    fn shrinking_respects_the_peak_of_an_interrupted_tuned_run() {
+        use crate::profile::{Profiles, Run};
+
+        let mut profiles = Profiles::default();
+        for _ in 0..3 {
+            profiles.record(
+                "k",
+                "k",
+                Run {
+                    peak: 8 * GIB,
+                    duration_ms: 1000,
+                    exit: Some(0),
+                    flagged: false,
+                    at: 0,
+                    workers: Some(8),
+                    parts: Vec::new(),
+                },
+            );
+        }
+        profiles.record(
+            "k",
+            "k",
+            Run {
+                peak: 7 * GIB,
+                duration_ms: 100,
+                exit: None,
+                flagged: true,
+                at: 0,
+                workers: Some(2),
+                parts: Vec::new(),
+            },
+        );
+        let est = profiles.estimate_for_workers("k", "k", GIB, Some(8));
+        let mut job = Job::queued(
+            1,
+            JobSpec {
+                tune: Some(Tunable {
+                    tool: Tool::Vitest,
+                    default_workers: 8,
+                    npm: false,
+                }),
+                ..JobSpec::default()
+            },
+            est.bytes,
+            est.samples,
+            0,
+        );
+        job.scaling = profiles.get("k").unwrap().scaling();
+        assert_eq!(shrink(&job, 7 * GIB / 2, &Config::default()), None);
+        assert_eq!(
+            shrink(&job, 7 * GIB, &Config::default()),
+            Some((2, 7 * GIB))
+        );
+        assert!(run(&snap(5.5), &busy(), &[job], false).admit.is_empty());
+    }
+
+    #[test]
     fn no_tuning_without_a_profile_a_tool_or_permission() {
         let mut no_profile = tunable(1);
         no_profile.scaling = None;

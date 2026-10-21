@@ -128,8 +128,22 @@ impl Profile {
     /// `TRUSTED` runs: the least-squares slope, with the base raised until
     /// every run lies on or under the line, so it never underestimates a run
     /// it has seen. Otherwise an assumption, from the p90 at the count seen
-    /// most often.
+    /// most often. Flagged peaks can raise the base to preserve their lower
+    /// bounds, but never participate in fitting the slope.
     pub fn scaling(&self) -> Option<Scaling> {
+        let mut scaling = self.clean_scaling()?;
+        for run in self.runs.iter().filter(|r| r.flagged) {
+            // With no worker count, no part of this lower bound can safely
+            // be attributed to workers. Keep it as a fixed cost instead.
+            let variable = scaling
+                .per_worker
+                .saturating_mul(run.workers.unwrap_or(0) as Bytes);
+            scaling.base = scaling.base.max(run.peak.saturating_sub(variable));
+        }
+        Some(scaling)
+    }
+
+    fn clean_scaling(&self) -> Option<Scaling> {
         let pts: Vec<(u32, Bytes)> = self
             .runs
             .iter()
@@ -350,6 +364,58 @@ mod tests {
         assert_eq!(gb(s.base), 4.2);
     }
 
+    #[test]
+    fn flagged_peaks_raise_worker_predictions_without_fitting_incomplete_runs() {
+        for clean in [
+            vec![at(8.0, 8), at(8.0, 8), at(8.0, 8)],
+            vec![at(8.0, 8), at(5.0, 4), at(3.5, 2)],
+        ] {
+            let mut p = profile(clean);
+            let before = p.scaling().unwrap();
+            p.runs.push_back(Run {
+                flagged: true,
+                duration_ms: 99_000,
+                ..at(7.0, 2)
+            });
+            let after = p.scaling().unwrap();
+            assert_eq!(after.per_worker, before.per_worker);
+            assert_eq!(after.at(2), 7 * GIB);
+            for n in 1..=8 {
+                assert!(after.at(n) >= before.at(n));
+            }
+            assert_eq!(p.samples(), 3);
+            assert_eq!(p.median_ms(), Some(1000));
+            assert_eq!(p.p90(), Some(8 * GIB));
+            p.runs.push_back(Run {
+                flagged: true,
+                ..at(0.1, 1)
+            });
+            assert_eq!(
+                p.scaling(),
+                Some(after),
+                "a low partial peak proves nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn flagged_peaks_without_workers_remain_a_floor_at_every_count() {
+        for workers in [None, Some(0)] {
+            let p = profile(vec![
+                at(8.0, 8),
+                Run {
+                    workers,
+                    ..flagged(9.0)
+                },
+            ]);
+            let scaling = p.scaling().unwrap();
+            assert_eq!(scaling.per_worker, 3 * GIB / 4);
+            for n in 1..=8 {
+                assert!(scaling.at(n) >= 9 * GIB);
+            }
+        }
+    }
+
     fn gb(b: Bytes) -> f64 {
         (b as f64 / GIB as f64 * 100.0).round() / 100.0
     }
@@ -402,10 +468,7 @@ mod tests {
             p.estimate("k", "f", DEF)
         );
         p.record("k", "f", flagged(12.0));
-        assert_eq!(
-            p.estimate_for_workers("k", "f", DEF, Some(10)).bytes,
-            12 * GIB
-        );
+        assert!(p.estimate_for_workers("k", "f", DEF, Some(10)).bytes >= 12 * GIB);
         assert_eq!(
             p.estimate_for_workers("unknown", "f", DEF, Some(10)),
             p.estimate("unknown", "f", DEF),
