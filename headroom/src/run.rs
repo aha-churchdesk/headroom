@@ -14,14 +14,14 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use headroom_core::classify::{describe, profile_keys};
+use headroom_core::classify::{describe_in, profile_keys};
 use headroom_core::model::JobSpec;
 use headroom_core::protocol::{ClientMsg, DaemonMsg, read_msg, write_msg};
 use headroom_core::shell;
 use headroom_core::store::Store;
 use headroom_core::tweaks::{self, Knob, Tunable};
 
-use crate::context::{git_context, tunable};
+use crate::context::{git_context, git_hook_installed, tunable};
 
 /// Set in a job's environment. A `headroom run` inside a job runs directly:
 /// queueing it would wait behind its own parent.
@@ -128,7 +128,7 @@ pub fn run(o: RunOpts) -> i32 {
     let line = o.line();
     let cwd = std::env::current_dir().unwrap_or_default();
     let git = git_context(&cwd);
-    let (cmd, program) = describe(&line, &cfg);
+    let (cmd, program) = describe_in(&line, &cfg, &|d, h| git_hook_installed(&cwd, d, h));
     let (key, fallback_key) = profile_keys(&git.repo, &git.subdir, &cmd, &program);
     let tune = tunable(&line, &cwd);
     let spec = JobSpec {

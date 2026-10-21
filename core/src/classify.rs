@@ -63,6 +63,7 @@ const PM_TOOLS: &[&str] = &[
     "vite",
     "webpack",
     "tsx",
+    "lefthook",
 ];
 
 /// Tools whose first positional argument is a test filter or a path, never
@@ -259,6 +260,11 @@ fn tool(program: &str, rest: &[String]) -> Normal {
             normal(program, &[program, sub], rest)
         }
         p if FILTER_TOOLS.contains(&p) => normal(program, &[program], rest),
+        // `lefthook run pre-push`: each hook is its own workload.
+        "lefthook" => match rest.iter().filter(|a| !is_flag(a)).collect::<Vec<_>>()[..] {
+            [run, hook, ..] if run == "run" => normal(program, &[program, run, hook], rest),
+            _ => generic(program, rest),
+        },
         _ => generic(program, rest),
     }
 }
@@ -366,6 +372,60 @@ fn excluded_by(n: &Normal, cfg: &Config) -> Option<String> {
 
 pub fn is_heavy(n: &Normal, cfg: &Config) -> bool {
     cfg.patterns.iter().any(|p| pattern_matches(p, &n.key))
+        // Running a repository's hooks by hand runs whatever they hold.
+        || (n.program == "lefthook" && n.key.len() == 3)
+}
+
+/// A git command that runs one of the repository's hooks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitHook {
+    /// `git -C <dir>`, relative to where the line runs.
+    pub dir: Option<String>,
+    /// `commit` or `push`.
+    pub sub: &'static str,
+    /// The hook it runs: `pre-commit` or `pre-push`.
+    pub hook: &'static str,
+}
+
+/// The hook this simple command runs, if any. A commit runs pre-commit and
+/// a push runs pre-push, unless told not to (`--no-verify`, `LEFTHOOK=0`,
+/// `HUSKY=0`). Whether the repository has that hook is for the caller to
+/// look up.
+pub fn git_hook(words: &[String]) -> Option<GitHook> {
+    let mut i = 0;
+    while i < words.len() && is_assignment(&words[i]) {
+        if ["LEFTHOOK=0", "LEFTHOOK=false", "HUSKY=0"].contains(&words[i].as_str()) {
+            return None;
+        }
+        i += 1;
+    }
+    if basename(words.get(i)?) != "git" {
+        return None;
+    }
+    i += 1;
+    let mut dir = None;
+    while let Some(w) = words.get(i).filter(|w| is_flag(w)) {
+        match w.as_str() {
+            "-C" => dir = words.get(i + 1).cloned(),
+            "-c" => {}
+            _ => {
+                i += 1;
+                continue;
+            }
+        }
+        i += 2;
+    }
+    let rest = &words.get(i + 1..)?;
+    let skip = |short: bool| {
+        rest.iter()
+            .any(|a| a == "--no-verify" || (short && a == "-n"))
+    };
+    let (sub, hook) = match words.get(i)?.as_str() {
+        "commit" if !skip(true) => ("commit", "pre-commit"),
+        "push" if !skip(false) => ("push", "pre-push"),
+        _ => return None,
+    };
+    Some(GitHook { dir, sub, hook })
 }
 
 fn wrapped(words: &[String]) -> bool {
@@ -373,13 +433,30 @@ fn wrapped(words: &[String]) -> bool {
         && words.get(1).is_some_and(|w| w == "run")
 }
 
+/// Is a git hook installed? Given `git -C`'s directory, if any, and the
+/// hook's name.
+pub type HookProbe<'a> = &'a dyn Fn(Option<&str>, &str) -> bool;
+
+/// [`classify_in`] without a repository to look in: git commands are light.
 pub fn classify(line: &str, cfg: &Config) -> Class {
+    classify_in(line, cfg, &|_, _| false)
+}
+
+/// Classify a line run where `hooked` can tell which git hooks exist: a
+/// commit or push in a repository with that hook is as heavy as the hook.
+pub fn classify_in(line: &str, cfg: &Config, hooked: HookProbe) -> Class {
     let cmds = simple_commands(line);
     if cmds.iter().any(|w| wrapped(w)) {
         return Class::Wrapped;
     }
     let mut heavy: Option<Normal> = None;
     for words in &cmds {
+        if let Some(g) = git_hook(words) {
+            if heavy.is_none() && hooked(g.dir.as_deref(), g.hook) {
+                heavy = Some(normal("git", &["git", g.sub], &words[1..]));
+            }
+            continue;
+        }
         let Some(n) = normalize(words) else { continue };
         // One long-lived part makes the whole line long-lived: wrapping
         // `pnpm build && pnpm start` would hold a slot until the server stops.
@@ -403,7 +480,11 @@ pub fn classify(line: &str, cfg: &Config) -> Class {
 /// explicit `headroom run`: the heavy part if there is one, else the first
 /// part with a workload, else the line itself.
 pub fn describe(line: &str, cfg: &Config) -> (String, String) {
-    if let Class::Heavy { cmd, program } = classify(line, cfg) {
+    describe_in(line, cfg, &|_, _| false)
+}
+
+pub fn describe_in(line: &str, cfg: &Config, hooked: HookProbe) -> (String, String) {
+    if let Class::Heavy { cmd, program } = classify_in(line, cfg, hooked) {
         return (cmd, program);
     }
     for words in simple_commands(line) {
@@ -647,6 +728,90 @@ mod tests {
             cls("mise exec -- pnpm dev"),
             Class::Excluded { .. }
         ));
+    }
+
+    /// A repository whose hooks are `hooks`, under `git -C` directory `dir`.
+    fn in_repo(line: &str, dir: Option<&str>, hooks: &[&str]) -> Class {
+        classify_in(line, &Config::default(), &|d, h| {
+            d == dir && hooks.contains(&h)
+        })
+    }
+
+    #[test]
+    fn commits_and_pushes_are_as_heavy_as_the_repositorys_hooks() {
+        let both = &["pre-commit", "pre-push"];
+        assert_eq!(
+            in_repo("git commit -m 'Fix the thing'", None, both),
+            heavy("git commit", "git")
+        );
+        assert_eq!(
+            in_repo("git push -u origin HEAD", None, both),
+            heavy("git push", "git")
+        );
+        assert_eq!(
+            in_repo(
+                "git add -A && git commit --amend --no-edit && git push",
+                None,
+                both
+            ),
+            heavy("git commit", "git"),
+            "the first hooked part names it"
+        );
+        assert_eq!(
+            in_repo("git -C web commit -m x", Some("web"), both),
+            heavy("git commit", "git")
+        );
+        assert_eq!(
+            in_repo("git -c core.editor=true --no-pager push", None, both),
+            heavy("git push", "git")
+        );
+        // Only the hook the command runs counts.
+        assert_eq!(in_repo("git push", None, &["pre-commit"]), Class::Light);
+        assert_eq!(
+            in_repo("git commit -m x", None, &["pre-push"]),
+            Class::Light
+        );
+    }
+
+    #[test]
+    fn commits_and_pushes_without_hooks_stay_light() {
+        let both = &["pre-commit", "pre-push"];
+        assert_eq!(in_repo("git commit -m x", None, &[]), Class::Light);
+        assert_eq!(cls("git push"), Class::Light, "no repository to look in");
+        for line in [
+            "git commit --no-verify -m x",
+            "git commit -n -m x",
+            "git push --no-verify",
+            "LEFTHOOK=0 git push",
+            "HUSKY=0 git commit -m x",
+            "git status",
+            "git log --oneline -5",
+            "git",
+        ] {
+            assert_eq!(in_repo(line, None, both), Class::Light, "{line}");
+        }
+        // `-n` on a push is a dry run, which still runs pre-push.
+        assert_eq!(in_repo("git push -n", None, both), heavy("git push", "git"));
+        // The hook of another directory is not this one's.
+        assert_eq!(in_repo("git -C web commit -m x", None, both), Class::Light);
+    }
+
+    #[test]
+    fn running_hooks_by_hand_is_heavy() {
+        assert_eq!(
+            cls("lefthook run pre-push"),
+            heavy("lefthook run pre-push", "lefthook")
+        );
+        assert_eq!(
+            cls("pnpm exec lefthook run pre-commit"),
+            heavy("lefthook run pre-commit", "lefthook")
+        );
+        assert_eq!(
+            cls("yarn lefthook run pre-push --force"),
+            heavy("lefthook run pre-push", "lefthook")
+        );
+        assert_eq!(cls("lefthook install"), Class::Light);
+        assert_eq!(cls("lefthook run"), Class::Light, "no hook named");
     }
 
     #[test]

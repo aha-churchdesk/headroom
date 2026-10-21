@@ -7,7 +7,7 @@ use headroom_core::hookio::{self, Agent};
 use headroom_core::hooksettings::{self, Change, Scope, Status};
 use headroom_core::store::Store;
 
-use crate::context::stable_exe;
+use crate::context::{git_hook_installed, stable_exe};
 
 /// The hook itself: payload on stdin, answer (or nothing) on stdout.
 /// Always exits 0: a hook failure must never stop the agent's command.
@@ -17,7 +17,15 @@ pub fn answer(agent: Agent) -> i32 {
         return 0;
     }
     let cfg = Store::open().map(|s| s.load_config()).unwrap_or_default();
-    let out = hookio::handle(agent, &payload, &stable_exe(), &cfg);
+    // The agent's cwd, or ours: hooks run in the agent's directory.
+    let hooked = |cwd: Option<&str>, dir: Option<&str>, hook: &str| {
+        let base = cwd
+            .map(PathBuf::from)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
+        git_hook_installed(&base, dir, hook)
+    };
+    let out = hookio::handle(agent, &payload, &stable_exe(), &cfg, &hooked);
     if !out.is_empty() {
         println!("{out}");
     }

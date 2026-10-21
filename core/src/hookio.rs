@@ -18,7 +18,7 @@
 
 use serde_json::{Map, Value, json};
 
-use crate::classify::{Class, classify};
+use crate::classify::{Class, HookProbe, classify_in};
 use crate::config::Config;
 use crate::shell::quote;
 
@@ -65,6 +65,8 @@ pub struct Call {
     /// The tool's own timeout, in the agent's unit (ms for Claude and Codex,
     /// seconds for pi). `None` when the agent didn't set one.
     pub timeout: Option<u64>,
+    /// Where the command runs, when the agent says.
+    pub cwd: Option<String>,
     /// The tool input as sent. Claude replaces the whole input with ours,
     /// so every field we don't change must be echoed back.
     input: Map<String, Value>,
@@ -106,6 +108,7 @@ pub fn parse(agent: Agent, payload: &str) -> Option<Call> {
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
                 timeout: input.get(timeout_key).and_then(Value::as_u64),
+                cwd: str_field(&v, "cwd"),
                 input,
             })
         }
@@ -116,6 +119,7 @@ pub fn parse(agent: Agent, payload: &str) -> Option<Call> {
                 session: str_field(&v, "session"),
                 background: false,
                 timeout: v.get("timeout").and_then(Value::as_u64),
+                cwd: str_field(&v, "cwd"),
                 input: Map::new(),
             })
         }
@@ -131,9 +135,10 @@ pub struct Wrap {
     pub wait_s: Option<u64>,
 }
 
-/// The rewrite for a heavy command, or `None` to leave it alone.
-pub fn wrap(agent: Agent, call: &Call, exe: &str, cfg: &Config) -> Option<Wrap> {
-    if !matches!(classify(&call.command, cfg), Class::Heavy { .. }) {
+/// The rewrite for a heavy command, or `None` to leave it alone. `hooked`
+/// says which git hooks the command's repository has.
+pub fn wrap(agent: Agent, call: &Call, exe: &str, cfg: &Config, hooked: HookProbe) -> Option<Wrap> {
+    if !matches!(classify_in(&call.command, cfg, hooked), Class::Heavy { .. }) {
         return None;
     }
     let (timeout, wait_s) = if call.background {
@@ -200,10 +205,24 @@ pub fn respond(agent: Agent, call: &Call, w: &Wrap) -> String {
     }
 }
 
+/// [`HookProbe`] for a given working directory, `None` when unknown.
+pub type CwdHookProbe<'a> = &'a dyn Fn(Option<&str>, Option<&str>, &str) -> bool;
+
 /// The whole hook: payload in, answer out (empty for "leave it alone").
-pub fn handle(agent: Agent, payload: &str, exe: &str, cfg: &Config) -> String {
+/// `hooked` answers for the payload's working directory (`None` when the
+/// agent didn't send one): is this git hook installed there?
+pub fn handle(
+    agent: Agent,
+    payload: &str,
+    exe: &str,
+    cfg: &Config,
+    hooked: CwdHookProbe,
+) -> String {
     parse(agent, payload)
-        .and_then(|call| wrap(agent, &call, exe, cfg).map(|w| respond(agent, &call, &w)))
+        .and_then(|call| {
+            let probe = |dir: Option<&str>, hook: &str| hooked(call.cwd.as_deref(), dir, hook);
+            wrap(agent, &call, exe, cfg, &probe).map(|w| respond(agent, &call, &w))
+        })
         .unwrap_or_default()
 }
 
@@ -213,6 +232,10 @@ mod tests {
     use crate::shell::simple_commands;
 
     const EXE: &str = "/opt/homebrew/bin/headroom";
+
+    fn no_hooks(_: Option<&str>, _: Option<&str>, _: &str) -> bool {
+        false
+    }
 
     fn claude(cmd: &str, extra: Value) -> String {
         let mut input = json!({ "command": cmd, "description": "Run tests" });
@@ -227,7 +250,7 @@ mod tests {
     }
 
     fn out(agent: Agent, payload: &str) -> Value {
-        let s = handle(agent, payload, EXE, &Config::default());
+        let s = handle(agent, payload, EXE, &Config::default(), &no_hooks);
         serde_json::from_str(&s).unwrap_or(Value::Null)
     }
 
@@ -311,7 +334,7 @@ mod tests {
         let cfg = Config::default();
         for cmd in ["git status", "pnpm dev", "headroom run --sh 'pnpm test'"] {
             assert_eq!(
-                handle(Agent::Claude, &claude(cmd, json!({})), EXE, &cfg),
+                handle(Agent::Claude, &claude(cmd, json!({})), EXE, &cfg, &no_hooks),
                 "",
                 "{cmd}"
             );
@@ -322,7 +345,10 @@ mod tests {
     fn other_claude_tools_get_silence() {
         let p =
             json!({ "tool_name": "Read", "tool_input": { "command": "pnpm test" } }).to_string();
-        assert_eq!(handle(Agent::Claude, &p, EXE, &Config::default()), "");
+        assert_eq!(
+            handle(Agent::Claude, &p, EXE, &Config::default(), &no_hooks),
+            ""
+        );
     }
 
     #[test]
@@ -337,9 +363,9 @@ mod tests {
             r#"{"tool_name":"Bash","tool_input":{"command":42}}"#,
             r#"{"tool_name":"Bash","tool_input":{"command":["pnpm", 1]}}"#,
         ] {
-            assert_eq!(handle(Agent::Claude, p, EXE, &cfg), "", "{p:?}");
-            assert_eq!(handle(Agent::Codex, p, EXE, &cfg), "", "{p:?}");
-            assert_eq!(handle(Agent::Pi, p, EXE, &cfg), "", "{p:?}");
+            assert_eq!(handle(Agent::Claude, p, EXE, &cfg, &no_hooks), "", "{p:?}");
+            assert_eq!(handle(Agent::Codex, p, EXE, &cfg, &no_hooks), "", "{p:?}");
+            assert_eq!(handle(Agent::Pi, p, EXE, &cfg, &no_hooks), "", "{p:?}");
         }
     }
 
@@ -385,12 +411,77 @@ mod tests {
     }
 
     #[test]
+    fn a_commit_is_wrapped_where_the_payloads_repository_has_the_hook() {
+        let asked = std::cell::RefCell::new(vec![]);
+        let hooked = |cwd: Option<&str>, dir: Option<&str>, hook: &str| {
+            asked.borrow_mut().push((
+                cwd.map(str::to_string),
+                dir.map(str::to_string),
+                hook.to_string(),
+            ));
+            cwd == Some("/repo") && hook == "pre-commit"
+        };
+        let cfg = Config::default();
+        let s = handle(
+            Agent::Claude,
+            &claude("git commit -m done", json!({})),
+            EXE,
+            &cfg,
+            &hooked,
+        );
+        let v: Value = serde_json::from_str(&s).unwrap();
+        let cmd = v["hookSpecificOutput"]["updatedInput"]["command"]
+            .as_str()
+            .unwrap();
+        assert!(
+            cmd.starts_with(EXE) && cmd.ends_with(" --sh 'git commit -m done'"),
+            "{cmd}"
+        );
+        assert_eq!(
+            asked.borrow()[0],
+            (Some("/repo".to_string()), None, "pre-commit".to_string())
+        );
+        // No pre-push hook there: a push is left alone.
+        assert_eq!(
+            handle(
+                Agent::Claude,
+                &claude("git push", json!({})),
+                EXE,
+                &cfg,
+                &hooked
+            ),
+            ""
+        );
+        // pi sends its cwd too; without one the probe is asked with none.
+        let pi = handle(
+            Agent::Pi,
+            r#"{"command":"git commit -m x","cwd":"/repo"}"#,
+            EXE,
+            &cfg,
+            &hooked,
+        );
+        assert!(pi.contains("git commit"), "{pi}");
+        assert_eq!(
+            handle(
+                Agent::Pi,
+                r#"{"command":"git commit -m x"}"#,
+                EXE,
+                &cfg,
+                &hooked
+            ),
+            ""
+        );
+        assert_eq!(asked.borrow().last().unwrap().0, None);
+    }
+
+    #[test]
     fn executable_paths_with_spaces_are_quoted() {
         let s = handle(
             Agent::Pi,
             r#"{"command":"pnpm test"}"#,
             "/Users/me/My Tools/headroom",
             &Config::default(),
+            &no_hooks,
         );
         let v: Value = serde_json::from_str(&s).unwrap();
         assert!(

@@ -9,13 +9,13 @@
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
-use headroom_core::classify::{Class, classify, describe, profile_keys};
+use headroom_core::classify::{Class, classify_in, describe_in, profile_keys};
 use headroom_core::model::{Bytes, GIB, Job, JobState};
 use headroom_core::protocol::{ClientMsg, Control, DaemonMsg, Listing, request};
 use headroom_core::store::Store;
 use serde_json::{Map, Value, json};
 
-use crate::context::git_context;
+use crate::context::{git_context, git_hook_installed};
 
 const PROTOCOL: &str = "2025-06-18";
 
@@ -141,7 +141,8 @@ fn jobs(l: &Listing) -> Value {
 
 fn estimate(store: &Store, command: &str, cwd: &Path) -> Value {
     let cfg = store.load_config();
-    match classify(command, &cfg) {
+    let hooked = |d: Option<&str>, h: &str| git_hook_installed(cwd, d, h);
+    match classify_in(command, &cfg, &hooked) {
         Class::Light | Class::Wrapped => json!({
             "queued": false,
             "why": "not a heavy command; it runs immediately",
@@ -152,7 +153,7 @@ fn estimate(store: &Store, command: &str, cwd: &Path) -> Value {
         }),
         Class::Heavy { .. } => {
             let git = git_context(cwd);
-            let (cmd, program) = describe(command, &cfg);
+            let (cmd, program) = describe_in(command, &cfg, &hooked);
             let (key, fallback) = profile_keys(&git.repo, &git.subdir, &cmd, &program);
             let e = store
                 .load_profiles()

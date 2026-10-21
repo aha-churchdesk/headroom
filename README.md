@@ -73,6 +73,8 @@ Claude Code note: the hook rewrites the command to `headroom run … --sh '<your
 
 Commands that match a pattern are queued: `* test`, `* build`, `* e2e`, `* typecheck`, `vitest`, `jest`, `playwright`, `tsc`, `nx`, `turbo`, `next build`, `xcodebuild`, `cargo clippy`, `gradle`, `pytest`. `*` stands for any program, so `* test` covers `pnpm test` and `cargo test`. Long-lived commands are never queued, because they would hold a slot forever: `dev`, `serve`, `start`, `watch`, `preview`, `storybook`, anything with `--watch` or `--ui`, and `docker compose up`.
 
+A `git commit` or `git push` is queued when the repository has a pre-commit or pre-push hook (lefthook, husky or a plain script), because the hook runs the type checks and linters. It is profiled as `git commit` or `git push` for that repository, so a formatter-only hook stays cheap. `--no-verify`, `LEFTHOOK=0` and `HUSKY=0` skip the hook and the queue. `lefthook run <hook>` is always queued.
+
 Check one:
 
 ```sh

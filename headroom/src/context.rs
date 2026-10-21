@@ -64,6 +64,28 @@ pub fn git_context(cwd: &Path) -> GitContext {
     }
 }
 
+/// Does the repository at `cwd` (or `cwd/dir`, for `git -C dir`) have git
+/// hook `hook`? git says where the hook lives, which follows worktrees and
+/// `core.hooksPath` (husky). Like git, a file that isn't executable (the
+/// `.sample`s) doesn't count.
+pub fn git_hook_installed(cwd: &Path, dir: Option<&str>, hook: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let at = dir.map_or_else(|| cwd.to_path_buf(), |d| cwd.join(d));
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(&at)
+        .args(["rev-parse", "--path-format=absolute", "--git-path"])
+        .arg(format!("hooks/{hook}"))
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output();
+    let Some(out) = out.ok().filter(|o| o.status.success()) else {
+        return false;
+    };
+    let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
 /// `dir` and its parents up to the checkout's top (the first with `.git`).
 fn up_to_top(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
@@ -208,6 +230,87 @@ mod tests {
         assert_eq!(stable_from(cellar, |_| false), cellar.display().to_string());
         let dev = Path::new("/Users/me/src/headroom/target/release/headroom");
         assert_eq!(stable_from(dev, |_| true), dev.display().to_string());
+    }
+
+    fn hook(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[test]
+    fn a_git_hook_counts_when_git_would_run_it() {
+        let repo = tmp("hooks");
+        sh(&repo, &["init", "-q"]);
+        // A fresh repository has only samples.
+        assert!(!git_hook_installed(&repo, None, "pre-commit"));
+        hook(&repo.join(".git/hooks/pre-commit"), 0o755);
+        assert!(git_hook_installed(&repo, None, "pre-commit"));
+        assert!(!git_hook_installed(&repo, None, "pre-push"));
+        // Not executable: git skips it, so do we.
+        hook(&repo.join(".git/hooks/pre-push"), 0o644);
+        assert!(!git_hook_installed(&repo, None, "pre-push"));
+        // From a subdirectory, and through `git -C`.
+        std::fs::create_dir_all(repo.join("web")).unwrap();
+        assert!(git_hook_installed(&repo.join("web"), None, "pre-commit"));
+        assert!(git_hook_installed(
+            repo.parent().unwrap(),
+            Some(repo.file_name().unwrap().to_str().unwrap()),
+            "pre-commit"
+        ));
+    }
+
+    #[test]
+    fn hooks_are_found_from_worktrees_and_through_hooks_path() {
+        let repo = tmp("hooks-wt");
+        sh(&repo, &["init", "-q", "-b", "main"]);
+        sh(
+            &repo,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "x",
+            ],
+        );
+        hook(&repo.join(".git/hooks/pre-push"), 0o755);
+        let wt = repo.with_file_name(format!(
+            "{}-wt",
+            repo.file_name().unwrap().to_str().unwrap()
+        ));
+        let _ = std::fs::remove_dir_all(&wt);
+        sh(&repo, &["worktree", "add", "-q", wt.to_str().unwrap()]);
+        assert!(
+            git_hook_installed(&wt, None, "pre-push"),
+            "a worktree shares the main hooks"
+        );
+        // husky: core.hooksPath moves them, and the default ones stop counting.
+        sh(&repo, &["config", "core.hooksPath", ".husky/_"]);
+        assert!(!git_hook_installed(&repo, None, "pre-push"));
+        hook(&repo.join(".husky/_/pre-commit"), 0o755);
+        assert!(git_hook_installed(&repo, None, "pre-commit"));
+        // A relative hooksPath is per checkout: until the worktree has its
+        // own (husky writes it on install), git runs nothing there either.
+        assert!(!git_hook_installed(&wt, None, "pre-commit"));
+        hook(&wt.join(".husky/_/pre-commit"), 0o755);
+        assert!(git_hook_installed(&wt, None, "pre-commit"));
+    }
+
+    #[test]
+    fn outside_a_repository_there_are_no_hooks() {
+        let dir = tmp("no-repo");
+        assert!(!git_hook_installed(&dir, None, "pre-commit"));
+        assert!(!git_hook_installed(
+            &dir.join("missing"),
+            None,
+            "pre-commit"
+        ));
     }
 
     fn checkout(name: &str) -> PathBuf {
