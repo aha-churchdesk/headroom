@@ -503,10 +503,11 @@ mod tests {
         assert!(s.mem_total > 1 << 30);
         assert!(s.mem_used > 0 && s.mem_used <= s.mem_total);
         assert_eq!(s.mem_available, s.mem_total - s.mem_used);
-        // All of them: on Apple Silicon more than the performance cores.
+        // All of them, efficiency cores too. A virtual machine (CI) may
+        // have performance cores only.
         let perf = sysctl::<i32>("hw.perflevel0.physicalcpu").unwrap_or(0) as u32;
         assert_eq!(s.cores, sysctl::<i32>("hw.physicalcpu").unwrap() as u32);
-        assert!(s.cores > perf, "{} cores, {perf} performance", s.cores);
+        assert!(s.cores > 0 && s.cores >= perf, "{} cores, {perf} performance", s.cores);
     }
 
     #[test]
