@@ -59,7 +59,9 @@ impl Tool {
                 "--fileParallelism",
                 "--no-file-parallelism",
             ],
-            Tool::Turbo => &["--concurrency"],
+            // Parallel mode ignores concurrency. These path overrides select
+            // configuration we have not inspected, so also leave them alone.
+            Tool::Turbo => &["--concurrency", "--parallel", "--cwd", "--root-turbo-json"],
             Tool::Cargo => &["-j", "--jobs"],
         }
     }
@@ -83,7 +85,7 @@ impl Tool {
                 "singleFork",
                 "fileParallelism",
             ],
-            Tool::Turbo => &[],
+            Tool::Turbo => &["concurrency"],
             Tool::Cargo => &["jobs"],
         }
     }
@@ -107,7 +109,7 @@ impl Tool {
                 "vite.config.cjs",
                 "vitest.workspace.ts",
             ],
-            Tool::Turbo => &[],
+            Tool::Turbo => &["turbo.json", "turbo.jsonc"],
             Tool::Cargo => &[".cargo/config.toml", ".cargo/config"],
         }
     }
@@ -207,6 +209,7 @@ pub fn script_name(line: &str) -> Option<String> {
             .iter()
             .skip_while(|w| *w != "run" && *w != "run-script")
             .nth(1)?;
+        return Some(name.to_string());
     }
     (!PM_BUILTINS.contains(&name)).then(|| name.to_string())
 }
@@ -237,6 +240,60 @@ fn has_flag(text: &str, flags: &[&str]) -> bool {
                 || w.starts_with(&format!("{f}="))
                 // -j4, -j 4
                 || (f.len() == 2 && w.starts_with(f) && w[2..].chars().all(|c| c.is_ascii_digit()))
+        })
+    })
+}
+
+/// An injected variable must survive every env wrapper in the command and
+/// resolved script. Unknown env options are left untuned rather than guessing
+/// how they affect the environment or where the wrapped command starts.
+fn clears_env(text: &str, variable: &str) -> bool {
+    simple_commands(text).iter().any(|words| {
+        words.iter().enumerate().any(|(i, word)| {
+            if basename(word) != "env" {
+                return false;
+            }
+            let mut args = words[i + 1..].iter();
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "-" | "-i" | "--ignore-environment" => return true,
+                    "-u" | "--unset" => {
+                        if args.next().is_none_or(|name| name == variable) {
+                            return true;
+                        }
+                    }
+                    "--" => break,
+                    _ if arg.starts_with("--unset=") => {
+                        if arg.strip_prefix("--unset=") == Some(variable) {
+                            return true;
+                        }
+                    }
+                    _ if arg.starts_with("-u") => {
+                        if arg.strip_prefix("-u") == Some(variable) {
+                            return true;
+                        }
+                    }
+                    _ if arg.starts_with('-') => return true,
+                    _ if arg.contains('=') => {}
+                    _ => break,
+                }
+            }
+            false
+        })
+    })
+}
+
+/// npm exec consumes appended options as npm configuration unless explicitly
+/// forwarded. Its forwarding rules differ from npm run, which we handle below.
+/// Global options can consume values, including optional boolean values, so
+/// leave those invocations untuned rather than guessing the npm subcommand.
+fn npm_exec_or_unresolved(text: &str) -> bool {
+    simple_commands(text).iter().any(|words| {
+        words.iter().enumerate().any(|(i, word)| {
+            basename(word) == "npm"
+                && words
+                    .get(i + 1)
+                    .is_none_or(|arg| arg.starts_with('-') || matches!(arg.as_str(), "exec" | "x"))
         })
     })
 }
@@ -303,7 +360,10 @@ pub fn detect(p: &Probe) -> Option<Tunable> {
             let cmds = simple_commands(s);
             can_append_arg(s) && cmds[0].iter().any(|w| basename(w) == "turbo")
         });
-        if !(can_append_arg(p.line) && script_ok) || turbo_task_passthrough(p.line, p.script) {
+        if !(can_append_arg(p.line) && script_ok)
+            || turbo_task_passthrough(p.line, p.script)
+            || npm_exec_or_unresolved(&text)
+        {
             return None;
         }
         Tool::Turbo
@@ -324,6 +384,7 @@ pub fn detect(p: &Probe) -> Option<Tunable> {
     };
     let explicit_env = tool.explicit_env().is_some_and(|v| {
         (p.env_set)(v)
+            || clears_env(&text, v)
             || simple_commands(&text)
                 .iter()
                 .flatten()
@@ -492,6 +553,95 @@ mod tests {
     }
 
     #[test]
+    fn npm_exec_does_not_advertise_an_unforwarded_turbo_limit() {
+        for line in [
+            "npm exec turbo run build",
+            "npm x turbo run build",
+            "npm --yes exec turbo run build",
+            "npm --registry https://registry.npmjs.org exec turbo run build",
+            "npm --registry=https://registry.npmjs.org exec turbo run build",
+            "npm --unknown run exec turbo run build",
+            "npm exec -- turbo run build",
+        ] {
+            assert_eq!(tool(line), None, "{line}");
+            assert_eq!(probe("npm run build", Some(line), "", &[]), None, "{line}");
+        }
+        for line in ["npm run build", "npm run build -- exec", "npm run exec"] {
+            assert!(
+                probe(line, Some("turbo run build"), "", &[]).is_some(),
+                "{line}"
+            );
+        }
+        for option in ["--yes", "-y", "--silent", "-s", "--quiet", "-q"] {
+            for value in ["true", "false"] {
+                let line = format!("npm {option} {value} exec turbo run build");
+                assert_eq!(tool(&line), None, "{line}");
+                assert_eq!(probe("npm run build", Some(&line), "", &[]), None, "{line}");
+            }
+        }
+    }
+
+    #[test]
+    fn turbo_parallel_mode_and_configured_concurrency_are_not_tuned() {
+        for line in [
+            "turbo run build --parallel",
+            "turbo run build --parallel=true",
+        ] {
+            assert_eq!(tool(line), None, "{line}");
+            assert_eq!(probe("npm run build", Some(line), "", &[]), None, "{line}");
+        }
+        assert_eq!(
+            probe("turbo run build", None, r#"{"concurrency":"50%"}"#, &[]),
+            None
+        );
+        assert!(probe("turbo run build", None, r#"{"tasks":{"build":{}}}"#, &[]).is_some());
+        for line in [
+            "turbo run build --cwd elsewhere",
+            "turbo run build --cwd=elsewhere",
+            "turbo run build --root-turbo-json custom.json",
+            "turbo run build --root-turbo-json=custom.json",
+        ] {
+            assert_eq!(tool(line), None, "{line}");
+        }
+    }
+
+    #[test]
+    fn environment_limits_must_survive_wrappers_and_resolved_scripts() {
+        for (command, variable) in [
+            ("vitest run", "VITEST_MAX_WORKERS"),
+            ("cargo build", "CARGO_BUILD_JOBS"),
+        ] {
+            for option in [
+                format!("-u {variable}"),
+                format!("-u{variable}"),
+                format!("--unset {variable}"),
+                format!("--unset={variable}"),
+                "-i PATH=/usr/bin:/bin".into(),
+                "--ignore-environment PATH=/usr/bin:/bin".into(),
+                "- PATH=/usr/bin:/bin".into(),
+            ] {
+                let line = format!("env {option} {command}");
+                assert_eq!(tool(&line), None, "{line}");
+                assert_eq!(probe("npm run test", Some(&line), "", &[]), None, "{line}");
+                // Cargo is found in the resolved script even when the env
+                // wrapper belongs to the outer package-manager command.
+                let outer = format!("env {option} npm run test");
+                assert_eq!(probe(&outer, Some(command), "", &[]), None, "{outer}");
+            }
+        }
+        for line in [
+            "env FOO=bar vitest run",
+            "env -u OTHER vitest run",
+            "env --unset=OTHER vitest run",
+            "env -uOTHER vitest run",
+            "env -- vitest run",
+        ] {
+            assert_eq!(tool(line), Some(Tool::Vitest), "{line}");
+        }
+        assert!(probe("env FOO=bar npm run build", Some("cargo build"), "", &[]).is_some());
+    }
+
+    #[test]
     fn turbo_task_passthrough_is_not_tuned() {
         for line in [
             "turbo run build -- --foo",
@@ -567,6 +717,7 @@ mod tests {
     fn script_names() {
         assert_eq!(script_name("pnpm test").as_deref(), Some("test"));
         assert_eq!(script_name("npm run build").as_deref(), Some("build"));
+        assert_eq!(script_name("npm run exec").as_deref(), Some("exec"));
         assert_eq!(
             script_name("yarn test:unit --silent").as_deref(),
             Some("test:unit")

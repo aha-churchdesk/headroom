@@ -650,6 +650,63 @@ mod tests {
         assert_eq!(output.stdout, b"first");
     }
 
+    #[test]
+    fn advertised_worker_limits_reach_the_child_in_shell_and_argv_modes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("hr-worker-child-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vitest = dir.join("vitest");
+        std::fs::write(&vitest, "#!/bin/sh\nprintf '%s' \"$VITEST_MAX_WORKERS\"\n").unwrap();
+        std::fs::set_permissions(&vitest, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for prefix in [
+            vec![],
+            vec!["env", "FOO=bar"],
+            vec!["env", "-u", "OTHER"],
+            vec!["env", "-u", "VITEST_MAX_WORKERS"],
+            vec!["env", "-i"],
+        ] {
+            let expected_tunable =
+                !prefix.contains(&"VITEST_MAX_WORKERS") && !prefix.contains(&"-i");
+            let mut argv: Vec<String> = prefix.into_iter().map(String::from).collect();
+            argv.extend([vitest.to_string_lossy().into_owned(), "run".into()]);
+            let line = shell::join(&argv);
+            let tune = tweaks::detect(&tweaks::Probe {
+                line: &line,
+                script: None,
+                configs: &|_| String::new(),
+                env_set: &|_| false,
+                cores: 8,
+            });
+            assert_eq!(tune.is_some(), expected_tunable, "{line}");
+            let knob = tune.map(|t| t.knob(2));
+            for as_shell in [false, true] {
+                let options = RunOpts {
+                    sh: as_shell.then(|| line.clone()),
+                    shell: Some("/bin/sh".into()),
+                    argv: argv.clone(),
+                    ..RunOpts::default()
+                };
+                let mut command = options.command(false, knob.as_ref());
+                if knob.is_none() {
+                    command.env_remove("VITEST_MAX_WORKERS");
+                }
+                let output = command.output().unwrap();
+                assert!(output.status.success(), "{line}: {:?}", output.stderr);
+                assert_eq!(
+                    output.stdout,
+                    if expected_tunable {
+                        b"2".as_slice()
+                    } else {
+                        b""
+                    },
+                    "{line}, shell={as_shell}"
+                );
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     fn line(pos: usize, free: &str) -> String {
         format!("queued #{pos} of 2 · next needs 1.5 GB, {free} GB free")
     }

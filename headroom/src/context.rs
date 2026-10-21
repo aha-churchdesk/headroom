@@ -557,6 +557,54 @@ mod tests {
     }
 
     #[test]
+    fn turbo_config_concurrency_is_preserved_for_direct_commands_and_scripts() {
+        let root = checkout("turbo-config");
+        let web = root.join("apps/web");
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"scripts":{"build":"turbo run build"}}"#,
+        )
+        .unwrap();
+        for filename in ["turbo.json", "turbo.jsonc"] {
+            let config = root.join(filename);
+            std::fs::write(&config, r#"{"tasks":{"build":{}}}"#).unwrap();
+            for line in ["turbo run build", "npm run build"] {
+                assert!(tunable(line, &web).is_some(), "{filename}: {line}");
+            }
+            std::fs::write(&config, "{\n// Explicit limit\n\"concurrency\": \"50%\"\n}").unwrap();
+            for line in ["turbo run build", "npm run build"] {
+                assert_eq!(tunable(line, &web), None, "{filename}: {line}");
+            }
+            std::fs::remove_file(config).unwrap();
+        }
+    }
+
+    #[test]
+    fn resolved_scripts_that_clear_the_worker_environment_are_not_tuned() {
+        let root = checkout("script-clears-workers");
+        for script in [
+            "env -u VITEST_MAX_WORKERS vitest run",
+            "env -i PATH=/usr/bin:/bin vitest run",
+            "env -u CARGO_BUILD_JOBS cargo build",
+            "env -i PATH=/usr/bin:/bin cargo build",
+            "npm exec turbo run build",
+        ] {
+            std::fs::write(
+                root.join("package.json"),
+                serde_json::json!({"scripts": {"test": script}}).to_string(),
+            )
+            .unwrap();
+            assert_eq!(tunable("npm run test", &root), None, "{script}");
+        }
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"scripts":{"test":"env FOO=bar vitest run"}}"#,
+        )
+        .unwrap();
+        assert!(tunable("npm run test", &root).is_some());
+    }
+
+    #[test]
     fn vitest_commonjs_configs_preserve_worker_settings() {
         let root = checkout("commonjs-config");
         for name in [
