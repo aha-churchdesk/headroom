@@ -65,6 +65,8 @@ test('running and queued jobs are listed with why the queue waits', () => {
   has(ui.html(), '<b>fix-main</b><span class="cmd">sleep 30</span>');
   has(v, 'form-service sleep 32');
   has(v, 'new est 1.5 GB');
+  // The estimate, and how long it has waited on the line below.
+  has(ui.html(), 'est 1.5 GB</span><span title="Time in the queue so far">waiting ');
 });
 
 test('a hold shows in the header button and as the queue reason', () => {

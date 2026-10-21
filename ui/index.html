@@ -235,6 +235,8 @@ button:disabled{ cursor:default; opacity:.4; }
 .job .name.two{ display:flex; flex-direction:column; gap:1px; }
 .job .name.two > *{ overflow:hidden; text-overflow:ellipsis; }
 .job .name.two .cmd{ font-size:11.5px; }
+/* Queued rows: the estimate, then how long it has waited, beside the two-line name. */
+.job .mem.two{ display:flex; flex-direction:column; align-items:flex-end; gap:1px; }
 .job .name .cmd{ color:var(--text-dim); }
 .job .mem{ font-size:11.5px; color:var(--text-dim); white-space:nowrap; }
 .job .mem b{ color:var(--text); font-weight:600; }
@@ -785,7 +787,7 @@ function renderQueued(j, i, S){
             title="${j.low ? "Normal priority" : "Low: background CPU priority"}"><span class="emo">🐢</span></button>
           <button class="ib" data-act="cancel" data-id="${j.id}" title="Cancel: the command exits without running">✕</button>
         </span>
-        <span class="mem num">${estLabel(j)} · ${dur(j.waited_s)}</span>
+        <span class="mem num two"><span>${estLabel(j)}</span><span title="Time in the queue so far">waiting ${dur(j.waited_s)}</span></span>
       </div>
       ${UI.expanded.has(j.id) ? renderDetail(j) : ""}
     </div>`;
