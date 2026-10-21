@@ -55,15 +55,15 @@ test('running and queued jobs are listed with why the queue waits', () => {
   ui.setState(busy);
   const v = ui.view();
   has(v, 'Running 2');
-  // Running: where it runs, with the command on the line below.
+  // Where each runs, with the command on the line below.
   has(ui.html(), '<b>sc-49123</b><span class="cmd">headroom-hog</span>');
   has(v, 'browser-cd sleep 31');
   const hog = busy.running.find(j => j.label === 'sc-49123');
   has(v, `RAM ${(hog.footprint / 2 ** 30).toFixed(1).replace(/\.0$/, '')} GB CPU ${Math.round(hog.cpu_pct)}%`);
   has(v, 'Queued 2');
   has(v, 'next needs 1.5 GB, 0 GB free');
-  has(v, 'fix-main · sleep 30');
-  has(v, 'form-service · sleep 32');
+  has(ui.html(), '<b>fix-main</b><span class="cmd">sleep 30</span>');
+  has(v, 'form-service sleep 32');
   has(v, 'new est 1.5 GB');
 });
 
