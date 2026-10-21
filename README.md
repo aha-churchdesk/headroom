@@ -8,11 +8,11 @@ Status: early. Apple Silicon only, ad-hoc signed, used daily by one person.
 
 ## How it decides
 
-- **Memory, not job count.** Headroom records the peak memory of every run, per repository and command. A command's estimate is the p90 of its last 20 clean peaks. A queued job starts when its estimate fits in available memory, minus a reserve (2 GB by default), minus what the running jobs are still expected to grow into. A command with no history is assumed to need 1.5 GB.
+- **Memory, not job count.** Headroom records the peak memory of every run, per repository and command. A command's estimate is the p90 of its last 20 clean peaks. A queued job starts when its estimate fits in available memory, minus a reserve (2 GB by default), minus what the running jobs are still expected to grow into. A command with no history is assumed to need 1.5 GB. A job's memory is everything it starts, including tasks that turbo or a git hook's terminal move to a process group of their own.
 - **Pressure.** Under normal memory pressure jobs start as above. Under warn, one job may start only when nothing else of ours is running. Under critical, nothing starts.
 - **Strict order.** If the head of the queue doesn't fit, nothing behind it starts, so a big e2e run can't be starved by a stream of small jobs. A job always starts when the queue is otherwise idle, so an estimate bigger than the machine can't block forever.
 - **Short jobs may go first.** While the head waits on memory, a later job may start if it fits now and its typical run time says it will be done before the head could start anyway (when the running jobs are expected to finish). A job with no history never goes first. The head is passed over at most 3 times or for 5 minutes; after that the queue waits for it. The popover shows `passed over 2× · strict in 3m`.
-- **The guard.** Under sustained critical pressure the newest job gets SIGSTOP. If pressure stays critical it is killed and requeued once; a second kill gives up and the agent sees exit 137 with the reason. Low-priority jobs go first, and a job using more than twice its estimate (and over 8 GB) goes before anything else. Pinned jobs and processes Headroom didn't start are never touched.
+- **The guard.** Under sustained critical pressure the newest job gets SIGSTOP. If pressure stays critical it is killed and requeued once; a second kill gives up and the agent sees exit 137 with the reason. Low-priority jobs go first, and a job using more than twice its estimate (and over 8 GB) goes before anything else. Freezing and killing reach every process the job started. Pinned jobs and processes Headroom didn't start are never touched.
 - **Fail open.** If the daemon isn't running or stops answering, `headroom run` runs the command directly. Headroom can slow a command down; it can't stop one from running.
 
 ## Shrinking a job to fit
@@ -43,7 +43,7 @@ cd headroom
 
 That builds `Headroom.app` into `/Applications`, links the CLI to `~/.local/bin/headroom` (`--bin DIR` for elsewhere), starts the app now and at login, and installs the agent hooks. Leave out `--login` or `--hooks` to do those yourself later. It never edits your shell config; if the bin directory isn't on your PATH it prints the line to add. Run it again after `git pull` to upgrade. `./scripts/install.sh --uninstall` removes the hooks, the login item, the link and the app, and keeps your learned profiles.
 
-Homebrew, once the first release is out:
+Homebrew:
 
 ```sh
 brew install aha-churchdesk/tap/headroom
@@ -107,7 +107,7 @@ The icon is a four-bar memory gauge. It turns amber or red under memory pressure
 
 **Graph** under the memory bar shows memory (with memory pressure marked), swap and CPU over the last hour or day, one point per 30 seconds while the app runs.
 
-The popover lists running and queued jobs and why the queue is waiting (`next needs 4.2 GB, 2.9 GB free`). From it you can:
+The popover lists running and queued jobs and why the queue is waiting (`next needs 4.2 GB, 2.9 GB free`). A running job shows its memory and CPU, and the largest process inside it when that isn't the command itself: `git commit`, then `↳ tsc --noEmit` while the hook runs. From it you can:
 
 - drag queued jobs to reorder them, move one to the top, or cancel it;
 - **pin** a job, so it runs next, skips the memory check and is never frozen or killed;
@@ -115,7 +115,7 @@ The popover lists running and queued jobs and why the queue is waiting (`next ne
 - freeze, resume or kill a running job;
 - **hold** the queue during a call or a demo (running jobs carry on).
 
-It also has a history of the last 50 runs with each command's memory profile, a Commands page, the top memory users Headroom doesn't manage, and settings.
+Hover a number for what it means. It also has a history of the last 50 runs with each command's memory profile, a Commands page, the top memory users Headroom doesn't manage, and settings.
 
 The Commands page ranks the commands that ran in the last 7, 30 or 90 days by time running, number of runs, memory or time waiting. Memory is GB-hours: each run's peak times its run time, the memory it kept from other work. Totals are kept per command and day for 90 days.
 
