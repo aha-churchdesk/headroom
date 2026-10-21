@@ -151,16 +151,33 @@ const PM_BUILTINS: [&str; 10] = [
 ];
 
 /// Package manager options that run a script somewhere other than here.
-const ELSEWHERE: [&str; 8] = [
+const ELSEWHERE: [&str; 11] = [
     "--filter",
     "-F",
     "--dir",
+    "--cwd",
     "-C",
     "--prefix",
     "--workspace",
+    "--workspaces",
     "-w",
     "--recursive",
+    "-r",
 ];
+
+/// A package-manager selector whose effective package/config is unresolved.
+pub fn package_target_override(words: &[String]) -> bool {
+    words
+        .iter()
+        .any(|w| PACKAGE_MANAGERS.contains(&basename(w)) || basename(w) == "npx")
+        && words.iter().any(|w| {
+            ELSEWHERE.iter().any(|flag| {
+                w == flag
+                    || w.starts_with(&format!("{flag}="))
+                    || (flag.len() == 2 && w.starts_with(flag) && w.len() > flag.len())
+            })
+        })
+}
 
 /// The npm script a command runs, if it is a single `pnpm|npm|yarn|bun [run] NAME`
 /// in this directory's package.json.
@@ -177,11 +194,7 @@ pub fn script_name(line: &str) -> Option<String> {
         return None;
     }
     // Another package's script: this directory's package.json says nothing about it.
-    if words.iter().any(|w| {
-        ELSEWHERE
-            .iter()
-            .any(|e| w == e || w.starts_with(&format!("{e}=")))
-    }) {
+    if package_target_override(words) {
         return None;
     }
     let mut name = it.find(|w| !w.starts_with('-'))?.as_str();
@@ -224,21 +237,69 @@ fn has_flag(text: &str, flags: &[&str]) -> bool {
     })
 }
 
+/// An appended argument must reach the existing command. A trailing shell
+/// separator starts another command, while a comment swallows the argument.
+fn can_append_arg(text: &str) -> bool {
+    !text.contains(['#', '\n'])
+        && !text.trim_end().ends_with('\\')
+        && simple_commands(text).len() == 1
+        && simple_commands(&format!("{text} --headroom-argument-probe")).len() == 1
+}
+
+/// npm consumes its first `--` after a script name. Any further separator,
+/// or one already inside the script, forwards arguments to Turbo's tasks.
+fn turbo_task_passthrough(line: &str, script: Option<&str>) -> bool {
+    if script.is_some_and(|s| simple_commands(s).iter().flatten().any(|w| w == "--")) {
+        return true;
+    }
+    let cmds = simple_commands(line);
+    let [words] = cmds.as_slice() else {
+        return true;
+    };
+    let separators: Vec<_> = words
+        .iter()
+        .enumerate()
+        .filter(|(_, w)| *w == "--")
+        .map(|(i, _)| i)
+        .collect();
+    if separators.is_empty() {
+        return false;
+    }
+    let npm = words
+        .iter()
+        .find(|w| !w.contains('='))
+        .is_some_and(|w| basename(w) == "npm");
+    let npm_separator = script.is_some()
+        && npm
+        && separators.len() == 1
+        && script_name(line).is_some_and(|name| {
+            words
+                .iter()
+                .position(|w| w == &name)
+                .is_some_and(|i| i < separators[0])
+        });
+    !npm_separator
+}
+
 /// Whether to tune at all, and how. `None` when the tool isn't one we know,
 /// the user already set a worker count, or the line can't safely be edited.
 pub fn detect(p: &Probe) -> Option<Tunable> {
     let text = format!("{} ; {}", p.line, p.script.unwrap_or(""));
-    let single = simple_commands(p.line).len() == 1;
+    if simple_commands(&text)
+        .iter()
+        .any(|w| package_target_override(w))
+    {
+        return None;
+    }
     let tool = if mentions(&text, "turbo") {
         // The argument is appended to the line, so it must land on turbo: one
         // simple command, nothing after it, and the script (if any) a single
         // turbo call too.
         let script_ok = p.script.is_none_or(|s| {
             let cmds = simple_commands(s);
-            cmds.len() == 1 && cmds[0].iter().any(|w| basename(w) == "turbo")
+            can_append_arg(s) && cmds[0].iter().any(|w| basename(w) == "turbo")
         });
-        let clean = !p.line.contains('#') && !p.line.trim_end().ends_with('\\');
-        if !(single && script_ok && clean) {
+        if !(can_append_arg(p.line) && script_ok) || turbo_task_passthrough(p.line, p.script) {
             return None;
         }
         Tool::Turbo
@@ -257,8 +318,14 @@ pub fn detect(p: &Probe) -> Option<Tunable> {
     } else {
         return None;
     };
-    if has_flag(&text, tool.explicit_flags()) || tool.explicit_env().is_some_and(|v| (p.env_set)(v))
-    {
+    let explicit_env = tool.explicit_env().is_some_and(|v| {
+        (p.env_set)(v)
+            || simple_commands(&text)
+                .iter()
+                .flatten()
+                .any(|w| w.split_once('=').is_some_and(|(name, _)| name == v))
+    });
+    if has_flag(&text, tool.explicit_flags()) || explicit_env {
         return None;
     }
     let configs = (p.configs)(tool);
@@ -270,7 +337,7 @@ pub fn detect(p: &Probe) -> Option<Tunable> {
             .first()
             .and_then(|w| w.iter().find(|w| !w.contains('=')))
             .is_some_and(|w| basename(w) == "npm")
-        && !p.line.split_whitespace().any(|w| w == "--");
+        && !simple_commands(p.line).iter().flatten().any(|w| w == "--");
     Some(Tunable {
         tool,
         default_workers: tool.default_workers(p.cores),
@@ -351,6 +418,27 @@ mod tests {
         );
         assert_eq!(probe("vitest run", None, "", &["VITEST_MAX_WORKERS"]), None);
         assert_eq!(probe("cargo test", None, "", &["CARGO_BUILD_JOBS"]), None);
+        for line in [
+            "VITEST_MAX_WORKERS=8 vitest run",
+            "env VITEST_MAX_WORKERS=8 pnpm vitest run",
+            "export VITEST_MAX_WORKERS=8; vitest run",
+            "VITEST_MAX_WORKERS='' vitest run",
+        ] {
+            assert_eq!(probe(line, None, "", &[]), None, "{line}");
+        }
+        assert_eq!(
+            probe(
+                "pnpm test",
+                Some("VITEST_MAX_WORKERS=8 vitest run"),
+                "",
+                &[]
+            ),
+            None
+        );
+        assert_eq!(
+            probe("cargo test", Some("CARGO_BUILD_JOBS=8 cargo test"), "", &[]),
+            None
+        );
         assert_eq!(
             probe(
                 "vitest run",
@@ -378,6 +466,15 @@ mod tests {
         assert_eq!(tool("turbo run build && echo done"), None);
         assert_eq!(tool("turbo run build | tee log"), None);
         assert_eq!(tool("turbo run build # all of it"), None);
+        for suffix in [";", "&", "\n", " # comment"] {
+            let script = format!("turbo run build{suffix}");
+            assert_eq!(tool(&script), None, "{script}");
+            assert_eq!(
+                probe("pnpm build", Some(&script), "", &[]),
+                None,
+                "{script}"
+            );
+        }
         assert_eq!(
             probe(
                 "pnpm build",
@@ -388,6 +485,51 @@ mod tests {
             None
         );
         assert!(probe("pnpm build", Some("turbo run build"), "", &[]).is_some());
+    }
+
+    #[test]
+    fn turbo_task_passthrough_is_not_tuned() {
+        for line in [
+            "turbo run build -- --foo",
+            "pnpm turbo run build -- --foo",
+            "turbo run build '--' --foo",
+        ] {
+            assert_eq!(tool(line), None, "{line}");
+        }
+        for line in ["npm run build", "npm run build --", "pnpm build"] {
+            assert_eq!(
+                probe(line, Some("turbo run build -- --foo"), "", &[]),
+                None,
+                "{line}"
+            );
+        }
+        for line in [
+            "npm run build -- -- --foo",
+            "pnpm build -- --foo",
+            "yarn build -- --foo",
+        ] {
+            assert_eq!(
+                probe(line, Some("turbo run build"), "", &[]),
+                None,
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn npm_forwarding_separator_still_allows_turbo_tuning() {
+        for line in [
+            "npm run build --",
+            "npm run build -- --dry-run=json",
+            "npm run build '--'",
+        ] {
+            let t = probe(line, Some("turbo run build"), "", &[]).unwrap();
+            assert!(!t.npm, "{line}");
+            assert_eq!(
+                apply_line(line, &t.knob(2)),
+                format!("{line} --concurrency=2")
+            );
+        }
     }
 
     #[test]
@@ -439,6 +581,31 @@ mod tests {
         assert_eq!(script_name("pnpm test && pnpm build"), None, "two commands");
         assert_eq!(script_name("cargo test"), None);
         assert_eq!(script_name("pnpm"), None);
+    }
+
+    #[test]
+    fn package_target_selectors_prevent_script_lookup_and_tuning() {
+        for line in [
+            "npm run build --workspaces",
+            "npm --workspaces=true run build",
+            "npm -wweb run build",
+            "pnpm -Fweb build",
+            "pnpm -r build",
+            "yarn --cwd=web build",
+            "yarn --cwd web build",
+            "pnpm -Cweb build",
+        ] {
+            assert_eq!(script_name(line), None, "{line}");
+            assert_eq!(
+                probe(line, Some("turbo run build"), "", &[]),
+                None,
+                "{line}"
+            );
+        }
+        assert_eq!(
+            probe("npm run build", Some("pnpm -Cweb turbo run build"), "", &[]),
+            None
+        );
     }
 
     #[test]

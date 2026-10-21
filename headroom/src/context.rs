@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use headroom_core::classify::basename;
+use headroom_core::shell::simple_commands;
 use headroom_core::tweaks::{self, Probe, Tool, Tunable};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,33 +99,185 @@ fn up_to_top(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// The nearest package.json's text for script `name`.
-fn npm_script(cwd: &Path, name: &str) -> Option<String> {
-    let text = up_to_top(cwd)
-        .iter()
-        .find_map(|d| std::fs::read_to_string(d.join("package.json")).ok())?;
+/// The nearest package.json's script and the directory npm runs it in.
+fn npm_script(cwd: &Path, name: &str) -> Option<(PathBuf, String)> {
+    let (dir, text) = up_to_top(cwd).into_iter().find_map(|d| {
+        std::fs::read_to_string(d.join("package.json"))
+            .ok()
+            .map(|text| (d, text))
+    })?;
     let json: serde_json::Value = serde_json::from_str(&text).ok()?;
-    json.get("scripts")?.get(name)?.as_str().map(String::from)
+    Some((dir, json.get("scripts")?.get(name)?.as_str()?.to_string()))
+}
+
+/// Resolve only literal paths. Shell expansion and CDPATH can change a
+/// relative `cd` target, so those cases must leave worker settings alone.
+fn literal_path(base: &Path, path: &str) -> Option<PathBuf> {
+    if path.is_empty()
+        || path.contains(['$', '`', '~', '*', '?', '[', ']', '{', '}'])
+        // Shell and Node path normalization can treat symlink/.. differently
+        // from filesystem traversal. Do not guess which config that selects.
+        || Path::new(path)
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+    {
+        return None;
+    }
+    Some(base.join(path))
+}
+
+/// A plain command, optionally preceded by literal `cd DIR &&` commands.
+/// Other shell control flow does not provide a reliable config directory.
+fn config_command(line: &str, cwd: &Path) -> Option<(PathBuf, Vec<String>)> {
+    let without_and = line.replace("&&", "");
+    if without_and.contains([';', '&', '|', '\n', '(', ')', '$', '`', '<', '>', '\\', '#']) {
+        return None;
+    }
+    let parts: Vec<_> = line.split("&&").collect();
+    let mut dir = cwd.to_path_buf();
+    for part in &parts[..parts.len() - 1] {
+        let cmds = simple_commands(part);
+        let [words] = cmds.as_slice() else {
+            return None;
+        };
+        let path = match words.as_slice() {
+            [cmd, path] if cmd == "cd" && !path.starts_with('-') => path,
+            [cmd, sep, path] if cmd == "cd" && sep == "--" => path,
+            _ => return None,
+        };
+        if std::env::var_os("CDPATH").is_some_and(|v| !v.is_empty())
+            && !Path::new(path).is_absolute()
+        {
+            return None;
+        }
+        dir = literal_path(&dir, path)?.canonicalize().ok()?;
+        if !dir.is_dir() {
+            return None;
+        }
+    }
+    let cmds = simple_commands(parts.last()?);
+    let [words] = cmds.as_slice() else {
+        return None;
+    };
+    // These wrappers select another package or directory. Until that target
+    // is resolved, inspecting this directory's files cannot protect its settings.
+    if tweaks::package_target_override(words) || words.iter().any(|word| word.starts_with("-C")) {
+        return None;
+    }
+    Some((dir, words.clone()))
+}
+
+/// Config locations selected by the command and its forwarded arguments.
+fn command_configs(
+    tool: Tool,
+    line: &str,
+    cwd: &Path,
+    script: Option<&(PathBuf, String)>,
+) -> Option<String> {
+    let (dir, words) = if let Some((dir, script)) = script {
+        let (dir, mut words) = config_command(script, dir)?;
+        let (_, forwarded) = config_command(line, cwd)?;
+        words.extend(forwarded);
+        (dir, words)
+    } else {
+        config_command(line, cwd)?
+    };
+    let mut root = dir.clone();
+    let mut explicit_configs = Vec::new();
+    let mut i = 0;
+    while i < words.len() {
+        let word = &words[i];
+        if tool == Tool::Cargo {
+            if word == "--config" || word.starts_with("--config=") {
+                return None;
+            }
+            i += 1;
+            continue;
+        }
+        // Attached short options are accepted by CLI parsers, but do not
+        // expose an unambiguous path here.
+        if ["-c", "-r"]
+            .iter()
+            .any(|flag| word.starts_with(flag) && word.len() > flag.len())
+        {
+            return None;
+        }
+        let option = ["--config", "-c", "--root", "-r"]
+            .into_iter()
+            .find_map(|flag| {
+                if word == flag {
+                    Some((flag, None))
+                } else {
+                    word.strip_prefix(&format!("{flag}="))
+                        .map(|value| (flag, Some(value.to_string())))
+                }
+            });
+        if let Some((flag, value)) = option {
+            let value = match value {
+                Some(value) => value,
+                None => {
+                    i += 1;
+                    words.get(i)?.clone()
+                }
+            };
+            let path = literal_path(&dir, &value)?;
+            if matches!(flag, "--root" | "-r") {
+                root = path.canonicalize().ok()?;
+                if !root.is_dir() {
+                    return None;
+                }
+            } else {
+                // An unreadable explicit config is not evidence that the user
+                // left workers at their default.
+                explicit_configs.push(std::fs::read_to_string(path).ok()?);
+            }
+        }
+        i += 1;
+    }
+    let mut configs = explicit_configs;
+    configs.extend(up_to_top(&root).iter().flat_map(|d| {
+        tool.config_files()
+            .iter()
+            .filter_map(move |f| std::fs::read_to_string(d.join(f)).ok())
+    }));
+    Some(configs.join("\n"))
 }
 
 /// Can this command be told to use fewer workers? Reads the npm script it
 /// runs and the tool's config files between `cwd` and the checkout's top.
 pub fn tunable(line: &str, cwd: &Path) -> Option<Tunable> {
     let script = tweaks::script_name(line).and_then(|n| npm_script(cwd, &n));
+    let script_text = script.as_ref().map(|(_, text)| text.as_str());
+    let env_set = |v: &str| std::env::var_os(v).is_some_and(|x| !x.is_empty());
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
+    let candidate = tweaks::detect(&Probe {
+        line,
+        script: script_text,
+        configs: &|_| String::new(),
+        env_set: &env_set,
+        cores,
+    })?;
+    let located_configs = if matches!(candidate.tool, Tool::Vitest | Tool::Cargo) {
+        Some(command_configs(candidate.tool, line, cwd, script.as_ref())?)
+    } else {
+        None
+    };
     let dirs = up_to_top(cwd);
     let configs = |tool: Tool| {
+        if let Some(configs) = &located_configs {
+            return configs.clone();
+        }
         dirs.iter()
             .flat_map(|d| tool.config_files().iter().map(move |f| d.join(f)))
             .filter_map(|p| std::fs::read_to_string(p).ok())
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let cores = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
     tweaks::detect(&Probe {
         line,
-        script: script.as_deref(),
+        script: script_text,
         configs: &configs,
-        env_set: &|v| std::env::var_os(v).is_some_and(|x| !x.is_empty()),
+        env_set: &env_set,
         cores,
     })
 }
@@ -345,6 +498,133 @@ mod tests {
         assert!(tunable("vitest run", &web).is_some());
         std::fs::write(root.join("vitest.config.ts"), "test: { maxWorkers: 4 }").unwrap();
         assert_eq!(tunable("vitest run", &web), None);
+    }
+
+    #[test]
+    fn config_lookup_follows_literal_cd_in_commands_and_scripts() {
+        let root = checkout("cd-config");
+        assert!(tunable("cd apps/web && vitest run", &root).is_some());
+        std::fs::write(
+            root.join("apps/web/vitest.config.ts"),
+            "export default { test: { maxWorkers: 2 } }",
+        )
+        .unwrap();
+        assert_eq!(tunable("cd apps/web && vitest run", &root), None);
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"scripts":{"test":"cd apps/web && vitest run"}}"#,
+        )
+        .unwrap();
+        assert_eq!(tunable("npm test", &root), None);
+        assert_eq!(tunable("pnpm test", &root), None);
+    }
+
+    #[test]
+    fn explicit_vitest_config_and_root_settings_win() {
+        let root = checkout("config-targets");
+        std::fs::write(root.join("apps/web/custom.ts"), "maxWorkers: 2").unwrap();
+        for line in [
+            "vitest run --config apps/web/custom.ts",
+            "vitest run --config=apps/web/custom.ts",
+            "vitest run -c apps/web/custom.ts",
+            "cd apps/web && vitest run --config custom.ts",
+        ] {
+            assert_eq!(tunable(line, &root), None, "{line}");
+        }
+        std::fs::write(root.join("apps/web/vitest.config.ts"), "maxWorkers: 2").unwrap();
+        for line in ["vitest run --root apps/web", "vitest run --root=apps/web"] {
+            assert_eq!(tunable(line, &root), None, "{line}");
+        }
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"scripts":{"test":"vitest run"}}"#,
+        )
+        .unwrap();
+        assert_eq!(tunable("npm test -- --root apps/web", &root), None);
+        assert_eq!(
+            tunable("npm test -- --config apps/web/custom.ts", &root),
+            None
+        );
+    }
+
+    #[test]
+    fn config_lookup_uses_the_package_scripts_directory() {
+        let root = checkout("script-directory");
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"scripts":{"test":"cd apps/web && vitest run"}}"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("apps/web/vitest.config.ts"), "maxWorkers: 2").unwrap();
+        assert_eq!(tunable("npm test", &root.join("apps")), None);
+    }
+
+    #[test]
+    fn cargo_config_lookup_follows_cd_and_preserves_workspace_support() {
+        let root = checkout("cargo-cd-config");
+        assert!(tunable("cargo build --workspace", &root).is_some());
+        assert!(tunable("cd apps/web && cargo build", &root).is_some());
+        std::fs::create_dir_all(root.join("apps/web/.cargo")).unwrap();
+        std::fs::write(
+            root.join("apps/web/.cargo/config.toml"),
+            "[build]\njobs = 2",
+        )
+        .unwrap();
+        assert_eq!(tunable("cd apps/web && cargo build", &root), None);
+    }
+
+    #[test]
+    fn unresolved_config_targets_are_not_tuned() {
+        let root = checkout("unsafe-config-targets");
+        for line in [
+            "cd missing && vitest run",
+            "cd $WEB && vitest run",
+            "cd apps/../apps/web && vitest run",
+            "cd apps/web || vitest run",
+            "vitest run --config missing.ts",
+            "vitest run --config $CONFIG",
+            "vitest run --config apps/../custom.ts",
+            "vitest run -capps/web/custom.ts",
+            "vitest run -rapps/web",
+            "vitest run --root missing",
+            "pnpm -C apps/web vitest run",
+            "pnpm --dir apps/web vitest run",
+            "pnpm --dir=apps/web vitest run",
+            "pnpm -Capps/web vitest run",
+            "yarn --cwd apps/web vitest run",
+            "pnpm -C apps/web cargo build",
+            "cargo build --config build.jobs=2",
+        ] {
+            assert_eq!(tunable(line, &root), None, "{line}");
+        }
+    }
+
+    #[test]
+    fn package_target_selectors_do_not_use_the_root_config_or_script() {
+        let root = checkout("workspace-targets");
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"workspaces":["apps/web"],"scripts":{"build":"turbo run build"}}"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("apps/web/vitest.config.ts"), "maxWorkers: 2").unwrap();
+        assert!(tunable("vitest run", &root).is_some());
+        assert!(tunable("npm run build", &root).is_some());
+        for line in [
+            "npm exec --workspaces -- vitest run",
+            "npm exec --workspaces=true -- vitest run",
+            "npm exec -wweb -- vitest run",
+            "pnpm -Fweb vitest run",
+            "pnpm -r vitest run",
+            "npm run build --workspaces",
+            "npm -wweb run build",
+            "pnpm -Fweb build",
+            "pnpm -r build",
+            "yarn --cwd apps/web build",
+            "yarn --cwd=apps/web build",
+        ] {
+            assert_eq!(tunable(line, &root), None, "{line}");
+        }
     }
 
     #[test]
