@@ -199,7 +199,8 @@ button:disabled{ cursor:default; opacity:.4; }
 .sec-h .why{ text-transform:none; letter-spacing:0; font-weight:500; font-size:11.5px; color:var(--text-dim); }
 .sec-h .why.blocked{ color:var(--warn); }
 .sec.day{ padding:7px 0 2px; }
-.sec.day .why{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; }
+.sec.day .why{ min-width:0; }
+.sec.day .nw{ white-space:nowrap; }
 .empty{ padding:6px 14px 10px; color:var(--text-faint); font-size:12px; }
 
 /* Job rows */
@@ -535,14 +536,14 @@ function renderLastDay(h){
     `${h.runs}${h.more ? "+" : ""} ${h.runs === 1 ? "run" : "runs"}`,
     h.failed && `${h.failed} failed`,
     h.killed && `${h.killed} killed`,
-    h.waited_s && `queued ${dur(h.waited_s)}`,
+    h.waited_s && `wait p50 ${dur(h.wait_p50_s)}, p99 ${dur(h.wait_p99_s)}`,
     h.shrunk && `${h.shrunk} shrunk`,
     h.went_first && `${h.went_first} went first`,
   ].filter(Boolean);
-  const tip = `Jobs that finished in the last 24 hours${h.longest_wait_s ? `. Longest wait in the queue: ${dur(h.longest_wait_s)}` : ""}`;
+  const tip = `Jobs that finished in the last 24 hours${h.waited_s ? `. Time in the queue before starting: ${dur(h.waited_s)} in all, longest ${dur(h.longest_wait_s)}` : ""}`;
   return `
     <div class="sec day" title="${tip}"><div class="sec-h">24h
-      <span class="why">${parts.join(" · ")}</span></div></div>`;
+      <span class="why">${parts.map(p => `<span class="nw">${p}</span>`).join(" · ")}</span></div></div>`;
 }
 
 function renderMain(S){
@@ -1136,7 +1137,7 @@ function base(over){
     system: { pressure:"normal", mem_total:G(36), mem_used:G(27.1), mem_available:G(8.9), swap_used:G(0.4), cpu_pct:63 },
     held:false, hooks:{ claude:"installed", codex:"installed", pi:"installed" }, queue_reason:null,
     running:[], queued:[], banners:[],
-    last_day: { runs:3, failed:1, killed:1, waited_s:254, longest_wait_s:131, shrunk:1, went_first:1, more:false },
+    last_day: { runs:3, failed:1, killed:1, waited_s:254, longest_wait_s:131, wait_p50_s:12, wait_p99_s:131, shrunk:1, went_first:1, more:false },
     history: [
       { id:"r1", label:"sc-49123", cmd:"vitest run", key:"browser-churchdesk · vitest run", duration_s:151, peak:G(3.9), estimate:G(4.1), exit:0, ended_ago_s:420 },
       { id:"r2", label:"fix-main", cmd:"tsc --noEmit", key:"fix-main · tsc --noEmit", duration_s:47, peak:G(1.2), estimate:G(1.3), exit:2, ended_ago_s:900 },
@@ -1155,7 +1156,7 @@ const MOCK = {
     running:[J.vitest(), J.tsc()], queued:[J.e2e(), J.build(), J.jest()],
     queue_reason:{ kind:"memory", need:G(4.2), free:G(2.9) } }) },
   idle: { title:"Idle", desc:"nothing running", make: () => base({
-    last_day:{ runs:0, failed:0, killed:0, waited_s:0, longest_wait_s:0, shrunk:0, went_first:0, more:false },
+    last_day:{ runs:0, failed:0, killed:0, waited_s:0, longest_wait_s:0, wait_p50_s:0, wait_p99_s:0, shrunk:0, went_first:0, more:false },
     system:{ pressure:"normal", mem_total:G(36), mem_used:G(17.6), mem_available:G(18.4), swap_used:G(0), cpu_pct:9 } }) },
   frozen: { title:"Frozen", desc:"critical pressure, guard froze a job", make: () => {
     const v = J.vitest(); v.state = "frozen"; v.frozen_s = 12; v.footprint = G(5.2); v.peak = G(5.2); v.cpu_pct = 0;

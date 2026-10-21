@@ -68,6 +68,14 @@ fn secs(ms: u64) -> u64 {
     ms / 1000
 }
 
+/// Nearest-rank percentile of `sorted`, ascending; 0 when empty.
+fn percentile(sorted: &[u64], pct: usize) -> u64 {
+    match sorted.len() {
+        0 => 0,
+        n => sorted[(n * pct).div_ceil(100).max(1) - 1],
+    }
+}
+
 /// What finished in the day before `wall`, from the history (newest
 /// first). The history keeps at most `HISTORY_MAX` runs; when all of them
 /// are inside the day the counts are a floor, and `more` says so.
@@ -75,12 +83,16 @@ fn last_day(history: &[HistoryEntry], wall: u64) -> Value {
     let since = wall.saturating_sub(HISTORY_DAY_S);
     let recent: Vec<&HistoryEntry> = history.iter().filter(|h| h.ended_at >= since).collect();
     let count = |f: &dyn Fn(&HistoryEntry) -> bool| recent.iter().filter(|h| f(h)).count();
+    let mut waits: Vec<u64> = recent.iter().map(|h| h.waited_ms).collect();
+    waits.sort_unstable();
     json!({
         "runs": count(&|h| h.outcome != Outcome::Cancelled),
         "failed": count(&|h| h.outcome == Outcome::Exited && h.exit != Some(0)),
         "killed": count(&|h| matches!(h.outcome, Outcome::Requeued | Outcome::GaveUp)),
         "waited_s": secs(recent.iter().map(|h| h.waited_ms).sum()),
-        "longest_wait_s": secs(recent.iter().map(|h| h.waited_ms).max().unwrap_or(0)),
+        "longest_wait_s": secs(waits.last().copied().unwrap_or(0)),
+        "wait_p50_s": secs(percentile(&waits, 50)),
+        "wait_p99_s": secs(percentile(&waits, 99)),
         "shrunk": count(&|h| h.tuned.is_some()),
         "went_first": count(&|h| h.ahead_of.is_some()),
         "more": history.len() >= HISTORY_MAX && recent.len() == history.len(),
@@ -480,9 +492,24 @@ mod tests {
             json!({
                 "runs": 6, "failed": 2, "killed": 2,
                 "waited_s": 141, "longest_wait_s": 90,
+                "wait_p50_s": 1, "wait_p99_s": 90,
                 "shrunk": 1, "went_first": 1, "more": false,
             })
         );
+    }
+
+    #[test]
+    fn percentiles_take_the_nearest_rank() {
+        let hundred: Vec<u64> = (1..=100).collect();
+        assert_eq!(
+            (percentile(&hundred, 50), percentile(&hundred, 99)),
+            (50, 99)
+        );
+        // One more value: the 99th percentile's rank moves up to it.
+        let more: Vec<u64> = (1..=101).collect();
+        assert_eq!((percentile(&more, 50), percentile(&more, 99)), (51, 100));
+        assert_eq!((percentile(&[7], 50), percentile(&[7], 99)), (7, 7));
+        assert_eq!(percentile(&[], 99), 0);
     }
 
     #[test]

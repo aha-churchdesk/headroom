@@ -122,12 +122,18 @@ test('one line above what is running sums up the last 24 hours', () => {
   has(ui.view(), '· 1 went first');
 });
 
-test('the 24 hours show time spent queued, and the longest wait on hover', () => {
-  ui.setState({ ...history, last_day: { ...history.last_day, runs: 1, failed: 0, killed: 0, waited_s: 254, longest_wait_s: 131 } });
-  has(ui.view(), '24h 1 run · queued 4m14 Running');
-  has(ui.html(), 'Longest wait in the queue: 2m11');
+test('the 24 hours show the median and 99th percentile wait, and the totals on hover', () => {
+  ui.setState({ ...history, last_day: { ...history.last_day, runs: 4, failed: 0, killed: 0,
+    waited_s: 254, longest_wait_s: 131, wait_p50_s: 12, wait_p99_s: 131 } });
+  has(ui.view(), '24h 4 runs · wait p50 12s, p99 2m11 Running');
+  has(ui.html(), 'Time in the queue before starting: 4m14 in all, longest 2m11');
+  // Most jobs started at once: the median says so.
+  ui.setState({ ...history, last_day: { ...history.last_day, runs: 4, failed: 0, killed: 0,
+    waited_s: 40, longest_wait_s: 40, wait_p50_s: 0, wait_p99_s: 40 } });
+  has(ui.view(), '24h 4 runs · wait p50 0s, p99 40s Running');
   ui.setState(history);
-  lacks(ui.html(), 'Longest wait');
+  lacks(ui.view(), 'wait p50');
+  lacks(ui.html(), 'Time in the queue');
 });
 
 test('a quiet day says so', () => {
@@ -135,8 +141,8 @@ test('a quiet day says so', () => {
   ui.setState(busy);
   has(ui.view(), '24h nothing finished Running');
   // Cancelled jobs are not runs, but their wait still counts.
-  ui.setState({ ...busy, last_day: { ...busy.last_day, waited_s: 40, longest_wait_s: 40 } });
-  has(ui.view(), '24h 0 runs · queued 40s');
+  ui.setState({ ...busy, last_day: { ...busy.last_day, waited_s: 40, longest_wait_s: 40, wait_p50_s: 40, wait_p99_s: 40 } });
+  has(ui.view(), '24h 0 runs · wait p50 40s, p99 40s');
 });
 
 test('a busier day than the history holds is a floor', () => {

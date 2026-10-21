@@ -18,7 +18,7 @@
   "queued": [],
   "banners": [
     {
-      "id": "h4-1792507017",
+      "id": "h4-1792564429",
       "kind": "gave_up",
       "job_id": "4",
       "label": "sc-49201",
@@ -26,7 +26,7 @@
       "why": "memory still critical 1 s after freezing; peak 0.2 GB vs est 1.5 GB. The agent was told: exit 137."
     },
     {
-      "id": "h4-1792507012",
+      "id": "h4-1792564424",
       "kind": "requeued",
       "job_id": "4",
       "label": "sc-49201",
@@ -41,10 +41,10 @@
       "cmd": "headroom-hog",
       "key": "~/Projects/work-scheduler-mcp|headroom|headroom-hog",
       "duration_s": 4,
-      "peak": 216252920,
+      "peak": 216236536,
       "estimate": 1610612736,
       "exit": null,
-      "ended_ago_s": 1,
+      "ended_ago_s": 2,
       "tuned": null,
       "ahead_of": null,
       "guard": {
@@ -58,10 +58,10 @@
       "cmd": "headroom-hog",
       "key": "~/Projects/work-scheduler-mcp|headroom|headroom-hog",
       "duration_s": 3,
-      "peak": 216252920,
+      "peak": 216220128,
       "estimate": 1610612736,
       "exit": null,
-      "ended_ago_s": 6,
+      "ended_ago_s": 7,
       "tuned": null,
       "ahead_of": null,
       "guard": {
@@ -78,7 +78,7 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": null,
-      "ended_ago_s": 10,
+      "ended_ago_s": 11,
       "tuned": null,
       "ahead_of": null,
       "guard": {
@@ -95,7 +95,7 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": 0,
-      "ended_ago_s": 10,
+      "ended_ago_s": 11,
       "tuned": null,
       "ahead_of": null,
       "guard": null
@@ -109,7 +109,7 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": 3,
-      "ended_ago_s": 10,
+      "ended_ago_s": 11,
       "tuned": null,
       "ahead_of": null,
       "guard": null
@@ -121,6 +121,8 @@
     "killed": 2,
     "waited_s": 0,
     "longest_wait_s": 0,
+    "wait_p50_s": 0,
+    "wait_p99_s": 0,
     "shrunk": 0,
     "went_first": 0,
     "more": false
