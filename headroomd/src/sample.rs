@@ -507,7 +507,11 @@ mod tests {
         // have performance cores only.
         let perf = sysctl::<i32>("hw.perflevel0.physicalcpu").unwrap_or(0) as u32;
         assert_eq!(s.cores, sysctl::<i32>("hw.physicalcpu").unwrap() as u32);
-        assert!(s.cores > 0 && s.cores >= perf, "{} cores, {perf} performance", s.cores);
+        assert!(
+            s.cores > 0 && s.cores >= perf,
+            "{} cores, {perf} performance",
+            s.cores
+        );
     }
 
     #[test]
