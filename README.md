@@ -74,9 +74,11 @@ Agent hooks only see the command an agent types. To also queue what you run in a
 ```sh
 headroom shims install             # links pnpm, npm, npx, yarn, bun, vitest, jest, playwright,
                                    # cargo, tsc, turbo, nx, xcodebuild, docker to headroom
-export PATH="$HOME/.local/share/headroom/shims:$PATH"   # in your shell config, yourself
+export PATH="$HOME/.local/share/headroom/shims:$PATH"   # at the end of ~/.zshrc, yourself
 headroom shims status              # are they first on PATH?
 ```
+
+`install` and `status` print the line for your shell and the file it goes in: `~/.zshrc` for zsh, `~/.bash_profile` for bash, and `fish_add_path --path --prepend …` in `~/.config/fish/config.fish` for fish. It goes at the end, after fnm, mise, nvm or brew have set PATH; `status` names any program that is still found before the shims.
 
 Called as `pnpm`, Headroom classifies the whole command. A heavy one runs through the queue; anything else, and anything inside a queued job, runs the real `pnpm` (the next one on PATH) straight away. If the daemon isn't running the command runs directly. `headroom shims uninstall` removes the links.
 

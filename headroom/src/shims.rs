@@ -195,10 +195,119 @@ pub fn on_path(dir: &Path, path: &str) -> OnPath {
     }
 }
 
+/// The line that puts the shims on PATH, and the file it goes in, for the
+/// user's shell.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ShellSetup {
+    /// `~/.zshrc`; `None` for a shell we don't know.
+    pub file: Option<&'static str>,
+    pub line: String,
+}
+
+/// For `$SHELL`. Under the home directory the line says `$HOME`, so it
+/// still reads right if copied to another machine.
+pub fn shell_setup(shell: &str, dir: &Path, home: &Path) -> ShellSetup {
+    let shown = match dir.strip_prefix(home) {
+        Ok(rest) if !home.as_os_str().is_empty() => format!("$HOME/{}", rest.display()),
+        _ => dir.display().to_string(),
+    };
+    match shell.rsplit('/').next().unwrap_or(shell) {
+        "zsh" => ShellSetup {
+            file: Some("~/.zshrc"),
+            line: format!("export PATH=\"{shown}:$PATH\""),
+        },
+        // macOS terminals start bash as a login shell.
+        "bash" => ShellSetup {
+            file: Some("~/.bash_profile"),
+            line: format!("export PATH=\"{shown}:$PATH\""),
+        },
+        "fish" => ShellSetup {
+            file: Some("~/.config/fish/config.fish"),
+            line: format!("fish_add_path --path --prepend \"{shown}\""),
+        },
+        _ => ShellSetup {
+            file: None,
+            line: format!("export PATH=\"{shown}:$PATH\""),
+        },
+    }
+}
+
+/// Is the shims directory already in the shell's config file?
+fn in_config(setup: &ShellSetup, dir: &Path, home: &Path) -> bool {
+    let Some(file) = setup.file else { return false };
+    let path = home.join(file.trim_start_matches("~/"));
+    let rel = dir.strip_prefix(home).ok().map(|r| r.display().to_string());
+    std::fs::read_to_string(path).is_ok_and(|text| {
+        text.lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .any(|l| {
+                l.contains(&*dir.display().to_string())
+                    || rel.as_deref().is_some_and(|r| {
+                        l.contains(&format!("$HOME/{r}")) || l.contains(&format!("~/{r}"))
+                    })
+            })
+    })
+}
+
+/// What to tell the user about PATH, given where the shims stand.
+pub fn path_advice(state: &OnPath, setup: &ShellSetup, configured: bool) -> Vec<String> {
+    let file = setup.file.unwrap_or("your shell's startup file");
+    let add = || {
+        let mut v = vec![
+            format!(
+                "Add this line at the end of {file}, after anything else that sets PATH (fnm, mise, nvm, brew):"
+            ),
+            format!("  {}", setup.line),
+        ];
+        if let Some(f) = setup.file {
+            v.push("or run:".into());
+            v.push(format!("  echo '{}' >> {f}", setup.line));
+        }
+        v.push("then open a new terminal.".into());
+        v
+    };
+    match state {
+        OnPath::First => vec![],
+        OnPath::Missing if configured => vec![format!(
+            "{file} already adds them: open a new terminal (or `source {file}`) to use them."
+        )],
+        OnPath::Missing => {
+            let mut v = vec!["Not on PATH yet, so they do nothing.".to_string()];
+            v.extend(add());
+            v
+        }
+        OnPath::Behind(found) => {
+            let mut v = vec!["On PATH, but these are found first and skip the queue:".to_string()];
+            v.extend(
+                found
+                    .iter()
+                    .map(|(n, d)| format!("  {n} in {}", d.display())),
+            );
+            if configured {
+                v.push(format!(
+                    "Move the shims line to the end of {file}, below what puts these on PATH, then open a new terminal."
+                ));
+            } else {
+                v.extend(add());
+            }
+            v
+        }
+    }
+}
+
 /// `headroom shims install|uninstall|status [--dir DIR]`.
 pub fn manage(action: &str, dir: &Path, exe: &Path) -> i32 {
     let path = std::env::var("PATH").unwrap_or_default();
-    let export = format!("export PATH=\"{}:$PATH\"", dir.display());
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let setup = shell_setup(&std::env::var("SHELL").unwrap_or_default(), dir, &home);
+    let configured = in_config(&setup, dir, &home);
+    let advise = || {
+        for line in path_advice(&on_path(dir, &path), &setup, configured) {
+            println!("{line}");
+        }
+    };
     match action {
         "install" => {
             let steps = match install(dir, exe) {
@@ -219,22 +328,19 @@ pub fn manage(action: &str, dir: &Path, exe: &Path) -> i32 {
             for (name, _) in steps.iter().filter(|(_, s)| *s == Step::Kept) {
                 println!("  kept {name}: something else is there, not ours");
             }
-            match on_path(dir, &path) {
-                OnPath::First => println!("already first on your PATH"),
-                _ => {
-                    println!(
-                        "they work once the directory comes first on PATH. Add this to your shell config:"
-                    );
-                    println!("  {export}");
-                }
+            if matches!(on_path(dir, &path), OnPath::First) {
+                println!("First on PATH: heavy commands queue.");
             }
+            advise();
             0
         }
         "uninstall" => match uninstall(dir) {
             Ok(n) => {
                 println!("removed {n} shims from {}", dir.display());
-                if !matches!(on_path(dir, &path), OnPath::Missing) {
-                    println!("you can drop it from PATH in your shell config too");
+                if configured {
+                    let file = setup.file.unwrap_or("your shell's startup file");
+                    println!("Also remove this line from {file}:");
+                    println!("  {}", setup.line);
                 }
                 0
             }
@@ -246,20 +352,14 @@ pub fn manage(action: &str, dir: &Path, exe: &Path) -> i32 {
         "status" => {
             let installed = NAMES.iter().filter(|n| is_headroom(&dir.join(n))).count();
             println!("{installed} of {} shims in {}", NAMES.len(), dir.display());
-            match on_path(dir, &path) {
-                OnPath::First => println!("first on PATH: heavy commands queue"),
-                OnPath::Missing => {
-                    println!("not on PATH: the shims do nothing. Add this to your shell config:");
-                    println!("  {export}");
-                }
-                OnPath::Behind(v) => {
-                    println!("on PATH, but these are found first and skip the queue:");
-                    for (name, d) in v {
-                        println!("  {name} in {}", d.display());
-                    }
-                    println!("move the shims to the front: {export}");
-                }
+            if installed == 0 {
+                println!("Install them with: headroom shims install");
+                return 0;
             }
+            if matches!(on_path(dir, &path), OnPath::First) {
+                println!("First on PATH: heavy commands queue.");
+            }
+            advise();
             0
         }
         _ => 2,
@@ -397,6 +497,109 @@ mod tests {
         install(&clean, &exe).unwrap();
         uninstall(&clean).unwrap();
         assert!(!clean.exists());
+    }
+
+    #[test]
+    fn the_setup_line_fits_the_users_shell() {
+        let home = Path::new("/Users/me");
+        let dir = home.join(".local/share/headroom/shims");
+        let zsh = shell_setup("/bin/zsh", &dir, home);
+        assert_eq!(zsh.file, Some("~/.zshrc"));
+        assert_eq!(
+            zsh.line,
+            r#"export PATH="$HOME/.local/share/headroom/shims:$PATH""#
+        );
+        assert_eq!(
+            shell_setup("/bin/bash", &dir, home).file,
+            Some("~/.bash_profile")
+        );
+        let fish = shell_setup("/opt/homebrew/bin/fish", &dir, home);
+        assert_eq!(fish.file, Some("~/.config/fish/config.fish"));
+        assert_eq!(
+            fish.line,
+            r#"fish_add_path --path --prepend "$HOME/.local/share/headroom/shims""#
+        );
+        // Unknown or unset shell: no file to name, the plain export line.
+        for sh in ["/bin/tcsh", ""] {
+            let s = shell_setup(sh, &dir, home);
+            assert_eq!(
+                (s.file, s.line.starts_with("export PATH=")),
+                (None, true),
+                "{sh:?}"
+            );
+        }
+        // Outside the home directory the path is written out.
+        assert_eq!(
+            shell_setup("zsh", Path::new("/opt/shims"), home).line,
+            r#"export PATH="/opt/shims:$PATH""#
+        );
+    }
+
+    #[test]
+    fn the_advice_names_the_file_and_where_the_line_goes() {
+        let setup = ShellSetup {
+            file: Some("~/.zshrc"),
+            line: "export PATH=X".into(),
+        };
+        assert!(path_advice(&OnPath::First, &setup, true).is_empty());
+        let missing = path_advice(&OnPath::Missing, &setup, false).join("\n");
+        assert!(
+            missing.contains("at the end of ~/.zshrc, after anything else that sets PATH"),
+            "{missing}"
+        );
+        assert!(
+            missing.contains("echo 'export PATH=X' >> ~/.zshrc"),
+            "{missing}"
+        );
+        assert!(missing.contains("open a new terminal"), "{missing}");
+        // Already in the file: this terminal is just older than the edit.
+        let pending = path_advice(&OnPath::Missing, &setup, true).join("\n");
+        assert!(
+            pending.contains("~/.zshrc already adds them") && !pending.contains("echo"),
+            "{pending}"
+        );
+        // In the file but too early: move it, don't add a second copy.
+        let behind = OnPath::Behind(vec![("pnpm", PathBuf::from("/opt/homebrew/bin"))]);
+        let moved = path_advice(&behind, &setup, true).join("\n");
+        assert!(
+            moved.contains("pnpm in /opt/homebrew/bin") && moved.contains("Move the shims line"),
+            "{moved}"
+        );
+        assert!(!moved.contains("echo"), "{moved}");
+        // An unknown shell gets the line but no command that guesses a file.
+        let unknown = ShellSetup {
+            file: None,
+            line: "export PATH=X".into(),
+        };
+        let v = path_advice(&OnPath::Missing, &unknown, false).join("\n");
+        assert!(
+            v.contains("your shell's startup file") && !v.contains("echo"),
+            "{v}"
+        );
+    }
+
+    #[test]
+    fn a_line_already_in_the_config_is_found() {
+        let home = tmp("cfg-home");
+        let dir = home.join(".local/share/headroom/shims");
+        let setup = shell_setup("zsh", &dir, &home);
+        assert!(!in_config(&setup, &dir, &home), "no ~/.zshrc at all");
+        std::fs::write(home.join(".zshrc"), "eval \"$(mise activate zsh)\"\n").unwrap();
+        assert!(!in_config(&setup, &dir, &home));
+        std::fs::write(
+            home.join(".zshrc"),
+            "# export PATH=\"$HOME/.local/share/headroom/shims:$PATH\"\n",
+        )
+        .unwrap();
+        assert!(!in_config(&setup, &dir, &home), "commented out");
+        for line in [
+            "export PATH=\"$HOME/.local/share/headroom/shims:$PATH\"",
+            "export PATH=~/.local/share/headroom/shims:$PATH",
+            &format!("PATH={}:$PATH", dir.display()),
+        ] {
+            std::fs::write(home.join(".zshrc"), format!("{line}\n")).unwrap();
+            assert!(in_config(&setup, &dir, &home), "{line}");
+        }
     }
 
     #[test]
