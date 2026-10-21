@@ -60,8 +60,9 @@ pub struct Decision {
 
 /// When the head could start, in ms from now: running jobs are expected to
 /// end at their median run time, each freeing what it holds or is still
-/// expected to grow into. `None` if any end can't be predicted, or if even
-/// all of them ending wouldn't make room.
+/// expected to grow into. One already past its median is expected to run as
+/// long again as it has so far. `None` if any end can't be predicted, or if
+/// even all of them ending wouldn't make room.
 fn shadow(
     running: &[&Job],
     admitted: &[(&Job, Bytes)],
@@ -76,10 +77,13 @@ fn shadow(
             JobState::Frozen => continue,
             _ => {
                 let elapsed = j.started_at.map_or(0, |t| now.saturating_sub(t));
-                ends.push((
-                    j.median_ms?.saturating_sub(elapsed),
-                    j.estimate.max(j.footprint),
-                ));
+                let median = j.median_ms?;
+                let left = if elapsed < median {
+                    median - elapsed
+                } else {
+                    elapsed
+                };
+                ends.push((left, j.estimate.max(j.footprint)));
             }
         }
     }
@@ -430,6 +434,21 @@ mod tests {
         started.started_at = Some(0);
         let later = at(&s, &[started], &[head, short(2, 2.0, 45_000)], 20_000);
         assert!(later.admit.is_empty());
+    }
+
+    #[test]
+    fn a_job_past_its_usual_time_is_expected_to_run_as_long_again() {
+        let (s, mut r, head) = backfill_case(0, None);
+        r.started_at = Some(0);
+        let q = |takes| [head.clone(), short(2, 2.0, takes)];
+        let backfilled = |now, takes| at(&s, std::slice::from_ref(&r), &q(takes), now).backfilled;
+        // 80 s into a job that usually takes 60 s: 80 s more.
+        assert_eq!(backfilled(80_000, 80_000), vec![2]);
+        assert!(backfilled(80_000, 80_001).is_empty());
+        // At its usual time exactly, as long again; a second before, one left.
+        assert_eq!(backfilled(60_000, 60_000), vec![2]);
+        assert_eq!(backfilled(59_000, 1_000), vec![2]);
+        assert!(backfilled(59_000, 1_001).is_empty());
     }
 
     #[test]
