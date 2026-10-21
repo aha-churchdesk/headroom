@@ -11,6 +11,6 @@ serde_json.workspace = true
 # The menu bar app, as in hour-tracker.
 objc2 = "0.6.4"
 objc2-app-kit = "0.3.2"
-tao = "0.36.0"
-tray-icon = "0.24.2"
-wry = "0.56.1"
+tao = "0.37.1"
+tray-icon = "0.26.1"
+wry = "0.57.0"

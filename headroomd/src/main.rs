@@ -200,8 +200,7 @@ fn main() -> wry::Result<()> {
         .build(&window)?;
 
     let tray = TrayIconBuilder::new()
-        .with_icon(glyph(0, None))
-        .with_icon_as_template(true)
+        .with_icon_templated(glyph(0, None))
         .with_tooltip("Headroom")
         .build()
         .expect("tray icon");
@@ -223,7 +222,12 @@ fn main() -> wry::Result<()> {
             let Some(l) = a.listing() else { return };
             let (segs, ink, title, tip) = view::tray(l);
             if last_icon != Some((segs, ink)) {
-                let _ = tray.set_icon_with_as_template(Some(glyph(segs, ink)), ink.is_none());
+                let icon = Some(glyph(segs, ink));
+                let _ = if ink.is_none() {
+                    tray.set_icon_templated(icon)
+                } else {
+                    tray.set_icon(icon)
+                };
                 last_icon = Some((segs, ink));
             }
             tray.set_title(Some(title));
