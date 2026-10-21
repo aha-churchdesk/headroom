@@ -258,6 +258,10 @@ pub struct HistoryEntry {
     pub cmd: String,
     pub key: String,
     pub duration_ms: u64,
+    /// Whether the wrapper reported a started child. Older history omitted
+    /// this, so duration and outcome remain the fallback for those entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started: Option<bool>,
     pub peak: Bytes,
     pub estimate: Bytes,
     pub exit: Option<i32>,
@@ -275,9 +279,44 @@ pub struct HistoryEntry {
     pub waited_ms: u64,
 }
 
+impl HistoryEntry {
+    pub fn has_run(&self) -> bool {
+        self.started.unwrap_or(match self.outcome {
+            Outcome::Cancelled => false,
+            Outcome::Disconnected => self.duration_ms > 0,
+            _ => true,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_start_metadata_round_trips_and_old_history_still_loads() {
+        let old = serde_json::json!({
+            "id": 1, "label": "r", "cmd": "test", "key": "/r|test",
+            "duration_ms": 0, "peak": 0, "estimate": 0, "exit": null,
+            "ended_at": 100, "outcome": "disconnected", "why": null
+        });
+        let mut h: HistoryEntry = serde_json::from_value(old).unwrap();
+        assert_eq!(h.started, None);
+        assert!(!h.has_run());
+        h.duration_ms = 1;
+        assert!(h.has_run());
+        h.duration_ms = 0;
+        h.outcome = Outcome::Exited;
+        assert!(h.has_run(), "legacy instant exits still count");
+        h.outcome = Outcome::Disconnected;
+        for started in [false, true] {
+            h.started = Some(started);
+            let loaded: HistoryEntry =
+                serde_json::from_str(&serde_json::to_string(&h).unwrap()).unwrap();
+            assert_eq!(loaded, h);
+            assert_eq!(loaded.has_run(), started);
+        }
+    }
 
     fn part(cmd: &str, gb: u64, procs: u32) -> Part {
         Part {

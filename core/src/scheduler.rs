@@ -224,27 +224,8 @@ impl Scheduler {
         // The wrapper reports its first child's exit, not the death of all
         // its descendants. Keep any pending kill until its grace expires.
         let duration_ms = e.job.started_at.map_or(0, |t| now.saturating_sub(t));
-        if e.job.started_at.is_some() && e.job.pgid.is_some() {
-            let flagged = e.job.was_frozen || e.fate.is_some() || signal.is_some();
-            let run = Run {
-                peak: e.job.peak,
-                duration_ms,
-                exit: code,
-                flagged,
-                at: wall,
-                workers: e.job.tuned.map(|t| t.workers).or(e
-                    .job
-                    .spec
-                    .tune
-                    .map(|t| t.default_workers)),
-                parts: e.job.parts.clone(),
-            };
-            self.profiles
-                .record(&e.job.spec.key, &e.job.spec.fallback_key, run);
-            self.reestimate(Some(&e.job.spec.key));
-            if e.job.spec.fallback_key != e.job.spec.key {
-                self.reestimate(Some(&e.job.spec.fallback_key));
-            }
+        let flagged = e.job.was_frozen || e.fate.is_some() || signal.is_some();
+        if self.record_run(&e.job, duration_ms, code, flagged, wall) {
             fx.push(Effect::SaveProfiles);
         }
         let (outcome, why) = match e.fate.take() {
@@ -368,6 +349,9 @@ impl Scheduler {
             fx.extend(self.terminate(pgid, e.job.state == JobState::Frozen, now));
         }
         let dur = e.job.started_at.map_or(0, |t| now.saturating_sub(t));
+        if self.record_run(&e.job, dur, None, true, wall) {
+            fx.push(Effect::SaveProfiles);
+        }
         self.push_history(&e.job, dur, None, wall, Outcome::Disconnected, None);
         fx.push(Effect::SaveHistory);
         fx.extend(self.settle(now));
@@ -736,6 +720,42 @@ impl Scheduler {
         self.reorder();
     }
 
+    /// Keep observed memory even when a run was interrupted, then refresh
+    /// queued consumers of both the exact profile and its fallback.
+    fn record_run(
+        &mut self,
+        j: &Job,
+        duration_ms: u64,
+        exit: Option<i32>,
+        flagged: bool,
+        wall: u64,
+    ) -> bool {
+        if j.started_at.is_none() || j.pgid.is_none() {
+            return false;
+        }
+        self.profiles.record(
+            &j.spec.key,
+            &j.spec.fallback_key,
+            Run {
+                peak: j.peak,
+                duration_ms,
+                exit,
+                flagged,
+                at: wall,
+                workers: j
+                    .tuned
+                    .map(|t| t.workers)
+                    .or(j.spec.tune.map(|t| t.default_workers)),
+                parts: j.parts.clone(),
+            },
+        );
+        self.reestimate(Some(&j.spec.key));
+        if j.spec.fallback_key != j.spec.key {
+            self.reestimate(Some(&j.spec.fallback_key));
+        }
+        true
+    }
+
     fn push_history(
         &mut self,
         j: &Job,
@@ -745,12 +765,14 @@ impl Scheduler {
         outcome: Outcome,
         why: Option<String>,
     ) {
+        let started = j.started_at.is_some() && j.pgid.is_some();
         let h = HistoryEntry {
             id: j.id,
             label: j.spec.label.clone(),
             cmd: j.spec.cmd.clone(),
             key: j.spec.key.clone(),
-            duration_ms,
+            duration_ms: if started { duration_ms } else { 0 },
+            started: Some(started),
             peak: j.peak,
             estimate: j.estimate,
             exit,
@@ -1415,6 +1437,95 @@ mod tests {
         assert_eq!(signals(&fx), vec![(100, Sig::Kill)]);
         // Owed only once.
         assert!(signals(&s.tick(snap(20), &usage(100, 0.1), 12_000)).is_empty());
+    }
+
+    #[test]
+    fn disconnect_preserves_observed_memory_and_refreshes_queued_profiles() {
+        for frozen in [false, true] {
+            let mut s = sched(20);
+            let mut sp = spec("build");
+            sp.tune = Some(Tunable {
+                tool: Tool::Vitest,
+                default_workers: 4,
+                npm: false,
+            });
+            for _ in 0..3 {
+                s.profiles.record(
+                    &sp.key,
+                    &sp.fallback_key,
+                    Run {
+                        peak: 3 * GIB,
+                        duration_ms: 1_000,
+                        exit: Some(0),
+                        flagged: false,
+                        at: 1,
+                        workers: Some(4),
+                        parts: vec![],
+                    },
+                );
+            }
+            s.enqueue(1, sp.clone(), 0);
+            s.started(1, 100);
+            s.held = true;
+            s.enqueue(2, sp.clone(), 0);
+            s.enqueue(3, spec("other-build"), 0);
+            let mut sample = usage(100, 8.0);
+            sample.get_mut(&100).unwrap().parts.push(Part {
+                cmd: "worker".into(),
+                peak: 7 * GIB,
+                procs: 4,
+                samples: 1,
+            });
+            s.tick(snap(20), &sample, 1_000);
+            if frozen {
+                s.control(9, Control::Freeze { id: 1 }, 2_000, 2);
+            }
+            let fx = s.disconnected(1, 60_000, 60);
+            assert!(fx.contains(&Effect::SaveProfiles));
+            assert!(fx.contains(&Effect::SaveHistory));
+            let profile = s.profiles.get(&sp.key).unwrap();
+            let run = profile.runs.back().unwrap();
+            assert!(run.flagged);
+            assert_eq!(
+                (run.peak, run.duration_ms, run.exit),
+                (8 * GIB, 60_000, None)
+            );
+            assert_eq!((run.workers, run.parts.len()), (Some(4), 1));
+            assert_eq!(profile.median_ms(), Some(1_000));
+            assert_eq!(profile.samples(), 3);
+            assert_eq!(
+                s.profiles.get(&sp.fallback_key).unwrap().runs.back(),
+                Some(run)
+            );
+            assert!(s.list().queued.iter().all(|j| j.estimate >= 8 * GIB));
+            assert!(sent(&fx, 3).iter().any(|m| matches!(m,
+                DaemonMsg::Queued { estimate, .. } if *estimate == 8 * GIB
+            )));
+        }
+    }
+
+    #[test]
+    fn disconnect_counts_only_confirmed_starts_even_at_zero_duration() {
+        for (held, started) in [(true, false), (false, false), (false, true)] {
+            let mut s = sched(20);
+            s.held = held;
+            s.enqueue(1, spec("a"), 0);
+            if started {
+                s.started(1, 100);
+            }
+            // An unconfirmed grant can last a while without a child ever starting.
+            let now = if started { 0 } else { 5_000 };
+            let fx = s.disconnected(1, now, 10);
+            let h = &s.history[0];
+            assert_eq!(h.started, Some(started));
+            assert_eq!(h.has_run(), started);
+            assert_eq!(h.duration_ms, 0);
+            assert_eq!(fx.contains(&Effect::SaveProfiles), started);
+            assert_eq!(s.profiles.get("/r|a").is_some(), started);
+            let runs: u32 = s.tally.window(10, 1).iter().map(|(_, d)| d.runs).sum();
+            assert_eq!(runs, u32::from(started));
+            assert!(s.tally.window(10, 1).iter().all(|(_, d)| d.run_ms == 0));
+        }
     }
 
     #[test]

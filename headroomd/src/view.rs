@@ -90,24 +90,27 @@ const WAITED_MS: u64 = 1000;
 /// They are over the runs that waited, and `waited` says how many did.
 fn last_day(history: &[HistoryEntry], wall: u64) -> Value {
     let since = wall.saturating_sub(HISTORY_DAY_S);
-    let recent: Vec<&HistoryEntry> = history.iter().filter(|h| h.ended_at >= since).collect();
+    let recent: Vec<&HistoryEntry> = history
+        .iter()
+        .filter(|h| h.ended_at >= since && h.ended_at <= wall)
+        .collect();
     let count = |f: &dyn Fn(&HistoryEntry) -> bool| recent.iter().filter(|h| f(h)).count();
     let mut waits: Vec<u64> = recent
         .iter()
-        .filter(|h| h.outcome != Outcome::Cancelled && h.waited_ms >= WAITED_MS)
+        .filter(|h| h.has_run() && h.waited_ms >= WAITED_MS)
         .map(|h| h.waited_ms)
         .collect();
     waits.sort_unstable();
     json!({
-        "runs": count(&|h| h.outcome != Outcome::Cancelled),
-        "failed": count(&|h| h.outcome == Outcome::Exited && h.exit != Some(0)),
-        "killed": count(&|h| matches!(h.outcome, Outcome::Requeued | Outcome::GaveUp)),
+        "runs": count(&HistoryEntry::has_run),
+        "failed": count(&|h| h.has_run() && h.outcome == Outcome::Exited && h.exit != Some(0)),
+        "killed": count(&|h| h.has_run() && matches!(h.outcome, Outcome::Requeued | Outcome::GaveUp)),
         "waited": waits.len(),
         "waited_s": secs(waits.iter().sum()),
         "longest_wait_s": secs(waits.last().copied().unwrap_or(0)),
         "wait_p50_s": secs(percentile(&waits, 50)),
         "wait_p95_s": secs(percentile(&waits, 95)),
-        "went_first": count(&|h| h.ahead_of.is_some()),
+        "went_first": count(&|h| h.has_run() && h.ahead_of.is_some()),
         "more": history.len() >= HISTORY_MAX && recent.len() == history.len(),
     })
 }
@@ -235,7 +238,7 @@ fn job_json(j: &Job, now: u64, cfg: &Config) -> Value {
         "runaway_at": j.runaway_at(cfg.runaway_factor, cfg.runaway_cap),
         "elapsed_s": j.started_at.map_or(0, |t| secs(now.saturating_sub(t))),
         "frozen_s": j.frozen_at.map_or(0, |t| secs(now.saturating_sub(t))),
-        "waited_s": secs(now.saturating_sub(j.enqueued_at)),
+        "waited_s": secs(j.started_at.unwrap_or(now).saturating_sub(j.enqueued_at)),
         "cpu_pct": j.cpu_pct,
         "procs": j.procs,
         "now": inner(j),
@@ -499,6 +502,7 @@ mod tests {
                     cmd: "pnpm build".into(),
                     key: "/r|pnpm build".into(),
                     duration_ms: 212_000,
+                    started: None,
                     peak: 7 * GIB,
                     estimate: 2 * GIB,
                     exit: None,
@@ -515,6 +519,7 @@ mod tests {
                     cmd: "pnpm build".into(),
                     key: "/r|pnpm build".into(),
                     duration_ms: 1,
+                    started: None,
                     peak: 0,
                     estimate: 0,
                     exit: Some(0),
@@ -714,6 +719,19 @@ mod tests {
         assert_eq!(v["last_day"]["runs"], 2);
     }
 
+    #[test]
+    fn queue_wait_stops_growing_when_a_job_is_granted() {
+        let cfg = Config::default();
+        let mut job = Job::queued(1, JobSpec::default(), 0, 0, 1_000);
+        assert_eq!(job_json(&job, 6_000, &cfg)["waited_s"], 5);
+        job.started_at = Some(6_000);
+        job.state = JobState::Running;
+        assert_eq!(job_json(&job, 16_000, &cfg)["waited_s"], 5);
+        job.state = JobState::Frozen;
+        job.frozen_at = Some(16_000);
+        assert_eq!(job_json(&job, 26_000, &cfg)["waited_s"], 5);
+    }
+
     fn ended(at: u64, outcome: Outcome, exit: Option<i32>, waited_ms: u64) -> HistoryEntry {
         HistoryEntry {
             id: at,
@@ -721,6 +739,7 @@ mod tests {
             cmd: "c".into(),
             key: "/r|c".into(),
             duration_ms: 1,
+            started: None,
             peak: 0,
             estimate: 0,
             exit,
@@ -740,6 +759,7 @@ mod tests {
         let run = |key: &str, at: u64, ms: u64, exit: i32| HistoryEntry {
             key: key.into(),
             duration_ms: ms,
+            started: None,
             peak: 2 << 30,
             ..ended(at, Outcome::Exited, Some(exit), 3_000)
         };
@@ -846,6 +866,31 @@ mod tests {
     }
 
     #[test]
+    fn last_day_counts_started_disconnects_and_ignores_future_entries() {
+        let mut queued = ended(100_000, Outcome::Disconnected, None, 90_000);
+        queued.duration_ms = 0;
+        queued.started = Some(false);
+        let mut granted = queued.clone();
+        granted.duration_ms = 10_000;
+        let mut instant = ended(100_000, Outcome::Disconnected, None, 5_000);
+        instant.duration_ms = 0;
+        instant.started = Some(true);
+        let mut legacy_queued = queued.clone();
+        legacy_queued.started = None;
+        let legacy_run = ended(100_000, Outcome::Disconnected, None, 10_000);
+        let future = ended(100_001, Outcome::Exited, Some(1), 60_000);
+        let h = [queued, granted, instant, legacy_queued, legacy_run, future];
+        let v = last_day(&h, 100_000);
+        assert_eq!(v["runs"], 2);
+        assert_eq!(v["failed"], 0);
+        assert_eq!(v["waited"], 2);
+        assert_eq!(v["waited_s"], 15);
+        assert_eq!(v["wait_p50_s"], 5);
+        assert_eq!(v["wait_p95_s"], 10);
+        assert_eq!(last_day(&h, 100_000 - HISTORY_DAY_S - 1)["runs"], 0);
+    }
+
+    #[test]
     fn percentiles_take_the_nearest_rank() {
         let hundred: Vec<u64> = (1..=100).collect();
         assert_eq!(
@@ -883,7 +928,11 @@ mod tests {
             (Some(false), Some(HISTORY_MAX as u64 - 1))
         );
         // Early in the clock's life the day starts at zero, not before it.
-        assert_eq!(last_day(&full[..3], 30)["runs"], 3);
+        let early = [
+            ended(0, Outcome::Exited, Some(0), 0),
+            ended(30, Outcome::Exited, Some(0), 0),
+        ];
+        assert_eq!(last_day(&early, 30)["runs"], 2);
     }
 
     #[test]

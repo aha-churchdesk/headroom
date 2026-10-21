@@ -70,22 +70,20 @@ impl Tally {
     }
 
     fn count(&mut self, h: &HistoryEntry) {
-        let ran = h.duration_ms > 0 || h.outcome == Outcome::Exited;
-        let ended = match h.outcome {
-            Outcome::Requeued | Outcome::Cancelled => false,
-            Outcome::Disconnected => ran,
-            Outcome::Exited | Outcome::GaveUp | Outcome::ManualKill => true,
-        };
-        let failed = match h.outcome {
-            Outcome::Exited => h.exit != Some(0),
-            Outcome::GaveUp => true,
-            _ => false,
-        };
-        let mib_s = (h.peak as u128 * h.duration_ms as u128 / (MIB as u128 * 1000)) as u64;
+        let ran = h.has_run();
+        let ended = ran && !matches!(h.outcome, Outcome::Requeued | Outcome::Cancelled);
+        let failed = ran
+            && match h.outcome {
+                Outcome::Exited => h.exit != Some(0),
+                Outcome::GaveUp => true,
+                _ => false,
+            };
+        let run_ms = if ran { h.duration_ms } else { 0 };
+        let mib_s = (h.peak as u128 * run_ms as u128 / (MIB as u128 * 1000)) as u64;
         let d = Day {
             runs: ended as u32,
             failed: failed as u32,
-            run_ms: h.duration_ms,
+            run_ms,
             wait_ms: h.waited_ms,
             mib_s,
             peak: if ran { h.peak } else { 0 },
@@ -140,6 +138,7 @@ mod tests {
             cmd: "pnpm test".into(),
             key: key.into(),
             duration_ms: 60_000,
+            started: None,
             peak: 2 * GIB,
             estimate: GIB,
             exit,
@@ -195,6 +194,16 @@ mod tests {
         // Its client left after it started: it ran.
         t.add(&entry("/r|test", NOW, Outcome::Disconnected, None));
         assert_eq!(t.window(NOW, 1)[0].1.runs, 1);
+    }
+
+    #[test]
+    fn explicit_unstarted_history_ignores_run_time_and_memory() {
+        let mut h = entry("/r|test", NOW, Outcome::Disconnected, None);
+        h.started = Some(false);
+        let t = Tally::from_history([&h]);
+        let d = &t.window(NOW, 1)[0].1;
+        assert_eq!((d.runs, d.run_ms, d.mib_s, d.peak), (0, 0, 0, 0));
+        assert_eq!(d.wait_ms, h.waited_ms);
     }
 
     #[test]

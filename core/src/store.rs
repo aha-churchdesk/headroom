@@ -233,6 +233,7 @@ mod tests {
             cmd: "pnpm test".into(),
             key: "/r|test".into(),
             duration_ms: 1_000,
+            started: None,
             peak: 1,
             estimate: 1,
             exit: Some(0),
