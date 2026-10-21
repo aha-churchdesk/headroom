@@ -173,6 +173,15 @@ fn trend(t: &Trend, wall: u64) -> Value {
         .collect()
 }
 
+/// The largest process inside a job, unless that is the job's own command:
+/// a `git commit` under the shell that started it says nothing new.
+fn inner(j: &Job) -> Option<&str> {
+    let now = j.now.as_deref()?;
+    let own: Vec<&str> = j.spec.cmd.split_whitespace().collect();
+    let words: Vec<&str> = now.split_whitespace().collect();
+    (words.len() < own.len() || words[..own.len()] != own[..]).then_some(now)
+}
+
 fn job_json(j: &Job, now: u64, cfg: &Config) -> Value {
     let state = match j.state {
         JobState::Queued => "queued",
@@ -200,7 +209,7 @@ fn job_json(j: &Job, now: u64, cfg: &Config) -> Value {
         "waited_s": secs(now.saturating_sub(j.enqueued_at)),
         "cpu_pct": j.cpu_pct,
         "procs": j.procs,
-        "now": j.now,
+        "now": inner(j),
         "retry": j.retry,
         "tuned": j.tuned,
         "skipped": j.skipped,
@@ -503,6 +512,24 @@ mod tests {
             login: Login::Brew,
             attached: false,
         }
+    }
+
+    #[test]
+    fn the_running_row_names_what_runs_inside_unless_it_is_the_command_itself() {
+        let mut j = listing().running[0].clone();
+        assert_eq!(inner(&j), None, "nothing measured yet");
+        j.now = Some("vitest run --pool=forks src/a.test.ts".into());
+        assert_eq!(inner(&j), None, "the job's own command, with its arguments");
+        j.spec.cmd = "git commit".into();
+        j.now = Some("git commit -q -F msg-2186.txt".into());
+        assert_eq!(inner(&j), None);
+        j.now = Some("tsc --noEmit".into());
+        assert_eq!(inner(&j), Some("tsc --noEmit"));
+        // Shorter than the command, or only sharing its first word.
+        j.now = Some("git".into());
+        assert_eq!(inner(&j), Some("git"));
+        j.now = Some("git hook run pre-commit".into());
+        assert_eq!(inner(&j), Some("git hook run pre-commit"));
     }
 
     #[test]

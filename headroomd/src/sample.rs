@@ -299,9 +299,11 @@ const INTERPRETERS: &[&str] = &[
     "node", "bun", "deno", "python", "python3", "ruby", "sh", "bash", "zsh",
 ];
 
-/// A command line for people: the program without its directory, and a
-/// script run by node, python or a shell shown as the script.
-/// `node /…/bin/yarn run typecheck` reads `yarn run typecheck`.
+/// A command line for people: the program without its directory, a script
+/// run by node, python or a shell shown as the script, and absolute paths
+/// by their last part. `node /…/bin/yarn run typecheck` reads
+/// `yarn run typecheck`; `git commit -F /var/…/msg.txt` reads
+/// `git commit -F msg.txt`.
 pub fn short_cmd(args: &[String]) -> String {
     let base = |s: &str| s.rsplit('/').next().unwrap_or(s).to_string();
     let mut words: Vec<String> = args.to_vec();
@@ -311,9 +313,14 @@ pub fn short_cmd(args: &[String]) -> String {
     {
         words.remove(0);
     }
-    match words.first_mut() {
-        Some(w) => *w = base(w),
-        None => return String::new(),
+    if words.is_empty() {
+        return String::new();
+    }
+    words[0] = base(&words[0]);
+    for w in words.iter_mut().skip(1) {
+        if w.len() > 1 && w.starts_with('/') && !w.ends_with('/') {
+            *w = base(w);
+        }
     }
     headroom_core::shell::join(&words)
 }
@@ -634,6 +641,15 @@ mod tests {
         assert_eq!(
             a(&["/usr/bin/git", "commit", "-m", "two words"]),
             "git commit -m 'two words'"
+        );
+        assert_eq!(
+            a(&["git", "commit", "-F", "/private/var/x/msg-2186.txt"]),
+            "git commit -F msg-2186.txt"
+        );
+        // Relative paths, `/` itself and directories are left as written.
+        assert_eq!(
+            a(&["tsc", "-p", "apps/web/tsconfig.json", "/", "/tmp/"]),
+            "tsc -p apps/web/tsconfig.json / /tmp/"
         );
         // An interpreter's own flags: it is the program.
         assert_eq!(
