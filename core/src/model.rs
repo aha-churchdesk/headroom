@@ -47,6 +47,38 @@ pub enum JobState {
     Frozen,
 }
 
+/// A command running inside a job, merged over the processes running it:
+/// turbo's `tsc --noEmit`, a git hook's `eslint`, vitest's workers.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Part {
+    pub cmd: String,
+    /// Most memory its processes held at once.
+    pub peak: Bytes,
+    /// Most of its processes running at once.
+    pub procs: u32,
+    /// Samples it was seen in, one a second.
+    pub samples: u32,
+}
+
+/// Parts kept per job and per run, the largest.
+pub const PARTS: usize = 10;
+
+/// Add one sample of `now` to `parts`, keeping the `PARTS` largest.
+pub fn merge_parts(parts: &mut Vec<Part>, now: &[Part]) {
+    for p in now {
+        match parts.iter_mut().find(|q| q.cmd == p.cmd) {
+            Some(q) => {
+                q.peak = q.peak.max(p.peak);
+                q.procs = q.procs.max(p.procs);
+                q.samples += p.samples;
+            }
+            None => parts.push(p.clone()),
+        }
+    }
+    parts.sort_by(|a, b| b.peak.cmp(&a.peak).then_with(|| a.cmd.cmp(&b.cmd)));
+    parts.truncate(PARTS);
+}
+
 /// Who froze a job decides who may thaw it: the guard never undoes a pause
 /// the user asked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +176,9 @@ pub struct Job {
     /// itself, as a short command line.
     #[serde(default)]
     pub now: Option<String>,
+    /// What has run inside it so far.
+    #[serde(default)]
+    pub parts: Vec<Part>,
 }
 
 impl Job {
@@ -175,6 +210,7 @@ impl Job {
             skipped_since: None,
             ahead_of: None,
             now: None,
+            parts: Vec::new(),
         }
     }
 
@@ -232,4 +268,65 @@ pub struct HistoryEntry {
     /// its client left.
     #[serde(default)]
     pub waited_ms: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn part(cmd: &str, gb: u64, procs: u32) -> Part {
+        Part {
+            cmd: cmd.into(),
+            peak: gb * GIB,
+            procs,
+            samples: 1,
+        }
+    }
+
+    #[test]
+    fn samples_of_a_part_keep_its_peak_and_add_up_its_time() {
+        let mut parts = Vec::new();
+        merge_parts(
+            &mut parts,
+            &[part("tsc --noEmit", 2, 1), part("forks.js", 1, 8)],
+        );
+        merge_parts(
+            &mut parts,
+            &[part("tsc --noEmit", 3, 1), part("forks.js", 1, 6)],
+        );
+        merge_parts(&mut parts, &[part("tsc --noEmit", 1, 1)]);
+        assert_eq!(parts.len(), 2);
+        assert_eq!(
+            parts[0],
+            Part {
+                cmd: "tsc --noEmit".into(),
+                peak: 3 * GIB,
+                procs: 1,
+                samples: 3
+            }
+        );
+        assert_eq!(
+            (parts[1].procs, parts[1].samples),
+            (8, 2),
+            "most processes at once"
+        );
+        merge_parts(&mut parts, &[]);
+        assert_eq!(
+            parts.len(),
+            2,
+            "a sample with nothing inside changes nothing"
+        );
+    }
+
+    #[test]
+    fn only_the_largest_parts_are_kept() {
+        let mut parts = Vec::new();
+        let many: Vec<Part> = (0..PARTS as u64 + 3)
+            .map(|i| part(&format!("c{i}"), i + 1, 1))
+            .collect();
+        merge_parts(&mut parts, &many);
+        assert_eq!(parts.len(), PARTS);
+        assert_eq!(parts[0].cmd, format!("c{}", PARTS + 2));
+        assert!(!parts.iter().any(|p| p.cmd == "c0"), "the smallest went");
+    }
 }

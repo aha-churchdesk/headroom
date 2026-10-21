@@ -189,6 +189,19 @@ test('a command opens its profile, and back returns to the commands page', () =>
   eq(ui.find({ act: 'goto', page: 'commands' }).length, 1, 'back goes to commands');
 });
 
+test('a command page lists what ran inside its runs, when that was recorded', () => {
+  ui.setState(history);
+  ui.click({ act: 'goto', page: 'commands' });
+  const key = history.commands[0].rows[0].key;
+  const p = history.profiles[key];
+  ui.click({ act: 'profile', key });
+  lacks(ui.view(), 'Runs inside it');
+  const parts = [{ cmd: 'tsc --noEmit', runs: 3, peak: 3 * 2 ** 30, procs: 1, median_s: 45 },
+                 { cmd: 'forks.js', runs: 1, peak: 2 ** 30, procs: 8, median_s: 90 }];
+  ui.setState({ ...history, profiles: { ...history.profiles, [key]: { ...p, runs: 4, parts } } });
+  has(ui.view(), 'Runs inside it tsc --noEmit in 3 of 4 runs · peak 3 GB · 45s forks.js in 1 of 4 runs · peak 1 GB · 1m30 · 8 processes');
+});
+
 test('the commands page says when there is nothing to show, or more than it lists', () => {
   const { commands, ...older } = history;
   ui.setState(older);

@@ -12,7 +12,8 @@ use crate::admission::{self, Blocked};
 use crate::config::Config;
 use crate::guard::{self, Action, GuardState};
 use crate::model::{
-    Bytes, FrozenBy, HistoryEntry, Job, JobId, JobSpec, JobState, Millis, Outcome, Snapshot, Tuned,
+    Bytes, FrozenBy, HistoryEntry, Job, JobId, JobSpec, JobState, Millis, Outcome, Part, Snapshot,
+    Tuned, merge_parts,
 };
 use crate::profile::{Profiles, Run, Scaling};
 use crate::protocol::{Control, DaemonMsg, Listing};
@@ -56,6 +57,8 @@ pub struct Usage {
     pub now: Option<String>,
     /// The process groups its processes are in, for signals.
     pub groups: Vec<i32>,
+    /// The commands running inside it now, other than the first process.
+    pub parts: Vec<Part>,
 }
 
 /// A decision about how a running job ends, made before it has ended.
@@ -218,6 +221,7 @@ impl Scheduler {
                     .spec
                     .tune
                     .map(|t| t.default_workers)),
+                parts: e.job.parts.clone(),
             };
             self.profiles
                 .record(&e.job.spec.key, &e.job.spec.fallback_key, run);
@@ -427,6 +431,7 @@ impl Scheduler {
                 e.job.cpu_pct = u.cpu_pct;
                 e.job.procs = u.procs;
                 e.job.now.clone_from(&u.now);
+                merge_parts(&mut e.job.parts, &u.parts);
             }
         }
         let mut fx = vec![];
@@ -580,6 +585,7 @@ impl Scheduler {
         (j.scaling, j.tuned) = (scaling, None);
         (j.footprint, j.peak, j.cpu_pct, j.procs) = (0, 0, 0.0, 0);
         j.now = None;
+        j.parts.clear();
         (j.started_at, j.frozen_at, j.frozen_by, j.pgid) = (None, None, None, None);
         j.was_frozen = false;
         // Its next wait counts from here; the first one is in its history.
@@ -879,6 +885,7 @@ mod tests {
                 flagged: false,
                 at: 0,
                 workers: Some(9),
+                parts: Vec::new(),
             };
             s.profiles.record(&sp.key, &sp.fallback_key, run);
         }
@@ -1010,6 +1017,7 @@ mod tests {
                 flagged: false,
                 at: 0,
                 workers: None,
+                parts: Vec::new(),
             };
             s.profiles.record(&sp.key, &format!("/r|own-{cmd}"), run);
         }
@@ -1054,6 +1062,35 @@ mod tests {
     }
 
     #[test]
+    fn what_runs_inside_a_job_is_kept_with_its_run() {
+        let mut s = sched(20);
+        s.enqueue(1, spec("git commit"), 0);
+        s.started(1, 100);
+        let inside = |gb: u64, procs: u32| {
+            let mut u = usage(100, 1.0);
+            u.get_mut(&100).unwrap().parts = vec![Part {
+                cmd: "tsc --noEmit".into(),
+                peak: gb * GIB,
+                procs,
+                samples: 1,
+            }];
+            u
+        };
+        s.tick(snap(20), &inside(2, 1), 1_000);
+        s.tick(snap(20), &inside(3, 2), 2_000);
+        s.tick(snap(20), &usage(100, 1.0), 3_000);
+        let parts = s.list().running[0].parts.clone();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(
+            (parts[0].peak, parts[0].procs, parts[0].samples),
+            (3 * GIB, 2, 2)
+        );
+        s.exited(1, Some(0), None, 4_000, 42);
+        let run = &s.profiles.get("/r|git commit").unwrap().runs[0];
+        assert_eq!(run.parts, parts, "the run keeps what ran inside it");
+    }
+
+    #[test]
     fn exit_records_a_clean_run_and_history() {
         let mut s = sched(20);
         s.enqueue(1, spec("pnpm test"), 0);
@@ -1072,6 +1109,7 @@ mod tests {
                 flagged: false,
                 at: 42,
                 workers: None,
+                parts: Vec::new(),
             }
         );
         assert_eq!(s.history[0].outcome, Outcome::Exited);
@@ -1462,6 +1500,7 @@ mod tests {
                 flagged: false,
                 at: 0,
                 workers: None,
+                parts: Vec::new(),
             },
         );
         s.enqueue(1, spec("a"), 0);

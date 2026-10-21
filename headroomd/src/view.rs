@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use headroom_core::config::Config;
 use headroom_core::model::{Bytes, HistoryEntry, Job, JobState, Outcome, Pressure};
-use headroom_core::profile::Profiles;
+use headroom_core::profile::{Profile, Profiles};
 use headroom_core::protocol::Listing;
 use headroom_core::scheduler::{HISTORY, HISTORY_DAY_S, HISTORY_MAX};
 use headroom_core::tally::{Day, TALLY_DAYS, Tally};
@@ -144,13 +144,60 @@ fn commands(t: &Tally, wall: u64) -> Value {
         .collect()
 }
 
-/// The largest process inside a job, unless that is the job's own command:
-/// a `git commit` under the shell that started it says nothing new.
+/// Whether a command line is `own`, the job's normalised command, with its
+/// arguments: a `git commit` under the shell that started it.
+fn is_own(cmd: &str, own: &str) -> bool {
+    let own: Vec<&str> = own.split_whitespace().collect();
+    let words: Vec<&str> = cmd.split_whitespace().collect();
+    words.len() >= own.len() && words[..own.len()] == own[..]
+}
+
+/// The largest process inside a job, unless that is the job's own command,
+/// which says nothing new.
 fn inner(j: &Job) -> Option<&str> {
-    let now = j.now.as_deref()?;
-    let own: Vec<&str> = j.spec.cmd.split_whitespace().collect();
-    let words: Vec<&str> = now.split_whitespace().collect();
-    (words.len() < own.len() || words[..own.len()] != own[..]).then_some(now)
+    j.now.as_deref().filter(|n| !is_own(n, &j.spec.cmd))
+}
+
+/// Inner commands listed on a command's page.
+const PAGE_PARTS: usize = 8;
+
+/// What ran inside a command's recent runs, largest first: per inner
+/// command, the runs it was in, its highest peak, the most processes at
+/// once and its median time (samples are a second apart). `own` is the
+/// command itself, left out.
+fn profile_parts(p: &Profile, own: &str) -> Vec<Value> {
+    #[derive(Default)]
+    struct Seen {
+        runs: u32,
+        peak: Bytes,
+        procs: u32,
+        secs: Vec<u32>,
+    }
+    let mut by_cmd: BTreeMap<&str, Seen> = BTreeMap::new();
+    for r in &p.runs {
+        for part in r.parts.iter().filter(|x| !is_own(&x.cmd, own)) {
+            let e = by_cmd.entry(part.cmd.as_str()).or_default();
+            e.runs += 1;
+            e.peak = e.peak.max(part.peak);
+            e.procs = e.procs.max(part.procs);
+            e.secs.push(part.samples);
+        }
+    }
+    let mut rows: Vec<(&str, Seen)> = by_cmd.into_iter().collect();
+    rows.sort_by(|a, b| b.1.peak.cmp(&a.1.peak).then_with(|| a.0.cmp(b.0)));
+    rows.into_iter()
+        .take(PAGE_PARTS)
+        .map(|(cmd, mut e)| {
+            e.secs.sort_unstable();
+            json!({
+                "cmd": cmd,
+                "runs": e.runs,
+                "peak": e.peak,
+                "procs": e.procs,
+                "median_s": e.secs[e.secs.len() / 2],
+            })
+        })
+        .collect()
 }
 
 fn job_json(j: &Job, now: u64, cfg: &Config) -> Value {
@@ -280,6 +327,8 @@ pub fn state(l: &Listing, x: &Extras) -> Value {
                     "p90": est.bytes,
                     "median_s": p.median_ms().map_or(0, secs),
                     "samples": p.samples(),
+                    "runs": p.runs.len(),
+                    "parts": profile_parts(p, k.rsplit('|').next().unwrap_or("")),
                 }),
             ))
         })
@@ -484,6 +533,73 @@ mod tests {
     }
 
     #[test]
+    fn a_command_page_lists_what_ran_inside_its_runs() {
+        use headroom_core::model::Part;
+        use headroom_core::profile::Run;
+        let part = |cmd: &str, gb: u64, procs: u32, samples: u32| Part {
+            cmd: cmd.into(),
+            peak: gb << 30,
+            procs,
+            samples,
+        };
+        let run = |parts: Vec<Part>| Run {
+            peak: 4 << 30,
+            duration_ms: 60_000,
+            exit: Some(0),
+            flagged: false,
+            at: 1,
+            workers: None,
+            parts,
+        };
+        let mut p = Profiles::default();
+        let key = "/r|git push";
+        // An older run, from before parts were kept, has none.
+        p.record(key, key, run(vec![]));
+        p.record(
+            key,
+            key,
+            run(vec![
+                part("tsc --noEmit", 3, 1, 40),
+                part("git push origin x", 1, 1, 60),
+            ]),
+        );
+        p.record(
+            key,
+            key,
+            run(vec![
+                part("tsc --noEmit", 4, 1, 50),
+                part("eslint .", 1, 2, 20),
+            ]),
+        );
+        p.record(key, key, run(vec![part("tsc --noEmit", 2, 1, 45)]));
+        let rows = profile_parts(p.get(key).unwrap(), "git push");
+        assert_eq!(rows.len(), 2, "git itself is the command, not part of it");
+        assert_eq!(rows[0]["cmd"], "tsc --noEmit");
+        assert_eq!(
+            (rows[0]["runs"].clone(), rows[0]["peak"].clone()),
+            (json!(3), json!(4u64 << 30))
+        );
+        assert_eq!(rows[0]["median_s"], 45);
+        assert_eq!(
+            (rows[1]["cmd"].clone(), rows[1]["procs"].clone()),
+            (json!("eslint ."), json!(2))
+        );
+        // Only runs from before: nothing to list.
+        let mut old = Profiles::default();
+        old.record(key, key, run(vec![]));
+        assert!(profile_parts(old.get(key).unwrap(), "git push").is_empty());
+        // Many inner commands: the largest few.
+        let many: Vec<Part> = (0..12)
+            .map(|i| part(&format!("c{i}"), i + 1, 1, 1))
+            .collect();
+        let mut big = Profiles::default();
+        big.record(key, key, run(many));
+        let rows = profile_parts(big.get(key).unwrap(), "git push");
+        assert_eq!(rows.len(), PAGE_PARTS);
+        assert_eq!(rows[0]["cmd"], "c11");
+    }
+
+    #[test]
     fn the_running_row_names_what_runs_inside_unless_it_is_the_command_itself() {
         let mut j = listing().running[0].clone();
         assert_eq!(inner(&j), None, "nothing measured yet");
@@ -598,6 +714,7 @@ mod tests {
             flagged: false,
             at: 1,
             workers: None,
+            parts: Vec::new(),
         };
         p.record("/r|old", "/r|old", run);
         let wall = 100 * 86_400;

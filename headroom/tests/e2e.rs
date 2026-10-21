@@ -467,6 +467,9 @@ fn a_task_moved_to_its_own_group_is_measured_frozen_and_killed_with_its_job() {
     });
     assert_eq!(job.procs, 2);
     assert_eq!(job.now.as_deref(), Some("headroom-hog 1 30"));
+    assert_eq!(job.parts.len(), 1);
+    assert_eq!(job.parts[0].cmd, "headroom-hog 1 30");
+    assert!(job.parts[0].peak > 900 << 20);
     let (hog, hog_group, _) = hog_outside(pgid).expect("the hog, outside the job's group");
     assert_ne!(hog_group, pgid);
     assert!(d.output(&["freeze", &id.to_string()]).status.success());

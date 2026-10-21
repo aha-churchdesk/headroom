@@ -502,6 +502,7 @@ mod tests {
                 flagged: false,
                 at: 0,
                 workers: None,
+                parts: Vec::new(),
             };
             p.record(&key, &key, run);
         }

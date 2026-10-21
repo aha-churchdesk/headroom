@@ -18,7 +18,7 @@
   "queued": [],
   "banners": [
     {
-      "id": "h4-1792571045",
+      "id": "h4-1792590127",
       "kind": "gave_up",
       "job_id": "4",
       "label": "sc-49201",
@@ -26,7 +26,7 @@
       "why": "memory still critical 1 s after freezing; peak 0.2 GB vs est 1.5 GB. The agent was told: exit 137."
     },
     {
-      "id": "h4-1792571040",
+      "id": "h4-1792590123",
       "kind": "requeued",
       "job_id": "4",
       "label": "sc-49201",
@@ -40,7 +40,7 @@
       "label": "sc-49201",
       "cmd": "headroom-hog",
       "key": "~/Projects/work-scheduler-mcp|headroom|headroom-hog",
-      "duration_s": 4,
+      "duration_s": 3,
       "peak": 216252920,
       "estimate": 1610612736,
       "exit": null,
@@ -61,7 +61,7 @@
       "peak": 216252920,
       "estimate": 1610612736,
       "exit": null,
-      "ended_ago_s": 6,
+      "ended_ago_s": 5,
       "tuned": null,
       "ahead_of": null,
       "guard": {
@@ -78,7 +78,7 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": null,
-      "ended_ago_s": 10,
+      "ended_ago_s": 9,
       "tuned": null,
       "ahead_of": null,
       "guard": {
@@ -95,7 +95,7 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": 0,
-      "ended_ago_s": 10,
+      "ended_ago_s": 9,
       "tuned": null,
       "ahead_of": null,
       "guard": null
@@ -109,7 +109,7 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": 3,
-      "ended_ago_s": 10,
+      "ended_ago_s": 9,
       "tuned": null,
       "ahead_of": null,
       "guard": null
@@ -133,9 +133,9 @@
       "total": {
         "runs": 4,
         "failed": 2,
-        "run_s": 8,
+        "run_s": 7,
         "wait_s": 0,
-        "gb_h": 0.00043836805555555556,
+        "gb_h": 0.0003835720486111111,
         "peak": 216252920
       },
       "count": 4,
@@ -143,20 +143,11 @@
         {
           "runs": 1,
           "failed": 1,
-          "run_s": 7,
+          "run_s": 6,
           "wait_s": 0,
-          "gb_h": 0.00043836805555555556,
+          "gb_h": 0.0003835720486111111,
           "peak": 216252920,
           "key": "~/Projects/work-scheduler-mcp|headroom|headroom-hog"
-        },
-        {
-          "runs": 1,
-          "failed": 1,
-          "run_s": 0,
-          "wait_s": 0,
-          "gb_h": 0.0,
-          "peak": 0,
-          "key": "~/Projects/work-scheduler-mcp|headroom|exit 3"
         },
         {
           "runs": 1,
@@ -166,6 +157,15 @@
           "gb_h": 0.0,
           "peak": 0,
           "key": "~/Projects/work-scheduler-mcp|headroom|echo ok"
+        },
+        {
+          "runs": 1,
+          "failed": 1,
+          "run_s": 0,
+          "wait_s": 0,
+          "gb_h": 0.0,
+          "peak": 0,
+          "key": "~/Projects/work-scheduler-mcp|headroom|exit 3"
         },
         {
           "runs": 1,
@@ -183,9 +183,9 @@
       "total": {
         "runs": 4,
         "failed": 2,
-        "run_s": 8,
+        "run_s": 7,
         "wait_s": 0,
-        "gb_h": 0.00043836805555555556,
+        "gb_h": 0.0003835720486111111,
         "peak": 216252920
       },
       "count": 4,
@@ -193,20 +193,11 @@
         {
           "runs": 1,
           "failed": 1,
-          "run_s": 7,
+          "run_s": 6,
           "wait_s": 0,
-          "gb_h": 0.00043836805555555556,
+          "gb_h": 0.0003835720486111111,
           "peak": 216252920,
           "key": "~/Projects/work-scheduler-mcp|headroom|headroom-hog"
-        },
-        {
-          "runs": 1,
-          "failed": 1,
-          "run_s": 0,
-          "wait_s": 0,
-          "gb_h": 0.0,
-          "peak": 0,
-          "key": "~/Projects/work-scheduler-mcp|headroom|exit 3"
         },
         {
           "runs": 1,
@@ -216,6 +207,15 @@
           "gb_h": 0.0,
           "peak": 0,
           "key": "~/Projects/work-scheduler-mcp|headroom|echo ok"
+        },
+        {
+          "runs": 1,
+          "failed": 1,
+          "run_s": 0,
+          "wait_s": 0,
+          "gb_h": 0.0,
+          "peak": 0,
+          "key": "~/Projects/work-scheduler-mcp|headroom|exit 3"
         },
         {
           "runs": 1,
@@ -233,9 +233,9 @@
       "total": {
         "runs": 4,
         "failed": 2,
-        "run_s": 8,
+        "run_s": 7,
         "wait_s": 0,
-        "gb_h": 0.00043836805555555556,
+        "gb_h": 0.0003835720486111111,
         "peak": 216252920
       },
       "count": 4,
@@ -243,20 +243,11 @@
         {
           "runs": 1,
           "failed": 1,
-          "run_s": 7,
+          "run_s": 6,
           "wait_s": 0,
-          "gb_h": 0.00043836805555555556,
+          "gb_h": 0.0003835720486111111,
           "peak": 216252920,
           "key": "~/Projects/work-scheduler-mcp|headroom|headroom-hog"
-        },
-        {
-          "runs": 1,
-          "failed": 1,
-          "run_s": 0,
-          "wait_s": 0,
-          "gb_h": 0.0,
-          "peak": 0,
-          "key": "~/Projects/work-scheduler-mcp|headroom|exit 3"
         },
         {
           "runs": 1,
@@ -266,6 +257,15 @@
           "gb_h": 0.0,
           "peak": 0,
           "key": "~/Projects/work-scheduler-mcp|headroom|echo ok"
+        },
+        {
+          "runs": 1,
+          "failed": 1,
+          "run_s": 0,
+          "wait_s": 0,
+          "gb_h": 0.0,
+          "peak": 0,
+          "key": "~/Projects/work-scheduler-mcp|headroom|exit 3"
         },
         {
           "runs": 1,
@@ -286,7 +286,9 @@
       ],
       "p90": 1073741824,
       "median_s": 0,
-      "samples": 1
+      "samples": 1,
+      "runs": 1,
+      "parts": []
     },
     "~/Projects/work-scheduler-mcp|headroom|exit 3": {
       "peaks": [
@@ -294,13 +296,17 @@
       ],
       "p90": 1073741824,
       "median_s": 0,
-      "samples": 1
+      "samples": 1,
+      "runs": 1,
+      "parts": []
     },
     "~/Projects/work-scheduler-mcp|headroom|headroom-hog": {
       "peaks": [],
       "p90": 1610612736,
       "median_s": 0,
-      "samples": 0
+      "samples": 0,
+      "runs": 2,
+      "parts": []
     }
   },
   "others": [],

@@ -190,6 +190,7 @@ mod tests {
                 flagged: false,
                 at: 3,
                 workers: None,
+                parts: Vec::new(),
             },
         );
         s.save_profiles(&p).unwrap();

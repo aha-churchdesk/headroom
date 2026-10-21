@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::Bytes;
+use crate::model::{Bytes, Part};
 
 /// Runs kept per key.
 pub const KEEP: usize = 20;
@@ -28,6 +28,9 @@ pub struct Run {
     /// Workers the run used, for a tool Headroom can tune (see `tweaks`).
     #[serde(default)]
     pub workers: Option<u32>,
+    /// What ran inside it (see `model::Part`).
+    #[serde(default)]
+    pub parts: Vec<Part>,
 }
 
 /// Peak memory as a function of worker count: `base + per_worker × N`.
@@ -248,6 +251,7 @@ mod tests {
             flagged: false,
             at: 0,
             workers: None,
+            parts: Vec::new(),
         }
     }
 

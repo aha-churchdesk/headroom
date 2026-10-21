@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::time::Instant;
 
-use headroom_core::model::{Bytes, Pressure, Snapshot};
+use headroom_core::model::{Bytes, Part, Pressure, Snapshot};
 use headroom_core::proctree::{self, Proc};
 use headroom_core::scheduler::Usage;
 
@@ -66,6 +66,9 @@ pub struct Sampler {
     /// Per pid: CPU nanoseconds at the last sample.
     prev_cpu: HashMap<i32, u64>,
     prev_at: Option<Instant>,
+    /// Per pid and executable: its command line for people, read once. A
+    /// process that execs another program gets a new entry.
+    cmds: HashMap<(i32, String), String>,
 }
 
 impl Default for Sampler {
@@ -91,6 +94,7 @@ impl Sampler {
             timebase: (tb.numer.max(1) as u64, tb.denom.max(1) as u64),
             prev_ticks: None,
             prev_cpu: HashMap::new(),
+            cmds: HashMap::new(),
             prev_at: None,
         }
     }
@@ -186,11 +190,13 @@ impl Sampler {
             .prev_at
             .map_or(0, |t| now.duration_since(t).as_nanos() as u64);
         let mut cpu_now = HashMap::new();
+        let mut cmds_now = HashMap::new();
         let mut out = HashMap::new();
         for &pgid in pgids {
             let mut u = Usage::default();
             let mut cpu_delta = 0u64;
-            let mut largest: Option<(Bytes, i32)> = None;
+            let mut largest: Option<(Bytes, String)> = None;
+            let mut parts: Vec<Part> = Vec::new();
             for pid in proctree::job_pids(&table, pgid) {
                 let mut ri: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
                 let rc = unsafe {
@@ -205,8 +211,26 @@ impl Sampler {
                 }
                 u.procs += 1;
                 u.footprint += ri.ri_phys_footprint;
-                if pid != pgid && largest.is_none_or(|(b, _)| ri.ri_phys_footprint > b) {
-                    largest = Some((ri.ri_phys_footprint, pid));
+                // Everything but the process it started: that is the job.
+                if pid != pgid
+                    && let Some(cmd) = self.cmd(pid, &mut cmds_now)
+                {
+                    let fp = ri.ri_phys_footprint;
+                    if largest.as_ref().is_none_or(|(b, _)| fp > *b) {
+                        largest = Some((fp, cmd.clone()));
+                    }
+                    match parts.iter_mut().find(|p| p.cmd == cmd) {
+                        Some(p) => {
+                            p.peak += fp;
+                            p.procs += 1;
+                        }
+                        None => parts.push(Part {
+                            cmd,
+                            peak: fp,
+                            procs: 1,
+                            samples: 1,
+                        }),
+                    }
                 }
                 let ns = (ri.ri_user_time + ri.ri_system_time) * self.timebase.0 / self.timebase.1;
                 if let Some(prev) = self.prev_cpu.get(&pid) {
@@ -220,16 +244,28 @@ impl Sampler {
                 } else {
                     cpu_delta as f64 / elapsed_ns as f64 * 100.0
                 };
-                u.now = largest
-                    .and_then(|(_, pid)| args(pid))
-                    .map(|a| short_cmd(&a));
+                u.now = largest.map(|(_, cmd)| cmd);
+                u.parts = parts;
                 u.groups = proctree::job_groups(&table, pgid);
                 out.insert(pgid, u);
             }
         }
         self.prev_cpu = cpu_now;
         self.prev_at = Some(now);
+        self.cmds = cmds_now;
         out
+    }
+
+    /// A process's command line for people, from the last sample when it
+    /// still runs the same executable.
+    fn cmd(&self, pid: i32, now: &mut HashMap<(i32, String), String>) -> Option<String> {
+        let key = (pid, exe_path(pid)?);
+        let cmd = match self.cmds.get(&key) {
+            Some(c) => c.clone(),
+            None => short_cmd(&args(pid)?),
+        };
+        now.insert(key, cmd.clone());
+        Some(cmd)
     }
 }
 
@@ -618,6 +654,9 @@ mod tests {
         assert_eq!(u.groups.len(), 2, "{:?}", u.groups);
         assert_eq!(u.groups[0], pgid);
         assert_eq!(u.now.as_deref(), Some("sleep 7"));
+        assert_eq!(u.parts.len(), 1);
+        assert_eq!((u.parts[0].cmd.as_str(), u.parts[0].procs), ("sleep 7", 1));
+        assert!(u.parts[0].peak > 0);
         // Kept out of Other apps along with the job.
         let sleeper = procs().into_iter().find(|p| p.pgid == u.groups[1]).unwrap();
         assert!(top_apps(&[sleeper.pid], &[pgid], 10).is_empty());
