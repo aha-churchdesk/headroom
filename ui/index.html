@@ -130,6 +130,7 @@ body.live .popover{
 }
 
 button{ font:inherit; color:inherit; background:none; border:none; cursor:pointer; }
+[data-act]:focus-visible{ outline:2px solid var(--accent); outline-offset:2px; }
 button:disabled{ cursor:default; opacity:.4; }
 .mono{ font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size:11.5px; }
 .dim{ color:var(--text-dim); }
@@ -502,6 +503,15 @@ const confirming = key => UI.confirm && UI.confirm.key === key && Date.now() < U
    ═══════════════════════════════════════════════════════════ */
 const $ = id => document.getElementById(id);
 
+// Values and toggle states change on each reply; the action itself stays put.
+function controlKey(el){
+  const d = el.dataset;
+  return JSON.stringify([d.act, d.id, d.key, d.name, d.page, d.pattern, d.confirm, d.step,
+    d.act === "set" && d.key !== "kill_mode" ? null : d.val]);
+}
+const controlsWithKey = key => [...document.querySelectorAll("[data-act]")]
+  .filter(el => controlKey(el) === key);
+
 function render(){
   if (!STATE) return;
   // Updates arrive every second. A rerender mid-drag would drop the drag, so
@@ -511,9 +521,12 @@ function render(){
   const view = $("view");
   const scroll = view.scrollTop;
   const focus = document.activeElement && document.activeElement.id;
-  const caret = focus && document.activeElement.selectionStart;
+  const caret = focus ? document.activeElement.selectionStart : null;
   const selectionEnd = focus && document.activeElement.selectionEnd;
   const selectionDirection = focus && document.activeElement.selectionDirection;
+  const active = document.activeElement;
+  const control = !focus && active?.dataset?.act ? controlKey(active) : null;
+  const occurrence = control ? controlsWithKey(control).indexOf(active) : -1;
 
   $("head").innerHTML = renderHead(STATE);
   view.innerHTML = UI.page === "main"     ? renderMain(STATE)
@@ -527,9 +540,10 @@ function render(){
 
   // Keep the reader's place and the cursor across the 1 s rerender.
   view.scrollTop = scroll;
-  if (focus && $(focus)){
-    $(focus).focus();
-    if (caret != null) $(focus).setSelectionRange(caret, selectionEnd, selectionDirection);
+  const target = focus ? $(focus) : control ? controlsWithKey(control)[occurrence] : null;
+  if (target && !target.disabled){
+    target.focus({ preventScroll:true });
+    if (caret != null) target.setSelectionRange(caret, selectionEnd, selectionDirection);
   }
   if (!LIVE) renderTray(STATE);
   refreshTip();
@@ -661,7 +675,7 @@ function estLabel(j){
 
 /** Where it runs, then the command beneath. */
 function jobName(j){
-  return `<span class="name two" data-act="expand" data-id="${j.id}" title="${esc(j.full_cmd)}">
+  return `<span class="name two" role="button" tabindex="0" aria-expanded="${UI.expanded.has(j.id)}" data-act="expand" data-id="${j.id}" title="${esc(j.full_cmd)}">
     <b>${esc(j.label)}</b><span class="cmd">${esc(j.cmd)}</span>${
     j.now ? `<span class="now" title="The largest process running inside it now">↳ ${esc(j.now)}</span>` : ""}</span>`;
 }
@@ -773,7 +787,7 @@ function outcomeTag(r){
 
 function renderHistory(S){
   return pageHead("History") + (S.history.length ? S.history.map(r => `
-    <div class="hrow" data-act="profile" data-key="${esc(r.key)}">
+    <div class="hrow" role="button" tabindex="0" data-act="profile" data-key="${esc(r.key)}">
       <div class="l1"><span class="name"><b>${esc(r.label)}</b> <span class="dim">· ${esc(r.cmd)}</span></span>${outcomeTag(r)}</div>
       <div class="l2 num">${dur(r.duration_s)} · peak ${gb(r.peak)} / est ${gb(r.estimate)} GB${r.tuned ? ` · ${r.tuned.workers}/${r.tuned.default} workers` : ""}${r.ahead_of ? ` · started ahead of ${esc(r.ahead_of)}` : ""} · ${ago(r.ended_ago_s)}
         ${r.guard && r.guard.why ? `<br>${esc(r.guard.why)}` : ""}</div>
@@ -816,7 +830,7 @@ function renderCommands(S){
       ${cell(dur(t.wait_s), "waiting", "Time in the queue before starting", t.wait_s ? "" : "zero")}
       ${cell(gbh(t.gb_h), "GB·h", "Peak memory × run time, summed: the memory held from other work")}
     </div>` + rows.map(r => `
-    <div class="hrow crow" data-act="profile" data-key="${esc(r.key)}">
+    <div class="hrow crow" role="button" tabindex="0" data-act="profile" data-key="${esc(r.key)}">
       <div class="l1"><span class="name">${keyName(r.key)}</span>
         <span class="n num"><b>${r.runs}</b> run${r.runs === 1 ? "" : "s"}</span></div>
       <div class="cbar"><i style="width:${(r[key] / top * 100).toFixed(1)}%"></i></div>
@@ -890,7 +904,7 @@ function renderOthers(S){
     const top = o.top || [];
     return `
     <div class="orow ${open ? "open" : ""}">
-      <div class="l1 num"><span class="name" data-act="expand_app" data-name="${esc(o.name)}">${esc(o.name)}</span>
+      <div class="l1 num"><span class="name" role="button" tabindex="0" aria-expanded="${open}" data-act="expand_app" data-name="${esc(o.name)}">${esc(o.name)}</span>
         <span class="dim">${o.procs} proc${o.procs === 1 ? "" : "s"}</span><b>${gb(o.bytes)} GB</b></div>
       <div class="bar"><div style="width:${o.bytes / max * 100}%"></div></div>
       ${open ? `<div class="odetail">
@@ -917,9 +931,9 @@ const KILL_MODES = [
 
 function stepper(key, value, step, fmt, min, max){
   return `<span class="stepper num">
-    <button data-act="set" data-key="${key}" data-val="${Math.max(min, value - step)}" ${value <= min ? "disabled" : ""}>−</button>
+    <button data-act="set" data-key="${key}" data-step="down" data-val="${Math.max(min, value - step)}" ${value <= min ? "disabled" : ""}>−</button>
     <span>${fmt(value)}</span>
-    <button data-act="set" data-key="${key}" data-val="${Math.min(max, value + step)}" ${value >= max ? "disabled" : ""}>+</button>
+    <button data-act="set" data-key="${key}" data-step="up" data-val="${Math.min(max, value + step)}" ${value >= max ? "disabled" : ""}>+</button>
   </span>`;
 }
 
@@ -975,21 +989,21 @@ function renderSettings(S){
       <div class="ctl" style="margin-top:0;justify-content:space-between">
         <div><div class="k">Shrink jobs to fit</div>
           <div class="h">When the next job doesn't fit, start it with fewer workers (vitest, turbo, cargo) instead of waiting. Never below 2, and never when you set a worker count yourself.</div></div>
-        <button class="toggle ${c.tune ? "on" : ""}" data-act="set" data-key="tune" data-val="${!c.tune}"></button>
+        <button class="toggle ${c.tune ? "on" : ""}" role="switch" aria-label="Shrink jobs to fit" aria-checked="${c.tune}" data-act="set" data-key="tune" data-val="${!c.tune}"></button>
       </div>
     </div>
     <div class="set">
       <div class="ctl" style="margin-top:0;justify-content:space-between">
         <div><div class="k">Let short jobs go first</div>
           <div class="h">While the next job waits on memory, start a later one that fits and should finish before it could start. At most ${c.backfill_skips ?? 3} times or ${dur(c.backfill_wait_s ?? 300)}, then the queue waits for it.</div></div>
-        <button class="toggle ${c.backfill ? "on" : ""}" data-act="set" data-key="backfill" data-val="${!c.backfill}"></button>
+        <button class="toggle ${c.backfill ? "on" : ""}" role="switch" aria-label="Let short jobs go first" aria-checked="${c.backfill}" data-act="set" data-key="backfill" data-val="${!c.backfill}"></button>
       </div>
     </div>
     <div class="set">
       <div class="ctl" style="margin-top:0;justify-content:space-between">
         <div><div class="k">Start at login</div>
           ${c.login_managed_by_brew ? `<div class="h">Managed by Homebrew: <span class="mono">brew services stop headroom</span> turns it off.</div>` : ""}</div>
-        <button class="toggle ${c.start_at_login ? "on" : ""}" data-act="set" data-key="start_at_login" data-val="${!c.start_at_login}"${c.login_managed_by_brew ? " disabled" : ""}></button>
+        <button class="toggle ${c.start_at_login ? "on" : ""}" role="switch" aria-label="Start at login" aria-checked="${c.start_at_login}" data-act="set" data-key="start_at_login" data-val="${!c.start_at_login}"${c.login_managed_by_brew ? " disabled" : ""}></button>
       </div>
     </div>
     <div class="set">
@@ -1125,6 +1139,12 @@ $("pop").addEventListener("input", (e) => {
   render();
 });
 $("pop").addEventListener("keydown", (e) => {
+  const button = e.target.closest?.('[role="button"][data-act]');
+  if (button && (e.key === "Enter" || e.key === " ")){
+    e.preventDefault();
+    if (!e.repeat) button.click();
+    return;
+  }
   if (e.key === "Enter" && e.target.dataset.draft === "pattern"){
     const p = UI.drafts.pattern.trim();
     if (p){ UI.drafts.pattern = ""; send({ cmd:"add_pattern", pattern: p }); }

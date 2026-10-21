@@ -53,7 +53,11 @@ function actionable(html) {
     for (const a of attrs.matchAll(/data-([\w-]+)="([^"]*)"/g)) {
       dataset[a[1].replace(/-(\w)/g, (_, c) => c.toUpperCase())] = unescape(a[2]);
     }
-    out.push({ tag: m[1], dataset, disabled: /\sdisabled(\s|$|=)/.test(attrs) });
+    out.push({ tag: m[1], dataset, disabled: /\sdisabled(\s|$|=)/.test(attrs),
+      role: /\srole="([^"]*)"/.exec(attrs)?.[1],
+      tabIndex: /\stabindex="([^"]*)"/.exec(attrs)?.[1],
+      label: /\saria-label="([^"]*)"/.exec(attrs)?.[1],
+      checked: /\saria-checked="([^"]*)"/.exec(attrs)?.[1] });
   }
   return out;
 }
@@ -120,6 +124,16 @@ function loadUI() {
     },
     key(key, draft) {
       fire('keydown', { key, target: { dataset: { draft } } });
+    },
+    press(want, key) {
+      const els = find(want);
+      if (els.length !== 1) throw new Error(`press ${JSON.stringify(want)}: ${els.length} matches`);
+      const el = els[0];
+      let prevented = false;
+      el.closest = () => el.role === 'button' ? el : null;
+      el.click = () => fire('click', { target: { closest: () => el } });
+      fire('keydown', { key, target: el, preventDefault() { prevented = true; } });
+      return prevented;
     },
   });
 }

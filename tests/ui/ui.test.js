@@ -64,6 +64,57 @@ test('state updates preserve the selected text and direction in both settings in
   }
 });
 
+test('state updates restore focus to replacement controls even when their next value changes', () => {
+  const query = document.querySelectorAll;
+  try {
+    for (const data of [
+      { act: 'hold' },
+      { act: 'set', key: 'tune', val: 'false' },
+      { act: 'set', key: 'headroom', step: 'up', val: '2' },
+    ]) {
+      const before = { id: '', dataset: data };
+      const after = { dataset: { ...data, ...('val' in data ? { val: data.val === 'false' ? 'true' : '3' } : {}) },
+        focus() { document.activeElement = this; } };
+      let queries = 0;
+      document.activeElement = before;
+      document.querySelectorAll = () => [queries++ ? after : before];
+      ui.setState(busy);
+      if (document.activeElement !== after) throw new Error('control focus was lost');
+    }
+  } finally {
+    document.querySelectorAll = query;
+    document.activeElement = null;
+  }
+});
+
+test('job details and command profiles open from keyboard controls', () => {
+  ui.setState(busy);
+  const action = { act: 'expand', id: busy.running[0].id };
+  eq(ui.find(action)[0].tabIndex, '0');
+  eq(ui.press(action, 'Enter'), true);
+  eq(ui.UI.expanded.has(busy.running[0].id), true);
+  eq(ui.press(action, ' '), true);
+  eq(ui.UI.expanded.has(busy.running[0].id), false);
+  ui.setState(history);
+  ui.click({ act: 'goto', page: 'commands' });
+  const row = ui.find({ act: 'profile' })[0];
+  eq(row.tabIndex, '0');
+  eq(ui.press({ act: 'profile', key: row.dataset.key }, 'Enter'), true);
+  eq(ui.UI.page, 'profile');
+  eq(ui.UI.profileKey, row.dataset.key);
+});
+
+test('settings switches expose their names and current states', () => {
+  ui.setState(busy);
+  ui.click({ act: 'goto', page: 'settings' }, 0);
+  for (const [key, label] of [['tune', 'Shrink jobs to fit'],
+    ['backfill', 'Let short jobs go first'], ['start_at_login', 'Start at login']]) {
+    const control = ui.find({ act: 'set', key })[0];
+    eq([control.role, control.label, control.checked],
+       ['switch', label, String(busy.settings[key])]);
+  }
+});
+
 // ── the main view ─────────────────────────────────────────────────────────
 
 test('running and queued jobs are listed with why the queue waits', () => {
