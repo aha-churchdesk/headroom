@@ -52,8 +52,8 @@
       "cmd": "vitest run",
       "key": "~/Projects/work-scheduler-mcp|headroom|vitest run",
       "duration_s": 4,
-      "peak": 538542824,
-      "estimate": 423127920,
+      "peak": 538510056,
+      "estimate": 423115044,
       "exit": 0,
       "ended_ago_s": 0,
       "tuned": {
@@ -69,10 +69,10 @@
       "cmd": "vitest run",
       "key": "~/Projects/work-scheduler-mcp|headroom|vitest run",
       "duration_s": 4,
-      "peak": 538526440,
+      "peak": 538510056,
       "estimate": 1610612736,
       "exit": 0,
-      "ended_ago_s": 4,
+      "ended_ago_s": 5,
       "tuned": null,
       "ahead_of": null,
       "guard": null
@@ -82,10 +82,11 @@
     "runs": 2,
     "failed": 0,
     "killed": 0,
+    "waited": 0,
     "waited_s": 0,
     "longest_wait_s": 0,
     "wait_p50_s": 0,
-    "wait_p99_s": 0,
+    "wait_p95_s": 0,
     "shrunk": 1,
     "went_first": 0,
     "more": false
@@ -98,8 +99,8 @@
         "failed": 0,
         "run_s": 8,
         "wait_s": 0,
-        "gb_h": 0.0011732313368055555,
-        "peak": 538542824
+        "gb_h": 0.0011775716145833333,
+        "peak": 538510056
       },
       "count": 1,
       "rows": [
@@ -108,8 +109,8 @@
           "failed": 0,
           "run_s": 8,
           "wait_s": 0,
-          "gb_h": 0.0011732313368055555,
-          "peak": 538542824,
+          "gb_h": 0.0011775716145833333,
+          "peak": 538510056,
           "key": "~/Projects/work-scheduler-mcp|headroom|vitest run"
         }
       ]
@@ -121,8 +122,8 @@
         "failed": 0,
         "run_s": 8,
         "wait_s": 0,
-        "gb_h": 0.0011732313368055555,
-        "peak": 538542824
+        "gb_h": 0.0011775716145833333,
+        "peak": 538510056
       },
       "count": 1,
       "rows": [
@@ -131,8 +132,8 @@
           "failed": 0,
           "run_s": 8,
           "wait_s": 0,
-          "gb_h": 0.0011732313368055555,
-          "peak": 538542824,
+          "gb_h": 0.0011775716145833333,
+          "peak": 538510056,
           "key": "~/Projects/work-scheduler-mcp|headroom|vitest run"
         }
       ]
@@ -144,8 +145,8 @@
         "failed": 0,
         "run_s": 8,
         "wait_s": 0,
-        "gb_h": 0.0011732313368055555,
-        "peak": 538542824
+        "gb_h": 0.0011775716145833333,
+        "peak": 538510056
       },
       "count": 1,
       "rows": [
@@ -154,8 +155,8 @@
           "failed": 0,
           "run_s": 8,
           "wait_s": 0,
-          "gb_h": 0.0011732313368055555,
-          "peak": 538542824,
+          "gb_h": 0.0011775716145833333,
+          "peak": 538510056,
           "key": "~/Projects/work-scheduler-mcp|headroom|vitest run"
         }
       ]
@@ -164,10 +165,10 @@
   "profiles": {
     "~/Projects/work-scheduler-mcp|headroom|vitest run": {
       "peaks": [
-        538526440,
-        538542824
+        538510056,
+        538510056
       ],
-      "p90": 895899461,
+      "p90": 895877616,
       "median_s": 4,
       "samples": 2,
       "runs": 2,

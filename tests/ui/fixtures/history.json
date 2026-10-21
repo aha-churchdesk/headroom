@@ -18,7 +18,7 @@
   "queued": [],
   "banners": [
     {
-      "id": "h4-1792590127",
+      "id": "h4-1792600675",
       "kind": "gave_up",
       "job_id": "4",
       "label": "sc-49201",
@@ -26,7 +26,7 @@
       "why": "memory still critical 1 s after freezing; peak 0.2 GB vs est 1.5 GB. The agent was told: exit 137."
     },
     {
-      "id": "h4-1792590123",
+      "id": "h4-1792600670",
       "kind": "requeued",
       "job_id": "4",
       "label": "sc-49201",
@@ -40,11 +40,11 @@
       "label": "sc-49201",
       "cmd": "headroom-hog",
       "key": "~/Projects/work-scheduler-mcp|headroom|headroom-hog",
-      "duration_s": 3,
-      "peak": 216252920,
+      "duration_s": 4,
+      "peak": 216236536,
       "estimate": 1610612736,
       "exit": null,
-      "ended_ago_s": 1,
+      "ended_ago_s": 2,
       "tuned": null,
       "ahead_of": null,
       "guard": {
@@ -58,10 +58,10 @@
       "cmd": "headroom-hog",
       "key": "~/Projects/work-scheduler-mcp|headroom|headroom-hog",
       "duration_s": 3,
-      "peak": 216252920,
+      "peak": 216236536,
       "estimate": 1610612736,
       "exit": null,
-      "ended_ago_s": 5,
+      "ended_ago_s": 7,
       "tuned": null,
       "ahead_of": null,
       "guard": {
@@ -78,7 +78,7 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": null,
-      "ended_ago_s": 9,
+      "ended_ago_s": 11,
       "tuned": null,
       "ahead_of": null,
       "guard": {
@@ -95,7 +95,7 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": 0,
-      "ended_ago_s": 9,
+      "ended_ago_s": 11,
       "tuned": null,
       "ahead_of": null,
       "guard": null
@@ -109,7 +109,7 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": 3,
-      "ended_ago_s": 9,
+      "ended_ago_s": 11,
       "tuned": null,
       "ahead_of": null,
       "guard": null
@@ -119,10 +119,11 @@
     "runs": 5,
     "failed": 1,
     "killed": 2,
+    "waited": 0,
     "waited_s": 0,
     "longest_wait_s": 0,
     "wait_p50_s": 0,
-    "wait_p99_s": 0,
+    "wait_p95_s": 0,
     "shrunk": 0,
     "went_first": 0,
     "more": false
@@ -133,30 +134,21 @@
       "total": {
         "runs": 4,
         "failed": 2,
-        "run_s": 7,
+        "run_s": 8,
         "wait_s": 0,
-        "gb_h": 0.0003835720486111111,
-        "peak": 216252920
+        "gb_h": 0.00043836805555555556,
+        "peak": 216236536
       },
       "count": 4,
       "rows": [
         {
           "runs": 1,
           "failed": 1,
-          "run_s": 6,
+          "run_s": 7,
           "wait_s": 0,
-          "gb_h": 0.0003835720486111111,
-          "peak": 216252920,
+          "gb_h": 0.00043836805555555556,
+          "peak": 216236536,
           "key": "~/Projects/work-scheduler-mcp|headroom|headroom-hog"
-        },
-        {
-          "runs": 1,
-          "failed": 0,
-          "run_s": 0,
-          "wait_s": 0,
-          "gb_h": 0.0,
-          "peak": 0,
-          "key": "~/Projects/work-scheduler-mcp|headroom|echo ok"
         },
         {
           "runs": 1,
@@ -166,6 +158,15 @@
           "gb_h": 0.0,
           "peak": 0,
           "key": "~/Projects/work-scheduler-mcp|headroom|exit 3"
+        },
+        {
+          "runs": 1,
+          "failed": 0,
+          "run_s": 0,
+          "wait_s": 0,
+          "gb_h": 0.0,
+          "peak": 0,
+          "key": "~/Projects/work-scheduler-mcp|headroom|echo ok"
         },
         {
           "runs": 1,
@@ -183,30 +184,21 @@
       "total": {
         "runs": 4,
         "failed": 2,
-        "run_s": 7,
+        "run_s": 8,
         "wait_s": 0,
-        "gb_h": 0.0003835720486111111,
-        "peak": 216252920
+        "gb_h": 0.00043836805555555556,
+        "peak": 216236536
       },
       "count": 4,
       "rows": [
         {
           "runs": 1,
           "failed": 1,
-          "run_s": 6,
+          "run_s": 7,
           "wait_s": 0,
-          "gb_h": 0.0003835720486111111,
-          "peak": 216252920,
+          "gb_h": 0.00043836805555555556,
+          "peak": 216236536,
           "key": "~/Projects/work-scheduler-mcp|headroom|headroom-hog"
-        },
-        {
-          "runs": 1,
-          "failed": 0,
-          "run_s": 0,
-          "wait_s": 0,
-          "gb_h": 0.0,
-          "peak": 0,
-          "key": "~/Projects/work-scheduler-mcp|headroom|echo ok"
         },
         {
           "runs": 1,
@@ -216,6 +208,15 @@
           "gb_h": 0.0,
           "peak": 0,
           "key": "~/Projects/work-scheduler-mcp|headroom|exit 3"
+        },
+        {
+          "runs": 1,
+          "failed": 0,
+          "run_s": 0,
+          "wait_s": 0,
+          "gb_h": 0.0,
+          "peak": 0,
+          "key": "~/Projects/work-scheduler-mcp|headroom|echo ok"
         },
         {
           "runs": 1,
@@ -233,30 +234,21 @@
       "total": {
         "runs": 4,
         "failed": 2,
-        "run_s": 7,
+        "run_s": 8,
         "wait_s": 0,
-        "gb_h": 0.0003835720486111111,
-        "peak": 216252920
+        "gb_h": 0.00043836805555555556,
+        "peak": 216236536
       },
       "count": 4,
       "rows": [
         {
           "runs": 1,
           "failed": 1,
-          "run_s": 6,
+          "run_s": 7,
           "wait_s": 0,
-          "gb_h": 0.0003835720486111111,
-          "peak": 216252920,
+          "gb_h": 0.00043836805555555556,
+          "peak": 216236536,
           "key": "~/Projects/work-scheduler-mcp|headroom|headroom-hog"
-        },
-        {
-          "runs": 1,
-          "failed": 0,
-          "run_s": 0,
-          "wait_s": 0,
-          "gb_h": 0.0,
-          "peak": 0,
-          "key": "~/Projects/work-scheduler-mcp|headroom|echo ok"
         },
         {
           "runs": 1,
@@ -266,6 +258,15 @@
           "gb_h": 0.0,
           "peak": 0,
           "key": "~/Projects/work-scheduler-mcp|headroom|exit 3"
+        },
+        {
+          "runs": 1,
+          "failed": 0,
+          "run_s": 0,
+          "wait_s": 0,
+          "gb_h": 0.0,
+          "peak": 0,
+          "key": "~/Projects/work-scheduler-mcp|headroom|echo ok"
         },
         {
           "runs": 1,

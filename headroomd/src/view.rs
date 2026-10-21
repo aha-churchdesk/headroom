@@ -78,23 +78,35 @@ fn percentile(sorted: &[u64], pct: usize) -> u64 {
     }
 }
 
+/// A job that spent less than this in the queue started right away; the
+/// wrapper doesn't mention the wait either.
+const WAITED_MS: u64 = 1000;
+
 /// What finished in the day before `wall`, from the history (newest
 /// first). The history keeps at most `HISTORY_MAX` runs; when all of them
 /// are inside the day the counts are a floor, and `more` says so.
+///
+/// Most jobs never wait, so wait percentiles over every run would read 0s.
+/// They are over the runs that waited, and `waited` says how many did.
 fn last_day(history: &[HistoryEntry], wall: u64) -> Value {
     let since = wall.saturating_sub(HISTORY_DAY_S);
     let recent: Vec<&HistoryEntry> = history.iter().filter(|h| h.ended_at >= since).collect();
     let count = |f: &dyn Fn(&HistoryEntry) -> bool| recent.iter().filter(|h| f(h)).count();
-    let mut waits: Vec<u64> = recent.iter().map(|h| h.waited_ms).collect();
+    let mut waits: Vec<u64> = recent
+        .iter()
+        .filter(|h| h.outcome != Outcome::Cancelled && h.waited_ms >= WAITED_MS)
+        .map(|h| h.waited_ms)
+        .collect();
     waits.sort_unstable();
     json!({
         "runs": count(&|h| h.outcome != Outcome::Cancelled),
         "failed": count(&|h| h.outcome == Outcome::Exited && h.exit != Some(0)),
         "killed": count(&|h| matches!(h.outcome, Outcome::Requeued | Outcome::GaveUp)),
-        "waited_s": secs(recent.iter().map(|h| h.waited_ms).sum()),
+        "waited": waits.len(),
+        "waited_s": secs(waits.iter().sum()),
         "longest_wait_s": secs(waits.last().copied().unwrap_or(0)),
         "wait_p50_s": secs(percentile(&waits, 50)),
-        "wait_p99_s": secs(percentile(&waits, 99)),
+        "wait_p95_s": secs(percentile(&waits, 95)),
         "shrunk": count(&|h| h.tuned.is_some()),
         "went_first": count(&|h| h.ahead_of.is_some()),
         "more": history.len() >= HISTORY_MAX && recent.len() == history.len(),
@@ -765,6 +777,7 @@ mod tests {
             first,
             ended(70_000, Outcome::Cancelled, None, 20_000),
             ended(65_000, Outcome::Exited, None, 0),
+            ended(64_500, Outcome::Exited, Some(0), WAITED_MS - 1),
             ended(64_000, Outcome::GaveUp, None, 0),
             ended(wall - HISTORY_DAY_S, Outcome::Exited, Some(0), 1_000),
             ended(wall - HISTORY_DAY_S - 1, Outcome::Exited, Some(2), 500_000),
@@ -772,9 +785,9 @@ mod tests {
         assert_eq!(
             last_day(&h, wall),
             json!({
-                "runs": 6, "failed": 2, "killed": 2,
-                "waited_s": 141, "longest_wait_s": 90,
-                "wait_p50_s": 1, "wait_p99_s": 90,
+                "runs": 7, "failed": 2, "killed": 2,
+                "waited": 3, "waited_s": 121, "longest_wait_s": 90,
+                "wait_p50_s": 30, "wait_p95_s": 90,
                 "shrunk": 1, "went_first": 1, "more": false,
             })
         );
@@ -798,8 +811,12 @@ mod tests {
     fn last_day_says_when_the_history_is_too_short_to_cover_it() {
         let quiet = last_day(&[], 5_000);
         assert_eq!(
-            (quiet["runs"].as_u64(), quiet["waited_s"].as_u64()),
-            (Some(0), Some(0))
+            (
+                quiet["runs"].as_u64(),
+                quiet["waited"].as_u64(),
+                quiet["wait_p95_s"].as_u64()
+            ),
+            (Some(0), Some(0), Some(0))
         );
         assert_eq!(quiet["more"], false);
         let full: Vec<_> = (0..HISTORY_MAX as u64)

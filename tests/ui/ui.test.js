@@ -130,7 +130,7 @@ test('a head passed over says how often and until when; the job that went first 
 
 test('a strip above what is running sums up the last 24 hours', () => {
   ui.setState(history);
-  has(ui.view(), 'Last 24h 5 runs 3 failed 0s wait p50 0s wait p99 0 shrunk 0 went first Running');
+  has(ui.view(), 'Last 24h 5 runs 3 failed 0s wait p50 0s wait p95 0 shrunk 0 went first');
   has(ui.html(), '1 exited with an error, 2 killed to free memory');
   ui.setState(tunedHistory);
   has(ui.view(), '2 runs 0 failed');
@@ -139,13 +139,24 @@ test('a strip above what is running sums up the last 24 hours', () => {
   has(ui.view(), '1 went first');
 });
 
-test('the strip shows the median and 99th percentile wait, and the totals on hover', () => {
-  ui.setState({ ...history, last_day: { ...history.last_day, runs: 1, failed: 0, killed: 0,
-    waited_s: 254, longest_wait_s: 131, wait_p50_s: 12, wait_p99_s: 131 } });
-  has(ui.view(), '1 run 0 failed 12s wait p50 2m11 wait p99');
-  has(ui.html(), 'Time in the queue before starting: 4m14 in all, longest 2m11');
+test('the strip shows the waits of the jobs that waited, and how many did', () => {
+  const day = (d) => ui.setState({ ...history, last_day: { ...history.last_day, ...d } });
+  day({ runs: 426, failed: 0, killed: 0, waited: 44,
+    waited_s: 254, longest_wait_s: 131, wait_p50_s: 12, wait_p95_s: 131 });
+  has(ui.view(), '426 runs 0 failed 12s wait p50 2m11 wait p95');
+  has(ui.view(), '44 of 426 jobs waited in the queue (10%)');
+  has(ui.html(), 'Of the 44 that waited. Time in the queue before starting: 4m14 in all, longest 2m11');
+  day({ runs: 1000, waited: 3 });
+  has(ui.view(), '3 of 1000 jobs waited in the queue (<1%)');
+  day({ runs: 1, waited: 1 });
+  has(ui.view(), '1 of 1 job waited in the queue (100%)');
+  day({ runs: 2000, more: true, waited: 20 });
+  has(ui.view(), '20 of 2000+ jobs waited');
   ui.setState(history);
-  has(ui.html(), 'No job had to wait');
+  has(ui.view(), 'No job had to wait');
+  day({ runs: 0, waited: 0 });
+  lacks(ui.view(), 'waited in the queue');
+  lacks(ui.view(), 'No job had to wait');
 });
 
 test('the commands page ranks what ran by time, with runs, memory and failures', () => {
