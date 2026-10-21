@@ -239,6 +239,7 @@ button:disabled{ cursor:default; opacity:.4; }
 .job .name.two{ display:flex; flex-direction:column; gap:1px; }
 .job .name.two > *{ overflow:hidden; text-overflow:ellipsis; }
 .job .name.two .cmd{ font-size:11.5px; }
+.job .name.two .now{ font-size:11px; color:var(--text-faint); font-family:ui-monospace, "SF Mono", Menlo, monospace; }
 /* Queued rows: the estimate, then how long it has waited, beside the two-line name. */
 .job .mem.two{ display:flex; flex-direction:column; align-items:flex-end; gap:1px; }
 .job .name .cmd{ color:var(--text-dim); }
@@ -737,7 +738,8 @@ function estLabel(j){
 /** Where it runs, then the command beneath. */
 function jobName(j){
   return `<span class="name two" data-act="expand" data-id="${j.id}" title="${esc(j.full_cmd)}">
-    <b>${esc(j.label)}</b><span class="cmd">${esc(j.cmd)}</span></span>`;
+    <b>${esc(j.label)}</b><span class="cmd">${esc(j.cmd)}</span>${
+    j.now ? `<span class="now" title="The largest process running inside it now">↳ ${esc(j.now)}</span>` : ""}</span>`;
 }
 
 function marks(j){
@@ -1326,7 +1328,7 @@ function job(o){
 }
 
 const J = {
-  vitest: () => job({ id:"j41", label:"sc-49123", cmd:"vitest run", key:"browser-churchdesk · vitest run",
+  vitest: () => job({ id:"j41", label:"sc-49123", cmd:"vitest run", now:"vitest run --pool=forks", key:"browser-churchdesk · vitest run",
     full_cmd:"cd apps/web && pnpm vitest run src/features/calendar", cwd:"~/Projects/browser-churchdesk.worktrees/sc-49123",
     session:"a7d0…2e", estimate:G(4.1), footprint:G(3.8), peak:G(3.9), samples:10, elapsed_s:134, cpu_pct:380, procs:9 }),
   tsc: () => job({ id:"j42", label:"fix-main", cmd:"tsc --noEmit", key:"fix-main · tsc --noEmit", low:true,

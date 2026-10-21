@@ -5,23 +5,25 @@
 //! misleading, because macOS fills spare memory with file cache that it
 //! drops the moment someone needs it.
 //!
-//! Per job, the figure is `phys_footprint` summed over the process group:
-//! what Activity Monitor's Memory column shows. RSS would double-count
-//! shared pages across a test runner's workers.
+//! Per job, the figure is `phys_footprint` summed over its processes: its
+//! process group and every descendant, since turbo and lefthook move their
+//! children to groups of their own (see `proctree`). That is what Activity
+//! Monitor's Memory column shows. RSS would double-count shared pages across
+//! a test runner's workers.
 
 #![allow(deprecated)] // libc points mach calls at the mach2 crate; these are stable.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::time::Instant;
 
 use headroom_core::model::{Bytes, Pressure, Snapshot};
+use headroom_core::proctree::{self, Proc};
 use headroom_core::scheduler::Usage;
 
 use crate::view::{AppUsage, ProcInfo};
 
 const PROC_ALL_PIDS: u32 = 1;
-const PROC_PGRP_ONLY: u32 = 2;
 
 fn sysctl<T: Copy + Default>(name: &str) -> Option<T> {
     let name = CString::new(name).ok()?;
@@ -175,9 +177,10 @@ impl Sampler {
         pct
     }
 
-    /// Footprint, CPU and process count for each process group. A group
-    /// with no processes left is absent from the result.
+    /// Footprint, CPU and process count for each job, by its process group.
+    /// A job with no processes left is absent from the result.
     pub fn groups(&mut self, pgids: &[i32]) -> HashMap<i32, Usage> {
+        let table = if pgids.is_empty() { vec![] } else { procs() };
         let now = Instant::now();
         let elapsed_ns = self
             .prev_at
@@ -187,7 +190,8 @@ impl Sampler {
         for &pgid in pgids {
             let mut u = Usage::default();
             let mut cpu_delta = 0u64;
-            for pid in pids_in_group(pgid) {
+            let mut largest: Option<(Bytes, i32)> = None;
+            for pid in proctree::job_pids(&table, pgid) {
                 let mut ri: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
                 let rc = unsafe {
                     libc::proc_pid_rusage(
@@ -201,6 +205,9 @@ impl Sampler {
                 }
                 u.procs += 1;
                 u.footprint += ri.ri_phys_footprint;
+                if pid != pgid && largest.is_none_or(|(b, _)| ri.ri_phys_footprint > b) {
+                    largest = Some((ri.ri_phys_footprint, pid));
+                }
                 let ns = (ri.ri_user_time + ri.ri_system_time) * self.timebase.0 / self.timebase.1;
                 if let Some(prev) = self.prev_cpu.get(&pid) {
                     cpu_delta += ns.saturating_sub(*prev);
@@ -213,6 +220,10 @@ impl Sampler {
                 } else {
                     cpu_delta as f64 / elapsed_ns as f64 * 100.0
                 };
+                u.now = largest
+                    .and_then(|(_, pid)| args(pid))
+                    .map(|a| short_cmd(&a));
+                u.groups = proctree::job_groups(&table, pgid);
                 out.insert(pgid, u);
             }
         }
@@ -255,6 +266,11 @@ fn exe_path(pid: i32) -> Option<String> {
 }
 
 fn ppid(pid: i32) -> Option<i32> {
+    bsd(pid).map(|p| p.ppid)
+}
+
+/// A process's parent and group. Only for processes we may inspect.
+fn bsd(pid: i32) -> Option<Proc> {
     let mut info: libc::proc_bsdshortinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_bsdshortinfo>() as libc::c_int;
     let n = unsafe {
@@ -266,7 +282,40 @@ fn ppid(pid: i32) -> Option<i32> {
             size,
         )
     };
-    (n == size).then_some(info.pbsi_ppid as i32)
+    (n == size).then_some(Proc {
+        pid,
+        ppid: info.pbsi_ppid as i32,
+        pgid: info.pbsi_pgid as i32,
+    })
+}
+
+/// Every process we may inspect, with its parent and group.
+pub fn procs() -> Vec<Proc> {
+    all_pids().into_iter().filter_map(bsd).collect()
+}
+
+/// Interpreters whose first argument is the program that matters.
+const INTERPRETERS: &[&str] = &[
+    "node", "bun", "deno", "python", "python3", "ruby", "sh", "bash", "zsh",
+];
+
+/// A command line for people: the program without its directory, and a
+/// script run by node, python or a shell shown as the script.
+/// `node /…/bin/yarn run typecheck` reads `yarn run typecheck`.
+pub fn short_cmd(args: &[String]) -> String {
+    let base = |s: &str| s.rsplit('/').next().unwrap_or(s).to_string();
+    let mut words: Vec<String> = args.to_vec();
+    if words.len() > 1
+        && INTERPRETERS.contains(&base(&words[0]).as_str())
+        && !words[1].starts_with('-')
+    {
+        words.remove(0);
+    }
+    match words.first_mut() {
+        Some(w) => *w = base(w),
+        None => return String::new(),
+    }
+    headroom_core::shell::join(&words)
 }
 
 /// The process's working directory. Only for processes we may inspect.
@@ -410,11 +459,21 @@ pub fn all_pids() -> Vec<i32> {
 /// the kernel's) are skipped. The largest apps get their largest processes
 /// listed in detail.
 pub fn top_apps(pids: &[i32], skip_pgids: &[i32], limit: usize) -> Vec<AppUsage> {
+    // A job's processes include descendants in other groups.
+    let skip: HashSet<i32> = if skip_pgids.is_empty() {
+        HashSet::new()
+    } else {
+        let table = procs();
+        skip_pgids
+            .iter()
+            .flat_map(|&g| proctree::job_pids(&table, g))
+            .collect()
+    };
     // (pid, footprint, executable path)
     type Proc = (i32, Bytes, String);
     let mut by_app: HashMap<String, Vec<Proc>> = HashMap::new();
     for &pid in pids {
-        if skip_pgids.contains(&unsafe { libc::getpgid(pid) }) {
+        if skip.contains(&pid) {
             continue;
         }
         let (Some(bytes), Some(path)) = (footprint(pid), exe_path(pid)) else {
@@ -445,10 +504,6 @@ pub fn top_apps(pids: &[i32], skip_pgids: &[i32], limit: usize) -> Vec<AppUsage>
             }
         })
         .collect()
-}
-
-fn pids_in_group(pgid: i32) -> Vec<i32> {
-    list_pids(PROC_PGRP_ONLY, pgid as u32)
 }
 
 fn list_pids(kind: u32, arg: u32) -> Vec<i32> {
@@ -530,6 +585,63 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
         assert!(s.groups(&[pgid]).is_empty());
+        assert_eq!(u.now, None, "nothing inside it but itself");
+    }
+
+    #[test]
+    fn a_child_in_a_group_of_its_own_still_counts_and_is_named() {
+        // `set -m` puts the background job in a new process group, as
+        // turbo does with its tasks.
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "set -m; /bin/sleep 7 & wait"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pgid = child.id() as i32;
+        let mut s = Sampler::new();
+        let mut u = None;
+        for _ in 0..50 {
+            u = s.groups(&[pgid]).remove(&pgid).filter(|u| u.procs == 2);
+            if u.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let u = u.expect("the shell and its sleep");
+        assert_eq!(u.groups.len(), 2, "{:?}", u.groups);
+        assert_eq!(u.groups[0], pgid);
+        assert_eq!(u.now.as_deref(), Some("sleep 7"));
+        // Kept out of Other apps along with the job.
+        let sleeper = procs().into_iter().find(|p| p.pgid == u.groups[1]).unwrap();
+        assert!(top_apps(&[sleeper.pid], &[pgid], 10).is_empty());
+        assert!(!top_apps(&[sleeper.pid], &[], 10).is_empty());
+        unsafe { libc::killpg(u.groups[1], libc::SIGKILL) };
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn commands_are_shown_by_program_or_script_name() {
+        let a = |v: &[&str]| short_cmd(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            a(&["/opt/node/bin/node", "/x/bin/yarn", "run", "typecheck"]),
+            "yarn run typecheck"
+        );
+        assert_eq!(
+            a(&["/bin/sh", "/tmp/xfs-1/tsc", "--noEmit"]),
+            "tsc --noEmit"
+        );
+        assert_eq!(
+            a(&["/usr/bin/git", "commit", "-m", "two words"]),
+            "git commit -m 'two words'"
+        );
+        // An interpreter's own flags: it is the program.
+        assert_eq!(
+            a(&["node", "--max-old-space-size=4096"]),
+            "node --max-old-space-size=4096"
+        );
+        assert_eq!(a(&["/bin/zsh"]), "zsh");
+        assert_eq!(a(&[]), "");
     }
 
     #[test]
@@ -555,7 +667,11 @@ mod tests {
         // Only this test's own group, so other processes coming and going
         // between two walks of the whole machine can't change the answer.
         let me = unsafe { libc::getpgid(0) };
-        let mine = pids_in_group(me);
+        let mine: Vec<i32> = procs()
+            .iter()
+            .filter(|p| p.pgid == me)
+            .map(|p| p.pid)
+            .collect();
         assert!(!top_apps(&mine, &[], 1000).is_empty());
         assert!(top_apps(&mine, &[me], 1000).is_empty());
         assert_eq!(top_apps(&all_pids(), &[], 3).len(), 3);

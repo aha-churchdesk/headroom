@@ -200,6 +200,7 @@ fn job_json(j: &Job, now: u64, cfg: &Config) -> Value {
         "waited_s": secs(now.saturating_sub(j.enqueued_at)),
         "cpu_pct": j.cpu_pct,
         "procs": j.procs,
+        "now": j.now,
         "retry": j.retry,
         "tuned": j.tuned,
         "skipped": j.skipped,

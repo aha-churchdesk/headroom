@@ -11,11 +11,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use headroom_core::model::Snapshot;
+use headroom_core::proctree;
 use headroom_core::protocol::{ClientMsg, DaemonMsg};
 use headroom_core::scheduler::{Effect, Scheduler, Sig, Usage};
 use headroom_core::store::Store;
 
-use crate::sample::Sampler;
+use crate::sample::{self, Sampler};
 use crate::server::{self, Conns, Event};
 use crate::single;
 
@@ -27,16 +28,36 @@ fn wall() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-fn signal(pgid: i32, sig: Sig) {
+/// The process groups each job's processes were last seen in, and when. A
+/// kill that follows a terminate must still reach a task whose parent
+/// (turbo) has already exited and so no longer leads back to the job.
+type Spans = HashMap<i32, (Vec<i32>, Instant)>;
+/// How long a job's groups are remembered after it was last measured:
+/// longer than the grace between terminate and kill.
+const SPAN_KEEP: Duration = Duration::from_secs(30);
+
+fn signal(pgid: i32, sig: Sig, spans: &Spans) {
     let s = match sig {
         Sig::Stop => libc::SIGSTOP,
         Sig::Cont => libc::SIGCONT,
         Sig::Term => libc::SIGTERM,
         Sig::Kill => libc::SIGKILL,
     };
-    // Never a pgid of 0 or 1: killpg(0) would hit our own group.
-    if pgid > 1 {
-        unsafe { libc::killpg(pgid, s) };
+    // Its own group first, then the ones its descendants moved to (turbo's
+    // tasks, a git hook's terminal), then any seen before that are gone
+    // from the tree now.
+    let mut groups = proctree::job_groups(&sample::procs(), pgid);
+    for g in spans.get(&pgid).map_or(&[][..], |s| &s.0) {
+        if !groups.contains(g) {
+            groups.push(*g);
+        }
+    }
+    // Never a pgid of 0 or 1, nor our own: killpg(0) would hit our group.
+    let own = unsafe { libc::getpgid(0) };
+    for g in groups {
+        if g > 1 && g != own {
+            unsafe { libc::killpg(g, s) };
+        }
     }
 }
 
@@ -92,7 +113,8 @@ pub fn run_with(
     // admitted against real numbers.
     let fx = sched.tick(sampler.system(), &HashMap::new(), 0);
     let conns: Conns = Arc::new(Mutex::new(HashMap::new()));
-    apply(&store, &sched, &conns, fx);
+    let mut spans: Spans = HashMap::new();
+    apply(&store, &sched, &conns, &spans, fx);
 
     let (tx, rx) = mpsc::channel();
     server::spawn(listener, tx, conns.clone());
@@ -121,22 +143,33 @@ pub fn run_with(
                 next_tick += TICK;
                 let snap = sampler.system();
                 let usage = sampler.groups(&sched.pgids());
+                let seen = Instant::now();
+                for (pgid, u) in &usage {
+                    let e = spans.entry(*pgid).or_insert_with(|| (vec![], seen));
+                    for g in &u.groups {
+                        if !e.0.contains(g) {
+                            e.0.push(*g);
+                        }
+                    }
+                    e.1 = seen;
+                }
+                spans.retain(|_, (_, at)| at.elapsed() < SPAN_KEEP);
                 sched.tick(snap, &usage, ms())
             }
             Err(RecvTimeoutError::Disconnected) => break,
         };
-        apply(&store, &sched, &conns, fx);
+        apply(&store, &sched, &conns, &spans, fx);
     }
     let _ = fs::remove_file(&sock);
     Ok(())
 }
 
-fn apply(store: &Store, sched: &Scheduler, conns: &Conns, fx: Vec<Effect>) {
+fn apply(store: &Store, sched: &Scheduler, conns: &Conns, spans: &Spans, fx: Vec<Effect>) {
     let (mut profiles, mut history, mut config) = (false, false, false);
     for e in fx {
         match e {
             Effect::Send(c, m) => server::send(conns, c, &m),
-            Effect::Signal { pgid, sig } => signal(pgid, sig),
+            Effect::Signal { pgid, sig } => signal(pgid, sig, spans),
             Effect::SaveProfiles => profiles = true,
             Effect::SaveHistory => history = true,
             Effect::SaveConfig => config = true,

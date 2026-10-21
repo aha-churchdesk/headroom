@@ -44,12 +44,18 @@ pub enum Effect {
     SaveConfig,
 }
 
-/// One process group's measured usage, from the sampler.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+/// One job's measured usage, from the sampler: its process group and
+/// every descendant (see `proctree`).
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Usage {
     pub footprint: Bytes,
     pub cpu_pct: f64,
     pub procs: u32,
+    /// The largest process inside it, when that isn't the one it started:
+    /// what a `git commit` or a `turbo run` is busy with.
+    pub now: Option<String>,
+    /// The process groups its processes are in, for signals.
+    pub groups: Vec<i32>,
 }
 
 /// A decision about how a running job ends, made before it has ended.
@@ -420,6 +426,7 @@ impl Scheduler {
                 e.job.peak = e.job.peak.max(u.footprint);
                 e.job.cpu_pct = u.cpu_pct;
                 e.job.procs = u.procs;
+                e.job.now.clone_from(&u.now);
             }
         }
         let mut fx = vec![];
@@ -572,6 +579,7 @@ impl Scheduler {
         j.samples = est.samples;
         (j.scaling, j.tuned) = (scaling, None);
         (j.footprint, j.peak, j.cpu_pct, j.procs) = (0, 0, 0.0, 0);
+        j.now = None;
         (j.started_at, j.frozen_at, j.frozen_by, j.pgid) = (None, None, None, None);
         j.was_frozen = false;
         // Its next wait counts from here; the first one is in its history.
@@ -815,6 +823,7 @@ mod tests {
                 footprint: (gb * GIB as f64) as Bytes,
                 cpu_pct: 100.0,
                 procs: 3,
+                ..Usage::default()
             },
         )])
     }

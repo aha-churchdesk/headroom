@@ -417,6 +417,52 @@ fn manual_kill_ends_the_job_without_requeueing() {
     assert!(d.ls().queued.is_empty());
 }
 
+/// The child of the job's first process: its pid, group and state.
+fn hog_outside(pgid: i32) -> Option<(i32, i32, String)> {
+    let o = Command::new("ps")
+        .args(["-axo", "pid=,ppid=,pgid=,stat="])
+        .output()
+        .unwrap();
+    text(&o.stdout).lines().find_map(|l| {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        let (pid, ppid, g) = (
+            f[0].parse().ok()?,
+            f[1].parse::<i32>().ok()?,
+            f[2].parse().ok()?,
+        );
+        (ppid == pgid).then(|| (pid, g, f[3].to_string()))
+    })
+}
+
+#[test]
+fn a_task_moved_to_its_own_group_is_measured_frozen_and_killed_with_its_job() {
+    // `set -m` gives the background hog a group of its own, as turbo does
+    // with each task.
+    let d = Daemon::start("subgroup", Config::default());
+    let script = format!("set -m; {HOG} 1 30 & wait");
+    let c = d.spawn(&["run", "--", "/bin/sh", "-c", &script]);
+    let (id, pgid) = d.running();
+    let job = wait_for("the hog measured inside the job", 10, || {
+        d.ls().running.into_iter().find(|j| j.footprint > 900 << 20)
+    });
+    assert_eq!(job.procs, 2);
+    assert_eq!(job.now.as_deref(), Some("headroom-hog 1 30"));
+    let (hog, hog_group, _) = hog_outside(pgid).expect("the hog, outside the job's group");
+    assert_ne!(hog_group, pgid);
+    assert!(d.output(&["freeze", &id.to_string()]).status.success());
+    wait_for("the hog stopped too", 5, || {
+        hog_outside(pgid)
+            .filter(|h| h.2.starts_with('T'))
+            .map(|_| ())
+    });
+    assert!(d.output(&["resume", &id.to_string()]).status.success());
+    assert!(d.output(&["kill", &id.to_string()]).status.success());
+    finish(c);
+    wait_for("the hog gone", 15, || {
+        (unsafe { libc::kill(hog, 0) } != 0).then_some(())
+    });
+}
+
 #[test]
 fn freeze_and_resume_stop_and_continue_the_real_process() {
     let d = Daemon::start("freeze", Config::default());

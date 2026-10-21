@@ -134,6 +134,10 @@ pub struct Job {
     /// The job it started ahead of, as "label · cmd".
     #[serde(default)]
     pub ahead_of: Option<String>,
+    /// The largest process running inside it, when that isn't the command
+    /// itself, as a short command line.
+    #[serde(default)]
+    pub now: Option<String>,
 }
 
 impl Job {
@@ -164,6 +168,7 @@ impl Job {
             skipped: 0,
             skipped_since: None,
             ahead_of: None,
+            now: None,
         }
     }
 

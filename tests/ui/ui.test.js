@@ -96,6 +96,14 @@ test('kills since the app started are banners; requeued offers a pin', () => {
   has(v, 'Queue empty');
 });
 
+test('a running job shows the largest process inside it, when there is one', () => {
+  ui.setState(busy);
+  lacks(ui.html(), 'class="now"');
+  const [first, ...rest] = busy.running;
+  ui.setState({ ...busy, running: [{ ...first, cmd: 'git commit', now: 'tsc --noEmit --project tsconfig.json' }, ...rest] });
+  has(ui.view(), `${first.label} git commit ↳ tsc --noEmit --project tsconfig.json`);
+});
+
 test('a missing hook is called out in the header', () => {
   ui.setState(busy);
   has(ui.head(), "Codex: heavy commands aren't gated yet");

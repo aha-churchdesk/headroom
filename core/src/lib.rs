@@ -13,6 +13,7 @@ pub mod guard;
 pub mod hookio;
 pub mod hooksettings;
 pub mod model;
+pub mod proctree;
 pub mod profile;
 pub mod protocol;
 pub mod scheduler;
