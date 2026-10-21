@@ -130,7 +130,7 @@ test('a head passed over says how often and until when; the job that went first 
 
 test('a strip above what is running sums up the last 24 hours', () => {
   ui.setState(history);
-  has(ui.view(), 'Last 24h 5 runs 3 failed 0s wait p50 0s wait p95 0 shrunk 0 went first');
+  has(ui.view(), 'Last 24h 5 runs 3 failed 0 waited 0s wait p50 0s wait p95 0 shrunk 0 went first');
   has(ui.html(), '1 exited with an error, 2 killed to free memory');
   ui.setState(tunedHistory);
   has(ui.view(), '2 runs 0 failed');
@@ -139,24 +139,25 @@ test('a strip above what is running sums up the last 24 hours', () => {
   has(ui.view(), '1 went first');
 });
 
-test('the strip shows the waits of the jobs that waited, and how many did', () => {
+test('the strip shows how many jobs waited, and the waits of those', () => {
   const day = (d) => ui.setState({ ...history, last_day: { ...history.last_day, ...d } });
   day({ runs: 426, failed: 0, killed: 0, waited: 44,
     waited_s: 254, longest_wait_s: 131, wait_p50_s: 12, wait_p95_s: 131 });
-  has(ui.view(), '426 runs 0 failed 12s wait p50 2m11 wait p95');
-  has(ui.view(), '44 of 426 jobs waited in the queue (10%)');
+  has(ui.view(), '426 runs 0 failed 10% waited 12s wait p50 2m11 wait p95');
+  has(ui.html(), '44 of 426 jobs waited in the queue');
   has(ui.html(), 'Of the 44 that waited. Time in the queue before starting: 4m14 in all, longest 2m11');
   day({ runs: 1000, waited: 3 });
-  has(ui.view(), '3 of 1000 jobs waited in the queue (<1%)');
+  has(ui.view(), '1000 runs 3 failed <1% waited');
   day({ runs: 1, waited: 1 });
-  has(ui.view(), '1 of 1 job waited in the queue (100%)');
+  has(ui.view(), '100% waited');
+  has(ui.html(), '1 of 1 job waited in the queue');
   day({ runs: 2000, more: true, waited: 20 });
-  has(ui.view(), '20 of 2000+ jobs waited');
+  has(ui.html(), '20 of 2000+ jobs waited');
   ui.setState(history);
-  has(ui.view(), 'No job had to wait');
-  day({ runs: 0, waited: 0 });
-  lacks(ui.view(), 'waited in the queue');
-  lacks(ui.view(), 'No job had to wait');
+  has(ui.view(), '0 waited');
+  has(ui.html(), 'No job had to wait');
+  day({ runs: 0, failed: 0, killed: 0, waited: 0 });
+  has(ui.view(), '0 runs 0 failed 0 waited');
 });
 
 test('the commands page ranks what ran by time, with runs, memory and failures', () => {
@@ -231,11 +232,11 @@ test('zeros are dimmed, failures are not coloured, and every stat explains itsel
   const html = ui.html();
   has(html, 'class="" data-tip="1 exited with an error');
   has(html, 'class="zero" data-tip="Started with fewer workers');
-  eq((html.match(/data-tip=/g) || []).length, 6, 'one tooltip per stat');
+  eq((html.match(/data-tip=/g) || []).length, 7, 'one tooltip per stat');
   lacks(html, 'class="bad"');
   ui.setState(busy);
   eq(busy.last_day.runs, 0, 'the capture has nothing finished yet');
-  has(ui.view(), 'Last 24h 0 runs 0 failed 0s wait p50');
+  has(ui.view(), 'Last 24h 0 runs 0 failed 0 waited 0s wait p50');
 });
 
 test('the pressure level is coloured text with a tooltip, and so are the header stats', () => {

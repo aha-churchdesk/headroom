@@ -205,13 +205,14 @@ button:disabled{ cursor:default; opacity:.4; }
 .sec-h .why.blocked{ color:var(--warn); }
 .day-row{ display:grid; grid-template-columns:repeat(6, minmax(0, 1fr)); margin:0 14px 6px; }
 .day-row.five{ grid-template-columns:repeat(5, minmax(0, 1fr)); }
+/* Seven don't fit in equal columns; each takes its label's width. */
+.day-row.seven{ grid-template-columns:repeat(7, auto); }
 .day-row > div{ display:flex; flex-direction:column; gap:1px; padding:2px 7px; min-width:0; }
 .day-row > div:first-child{ padding-left:0; }
 .day-row > div + div{ border-left:1px solid var(--sep-soft); }
 .day-row b{ font-size:14px; font-weight:650; }
 .day-row span{ font-size:10px; color:var(--text-dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .day-row .zero b{ color:var(--text-faint); font-weight:500; }
-.day-sub{ margin:-2px 14px 8px; font-size:10.5px; color:var(--text-dim); }
 .empty{ padding:6px 14px 10px; color:var(--text-faint); font-size:12px; }
 
 /* Job rows */
@@ -579,22 +580,23 @@ function renderLastDay(h){
     ? `Of the ${h.waited} that waited. Time in the queue before starting: ${dur(h.waited_s)} in all, longest ${dur(h.longest_wait_s)}`
     : "No job had to wait";
   const share = h.waited / h.runs * 100;
-  const sub = !h.runs ? ""
-    : !h.waited ? "No job had to wait"
-    : `${h.waited} of ${h.runs}${h.more ? "+" : ""} ${h.runs === 1 ? "job" : "jobs"} waited in the queue (${share < 1 ? "&lt;1" : Math.round(share)}%)`;
+  const waited = !h.waited ? "0" : share < 1 ? "&lt;1%" : `${Math.round(share)}%`;
+  const ofRuns = h.waited
+    ? `${h.waited} of ${h.runs}${h.more ? "+" : ""} ${h.runs === 1 ? "job" : "jobs"} waited in the queue`
+    : "No job had to wait";
   return `
     <div class="sec day">
       <div class="sec-h">Last 24h</div>
-      <div class="day-row num">
+      <div class="day-row seven num">
         ${cell(`${h.runs}${h.more ? "+" : ""}`, h.runs === 1 ? "run" : "runs",
           h.more ? "History keeps 2,000 runs; more than that finished today" : "Jobs that finished", h.runs ? "" : "zero")}
         ${cell(bad, "failed", `${h.failed} exited with an error, ${h.killed} killed to free memory`, bad ? "" : "zero")}
+        ${cell(waited, "waited", ofRuns, h.waited ? "" : "zero")}
         ${cell(dur(h.wait_p50_s), "wait p50", `Half the jobs that waited, waited this long or less. ${waits}`, h.wait_p50_s ? "" : "zero")}
         ${cell(dur(h.wait_p95_s), "wait p95", `95 in 100 jobs that waited, waited this long or less. ${waits}`, h.wait_p95_s ? "" : "zero")}
         ${cell(h.shrunk, "shrunk", "Started with fewer workers so they fit", h.shrunk ? "" : "zero")}
         ${cell(h.went_first, "went first", "Short jobs that started ahead of a bigger one waiting for memory", h.went_first ? "" : "zero")}
       </div>
-      ${sub ? `<div class="day-sub">${sub}</div>` : ""}
     </div>`;
 }
 
