@@ -67,6 +67,19 @@ This adds one `PreToolUse` entry to each agent's config and touches nothing else
 
 `headroom hook uninstall` removes exactly that entry.
 
+### Terminals and everything else: PATH shims
+
+Agent hooks only see the command an agent types. To also queue what you run in a terminal, what a git hook or task runner starts, and agents without a hook:
+
+```sh
+headroom shims install             # links pnpm, npm, npx, yarn, bun, vitest, jest, playwright,
+                                   # cargo, tsc, turbo, nx, xcodebuild, docker to headroom
+export PATH="$HOME/.local/share/headroom/shims:$PATH"   # in your shell config, yourself
+headroom shims status              # are they first on PATH?
+```
+
+Called as `pnpm`, Headroom classifies the whole command. A heavy one runs through the queue; anything else, and anything inside a queued job, runs the real `pnpm` (the next one on PATH) straight away. If the daemon isn't running the command runs directly. `headroom shims uninstall` removes the links.
+
 Claude Code note: the hook rewrites the command to `headroom run … --sh '<your command>'` and leaves the permission decision to you. Allow rules written for the raw command (`Bash(pnpm test:*)`) won't match the rewritten one, so you may see a prompt you didn't see before. Deny and ask rules still apply.
 
 ## Which commands are heavy
@@ -110,6 +123,7 @@ headroom pin|unpin|low|normal|top|cancel|kill|freeze|resume ID
 headroom reset-profile KEY
 headroom classify 'LINE'
 headroom hook install|uninstall|status [--agent claude|codex|pi|all] [--scope user|project|local] [--dry-run]
+headroom shims install|uninstall|status [--dir DIR]
 headroom mcp
 ```
 

@@ -312,6 +312,96 @@ fn a_nested_run_goes_straight_through() {
     assert_eq!(text(&o.stdout), "inner\n");
 }
 
+/// A shims directory holding `npm` as a link to the real binary, and a
+/// stand-in for the real npm that says what it saw.
+fn shimmed_npm(name: &str) -> (PathBuf, PathBuf) {
+    let root = tmp(name);
+    let shims = root.join("shims");
+    let real = root.join("real");
+    std::fs::create_dir_all(&shims).unwrap();
+    std::fs::create_dir_all(&real).unwrap();
+    std::os::unix::fs::symlink(BIN, shims.join("npm")).unwrap();
+    let npm = real.join("npm");
+    std::fs::write(
+        &npm,
+        "#!/bin/sh\necho \"job=${HEADROOM_JOB:-none} args=$*\"\nexit ${NPM_EXIT:-0}\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&npm, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    (shims, real)
+}
+
+fn npm(d: &Daemon, path: &str, args: &[&str]) -> Command {
+    let shims = Path::new(path.split(':').next().unwrap());
+    let mut c = Command::new(shims.join("npm"));
+    c.args(args)
+        .env("PATH", path)
+        .env("HEADROOM_HOME", &d.home)
+        .env_remove("HEADROOM_JOB")
+        .current_dir(&d.home);
+    c
+}
+
+#[test]
+fn a_shim_queues_heavy_commands_and_execs_the_rest() {
+    let d = Daemon::start("shim", Config::default());
+    let (shims, real) = shimmed_npm("shim-bin");
+    let path = format!("{}:{}:/usr/bin:/bin", shims.display(), real.display());
+
+    let out = npm(&d, &path, &["test", "--", "-x"])
+        .env("NPM_EXIT", "3")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3), "the command's own exit code");
+    let said = text(&out.stdout);
+    assert!(
+        said.starts_with("job=") && !said.starts_with("job=none"),
+        "{said}"
+    );
+    assert!(said.contains("args=test -- -x"), "{said}");
+    let h = wait_for("history", 5, || d.ls().history.first().cloned());
+    assert_eq!((h.cmd.as_str(), h.exit), ("npm test", Some(3)));
+
+    // Light: straight to the real npm, nothing queued.
+    let out = npm(&d, &path, &["--version"]).output().unwrap();
+    assert_eq!(text(&out.stdout).trim(), "job=none args=--version");
+    // Inside a job: straight through, so it can't queue behind its parent.
+    let out = npm(&d, &path, &["test"])
+        .env("HEADROOM_JOB", "7")
+        .output()
+        .unwrap();
+    assert_eq!(text(&out.stdout).trim(), "job=7 args=test");
+    assert_eq!(d.ls().history.len(), 1, "only the first run was queued");
+}
+
+#[test]
+fn a_shim_without_its_real_program_or_daemon_says_so() {
+    let d = Daemon::start("shim-missing", Config::default());
+    let (shims, real) = shimmed_npm("shim-missing-bin");
+    // Only the shims on PATH (twice): no loop, a clear 127.
+    let only = format!("{0}:{0}", shims.display());
+    let out = npm(&d, &only, &["test"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(127));
+    assert!(
+        text(&out.stderr).contains("npm: not found on PATH"),
+        "{}",
+        text(&out.stderr)
+    );
+    // No daemon: the heavy command still runs, directly.
+    let path = format!("{}:{}:/usr/bin:/bin", shims.display(), real.display());
+    let out = npm(&d, &path, &["test"])
+        .env("HEADROOM_HOME", tmp("shim-nodaemon"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(text(&out.stdout).trim(), "job=none args=test");
+    assert!(
+        text(&out.stderr).contains("running directly"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
 #[test]
 fn manual_kill_ends_the_job_without_requeueing() {
     let d = Daemon::start("kill", Config::default());

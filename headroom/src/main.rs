@@ -5,6 +5,7 @@ mod ctl;
 mod hookcmd;
 mod mcp;
 mod run;
+mod shims;
 
 use headroom_core::hookio::Agent;
 use headroom_core::hooksettings::Scope;
@@ -23,6 +24,7 @@ usage:
   headroom mcp                               (MCP server on stdio: queue status and controls)
   headroom hook install|uninstall|status [--agent claude|codex|pi|all] [--scope user|project|local] [--dry-run]
   headroom hook --agent claude|codex|pi      (called by the agent: payload on stdin)
+  headroom shims install|uninstall|status [--dir DIR]   (pnpm, cargo, turbo… on PATH, queued when heavy)
 ";
 
 fn usage() -> i32 {
@@ -137,12 +139,31 @@ fn id_control(verb: &str, id: &str) -> Option<Control> {
     })
 }
 
+fn parse_shims(args: &[String]) -> i32 {
+    let (action, rest) = match args.split_first() {
+        Some((a, rest)) if ["install", "uninstall", "status"].contains(&a.as_str()) => (a, rest),
+        _ => return usage(),
+    };
+    let dir = match rest {
+        [] => shims::default_dir(),
+        [flag, dir] if flag == "--dir" => dir.into(),
+        _ => return usage(),
+    };
+    let exe = std::path::PathBuf::from(context::stable_exe());
+    shims::manage(action, &dir, &exe)
+}
+
 fn main() {
+    let argv0 = std::env::args().next().unwrap_or_default();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(name) = shims::called_as(&argv0) {
+        std::process::exit(shims::shim(name, &args));
+    }
     let rest = args.get(1..).unwrap_or_default();
     let code = match args.first().map(String::as_str) {
         Some("run") => parse_run(rest).map_or_else(usage, run::run),
         Some("hook") => parse_hook(rest),
+        Some("shims") => parse_shims(rest),
         Some("ls") => ctl::ls(),
         Some("mcp") => mcp::main(),
         Some("hold") => match rest.first().map(String::as_str) {
