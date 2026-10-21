@@ -46,6 +46,12 @@ pub struct Config {
     /// Commands whose normalised form matches one of these are queued.
     /// `*` matches any program: `* test` covers `pnpm test` and `cargo test`.
     pub patterns: Vec<String>,
+    /// The default patterns this config has been offered. A default added
+    /// in a later version joins `patterns` once; one the user removed
+    /// stays removed. Configs saved before this field had the first
+    /// version's defaults.
+    #[serde(default = "first_defaults")]
+    pub patterns_seen: Vec<String>,
     /// Long-lived commands, never queued: they would hold a slot forever.
     /// A `--flag` entry matches anywhere in the command; a word matches a
     /// subcommand or script name such as `dev` or `dev:web`.
@@ -67,6 +73,63 @@ pub struct Config {
     pub backfill_wait_s: u64,
 }
 
+/// The default heavy patterns.
+pub const DEFAULT_PATTERNS: &[&str] = &[
+    "* test",
+    "* build",
+    "* e2e",
+    "* typecheck",
+    "vitest",
+    "jest",
+    "mocha",
+    "playwright",
+    "tsc",
+    "eslint",
+    "nx",
+    "turbo",
+    "next build",
+    "xcodebuild",
+    "cargo clippy",
+    "gradle",
+    "pytest",
+];
+
+/// The defaults before `patterns_seen` existed.
+fn first_defaults() -> Vec<String> {
+    DEFAULT_PATTERNS
+        .iter()
+        .filter(|p| !["mocha", "eslint"].contains(p))
+        .map(|p| p.to_string())
+        .collect()
+}
+
+impl Config {
+    /// Add the default patterns this config hasn't been offered yet.
+    /// Returns whether anything changed.
+    pub fn adopt_new_defaults(&mut self) -> bool {
+        let mut changed = false;
+        for p in DEFAULT_PATTERNS {
+            if !self.patterns_seen.iter().any(|s| s == p) {
+                if !self.patterns.iter().any(|s| s == p) {
+                    self.patterns.push(p.to_string());
+                }
+                changed = true;
+            }
+        }
+        if changed {
+            // The defaults in their order, then any older ones since dropped.
+            let older: Vec<String> = self
+                .patterns_seen
+                .drain(..)
+                .filter(|s| !DEFAULT_PATTERNS.contains(&s.as_str()))
+                .collect();
+            self.patterns_seen = DEFAULT_PATTERNS.iter().map(|p| p.to_string()).collect();
+            self.patterns_seen.extend(older);
+        }
+        changed
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -82,25 +145,8 @@ impl Default for Config {
             kill_grace_s: 10,
             swap_kill_growth: 4 * GIB,
             cpu_factor: 1.5,
-            patterns: [
-                "* test",
-                "* build",
-                "* e2e",
-                "* typecheck",
-                "vitest",
-                "jest",
-                "playwright",
-                "tsc",
-                "nx",
-                "turbo",
-                "next build",
-                "xcodebuild",
-                "cargo clippy",
-                "gradle",
-                "pytest",
-            ]
-            .map(String::from)
-            .to_vec(),
+            patterns: DEFAULT_PATTERNS.iter().map(|p| p.to_string()).collect(),
+            patterns_seen: DEFAULT_PATTERNS.iter().map(|p| p.to_string()).collect(),
             excluded: [
                 "dev",
                 "serve",
@@ -131,6 +177,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_config_from_before_gets_the_new_defaults_once() {
+        // Saved by an earlier version: the first defaults, minus one the
+        // user removed, plus one they added.
+        let mut old = first_defaults();
+        old.retain(|p| p != "gradle");
+        old.push("yarn".into());
+        let mut c: Config = serde_json::from_value(serde_json::json!({ "patterns": old })).unwrap();
+        assert!(c.adopt_new_defaults());
+        assert!(c.patterns.contains(&"mocha".into()) && c.patterns.contains(&"eslint".into()));
+        assert!(
+            !c.patterns.contains(&"gradle".into()),
+            "a removed default stays removed"
+        );
+        assert!(c.patterns.contains(&"yarn".into()), "the user's own stays");
+        // Removed after being offered: not brought back.
+        c.patterns.retain(|p| p != "eslint");
+        assert!(!c.adopt_new_defaults());
+        assert!(!c.patterns.contains(&"eslint".into()));
+        // Through a save and a load, nothing is offered twice.
+        let mut again: Config = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert!(!again.adopt_new_defaults());
+        assert_eq!(again.patterns, c.patterns);
+    }
+
+    #[test]
+    fn a_fresh_config_has_nothing_new_to_adopt() {
+        let mut c = Config::default();
+        assert!(!c.adopt_new_defaults());
+        // A new default that's already there by hand isn't added twice.
+        let mut c: Config =
+            serde_json::from_value(serde_json::json!({ "patterns": ["eslint"] })).unwrap();
+        c.adopt_new_defaults();
+        assert_eq!(c.patterns.iter().filter(|p| *p == "eslint").count(), 1);
+    }
+
+    #[test]
     fn missing_fields_fall_back_to_defaults() {
         let c: Config = serde_json::from_str(r#"{"headroom": 1073741824}"#).unwrap();
         assert_eq!(c.headroom, GIB);
@@ -139,8 +221,9 @@ mod tests {
     }
 
     #[test]
-    fn empty_object_is_the_default_config() {
-        let c: Config = serde_json::from_str("{}").unwrap();
+    fn empty_object_is_the_default_config_once_new_defaults_are_adopted() {
+        let mut c: Config = serde_json::from_str("{}").unwrap();
+        c.adopt_new_defaults();
         assert_eq!(c, Config::default());
     }
 

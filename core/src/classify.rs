@@ -183,6 +183,14 @@ pub fn normalize(words: &[String]) -> Option<Normal> {
                 }
             }
             "direnv" if words.get(i + 1).is_some_and(|w| w == "exec") => i += 3,
+            // `corepack yarn test`: the package manager it picks runs the work.
+            "corepack"
+                if words.get(i + 1).is_some_and(|w| {
+                    ["yarn", "pnpm", "npm", "npx", "pnpx", "yarnpkg"].contains(&basename(w))
+                }) =>
+            {
+                i += 1
+            }
             _ => break,
         }
     }
@@ -345,9 +353,31 @@ fn token_matches(pat: &str, tok: &str) -> bool {
             .is_some_and(|rest| rest.starts_with(':') || rest.starts_with('-'))
 }
 
+/// A heavy pattern's word also matches it at the end of a script name:
+/// `test` covers `unit-test` and `storybook:test` as well as `test:unit`.
+fn heavy_token_matches(pat: &str, tok: &str) -> bool {
+    token_matches(pat, tok)
+        || tok
+            .strip_suffix(pat)
+            .is_some_and(|rest| rest.ends_with(':') || rest.ends_with('-'))
+}
+
+/// `test`, `test:unit`, `unit-test`: a run that ends, whatever else the
+/// name says. `storybook-test` runs Storybook's tests; it isn't Storybook.
+fn is_test_script(tok: &str) -> bool {
+    heavy_token_matches("test", tok)
+}
+
 fn pattern_matches(pattern: &str, key: &[String]) -> bool {
     let p: Vec<&str> = pattern.split_whitespace().collect();
     !p.is_empty() && p.len() <= key.len() && p.iter().zip(key).all(|(p, k)| token_matches(p, k))
+}
+
+fn heavy_pattern_matches(pattern: &str, key: &[String]) -> bool {
+    let p: Vec<&str> = pattern.split_whitespace().collect();
+    !p.is_empty()
+        && p.len() <= key.len()
+        && p.iter().zip(key).all(|(p, k)| heavy_token_matches(p, k))
 }
 
 fn excluded_by(n: &Normal, cfg: &Config) -> Option<String> {
@@ -361,7 +391,9 @@ fn excluded_by(n: &Normal, cfg: &Config) -> Option<String> {
         } else if e.contains(' ') {
             pattern_matches(e, &n.key)
         } else {
-            n.key.iter().any(|k| token_matches(e, k))
+            n.key
+                .iter()
+                .any(|k| token_matches(e, k) && !is_test_script(k))
         };
         if hit {
             return Some(e.clone());
@@ -371,7 +403,7 @@ fn excluded_by(n: &Normal, cfg: &Config) -> Option<String> {
 }
 
 pub fn is_heavy(n: &Normal, cfg: &Config) -> bool {
-    cfg.patterns.iter().any(|p| pattern_matches(p, &n.key))
+    cfg.patterns.iter().any(|p| heavy_pattern_matches(p, &n.key))
         // Running a repository's hooks by hand runs whatever they hold.
         || (n.program == "lefthook" && n.key.len() == 3)
 }
@@ -794,6 +826,67 @@ mod tests {
         assert_eq!(in_repo("git push -n", None, both), heavy("git push", "git"));
         // The hook of another directory is not this one's.
         assert_eq!(in_repo("git -C web commit -m x", None, both), Class::Light);
+    }
+
+    #[test]
+    fn corepack_runs_the_package_manager_it_picks() {
+        assert_eq!(
+            cls("corepack yarn typecheck"),
+            heavy("yarn typecheck", "yarn")
+        );
+        assert_eq!(
+            cls("corepack yarn test 2>&1 | tail -15"),
+            heavy("yarn test", "yarn")
+        );
+        assert_eq!(
+            cls("corepack pnpm exec vitest run src/a.test.ts"),
+            heavy("vitest run", "vitest")
+        );
+        assert_eq!(
+            cls("cd apps/web && corepack yarn turbo run typecheck --affected"),
+            heavy("turbo typecheck", "turbo")
+        );
+        // corepack's own commands are not a package manager running work.
+        assert_eq!(cls("corepack enable"), Class::Light);
+        assert_eq!(cls("corepack prepare yarn@4 --activate"), Class::Light);
+        assert_eq!(cls("corepack"), Class::Light);
+        // Long-lived behind corepack stays long-lived.
+        assert!(matches!(cls("corepack yarn dev"), Class::Excluded { .. }));
+    }
+
+    #[test]
+    fn linters_and_mocha_are_heavy_by_default() {
+        assert_eq!(cls("npx eslint src --ext .ts"), heavy("eslint", "eslint"));
+        assert_eq!(cls("yarn eslint --fix apps/x"), heavy("eslint", "eslint"));
+        assert_eq!(
+            cls("NODE_ENV=test npx mocha -r ./setup.js tests/unit/a.test.js"),
+            heavy("mocha", "mocha")
+        );
+    }
+
+    #[test]
+    fn scripts_ending_in_test_are_tests_not_servers() {
+        assert_eq!(cls("yarn unit-test"), heavy("yarn unit-test", "yarn"));
+        assert_eq!(
+            cls("yarn storybook-test"),
+            heavy("yarn storybook-test", "yarn")
+        );
+        assert_eq!(cls("pnpm run e2e:test"), heavy("pnpm e2e:test", "pnpm"));
+        assert_eq!(
+            cls("npm run start-server-and-test"),
+            heavy("npm start-server-and-test", "npm"),
+            "it starts a server, runs the tests, and stops"
+        );
+        // Still long-lived: the server itself, and watch mode.
+        assert!(matches!(cls("yarn storybook"), Class::Excluded { .. }));
+        assert!(matches!(cls("pnpm dev:web"), Class::Excluded { .. }));
+        assert!(matches!(
+            cls("yarn unit-test --watch"),
+            Class::Excluded { .. }
+        ));
+        // Only at a separator: `latest` and `contest` are not tests.
+        assert_eq!(cls("pnpm latest"), Class::Light);
+        assert_eq!(cls("yarn contest"), Class::Light);
     }
 
     #[test]

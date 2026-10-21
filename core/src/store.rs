@@ -114,8 +114,13 @@ impl Store {
         fs::rename(&tmp, &path)
     }
 
+    /// The config, with any new default patterns adopted and saved.
     pub fn load_config(&self) -> Config {
-        self.load("config.json")
+        let mut c: Config = self.load("config.json");
+        if c.adopt_new_defaults() && self.root.join("config.json").exists() {
+            let _ = self.save_config(&c);
+        }
+        c
     }
 
     pub fn save_config(&self, c: &Config) -> io::Result<()> {

@@ -28,6 +28,7 @@ pub const NAMES: &[&str] = &[
     "yarn",
     "bun",
     "bunx",
+    "corepack",
     "vitest",
     "jest",
     "playwright",

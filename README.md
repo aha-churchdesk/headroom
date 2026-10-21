@@ -72,7 +72,7 @@ This adds one `PreToolUse` entry to each agent's config and touches nothing else
 Agent hooks only see the command an agent types. To also queue what you run in a terminal, what a git hook or task runner starts, and agents without a hook:
 
 ```sh
-headroom shims install             # links pnpm, npm, npx, yarn, bun, vitest, jest, playwright,
+headroom shims install             # links pnpm, npm, npx, yarn, bun, corepack, vitest, jest, playwright,
                                    # cargo, tsc, turbo, nx, xcodebuild, docker to headroom
 export PATH="$HOME/.local/share/headroom/shims:$PATH"   # at the end of ~/.zshrc, yourself
 headroom shims status              # are they first on PATH?
@@ -86,7 +86,7 @@ Claude Code note: the hook rewrites the command to `headroom run … --sh '<your
 
 ## Which commands are heavy
 
-Commands that match a pattern are queued: `* test`, `* build`, `* e2e`, `* typecheck`, `vitest`, `jest`, `playwright`, `tsc`, `nx`, `turbo`, `next build`, `xcodebuild`, `cargo clippy`, `gradle`, `pytest`. `*` stands for any program, so `* test` covers `pnpm test` and `cargo test`. Long-lived commands are never queued, because they would hold a slot forever: `dev`, `serve`, `start`, `watch`, `preview`, `storybook`, anything with `--watch` or `--ui`, and `docker compose up`.
+Commands that match a pattern are queued: `* test`, `* build`, `* e2e`, `* typecheck`, `vitest`, `jest`, `mocha`, `playwright`, `tsc`, `eslint`, `nx`, `turbo`, `next build`, `xcodebuild`, `cargo clippy`, `gradle`, `pytest`. `*` stands for any program, so `* test` covers `pnpm test` and `cargo test`, and `test` also covers scripts like `test:unit` and `unit-test`. `corepack yarn …` is classified as the `yarn …` it runs. Long-lived commands are never queued, because they would hold a slot forever: `dev`, `serve`, `start`, `watch`, `preview`, `storybook`, anything with `--watch` or `--ui`, and `docker compose up`.
 
 A `git commit` or `git push` is queued when the repository has a pre-commit or pre-push hook (lefthook, husky or a plain script), because the hook runs the type checks and linters. It is profiled as `git commit` or `git push` for that repository, so a formatter-only hook stays cheap. `--no-verify`, `LEFTHOOK=0` and `HUSKY=0` skip the hook and the queue. `lefthook run <hook>` is always queued.
 
