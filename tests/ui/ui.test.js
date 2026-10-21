@@ -55,8 +55,9 @@ test('running and queued jobs are listed with why the queue waits', () => {
   ui.setState(busy);
   const v = ui.view();
   has(v, 'Running 2');
-  has(v, 'sc-49123 · headroom-hog');
-  has(v, 'browser-cd · sleep 31');
+  // Running: where it runs, with the command on the line below.
+  has(ui.html(), '<b>sc-49123</b><span class="cmd">headroom-hog</span>');
+  has(v, 'browser-cd sleep 31');
   has(v, 'Queued 2');
   has(v, 'next needs 1.5 GB, 0 GB free');
   has(v, 'fix-main · sleep 30');

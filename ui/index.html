@@ -232,6 +232,10 @@ button:disabled{ cursor:default; opacity:.4; }
 .job .l1{ display:flex; align-items:baseline; gap:6px; min-width:0; }
 .job .name{ flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer; }
 .job .name b{ font-weight:600; }
+/* Running rows: where it runs, then the command beneath. */
+.job .name.two{ display:flex; flex-direction:column; gap:1px; }
+.job .name.two > *{ overflow:hidden; text-overflow:ellipsis; }
+.job .name.two .cmd{ font-size:11.5px; }
 .job .name .cmd{ color:var(--text-dim); }
 .job .mem{ font-size:11.5px; color:var(--text-dim); white-space:nowrap; }
 .job .mem b{ color:var(--text); font-weight:600; }
@@ -719,8 +723,11 @@ function estLabel(j){
     : `est ${gb(j.estimate)} GB`;
 }
 
-function jobName(j){
-  return `<span class="name" data-act="expand" data-id="${j.id}" title="${esc(j.full_cmd)}">
+function jobName(j, two = false){
+  return two
+    ? `<span class="name two" data-act="expand" data-id="${j.id}" title="${esc(j.full_cmd)}">
+    <b>${esc(j.label)}</b><span class="cmd">${esc(j.cmd)}</span></span>`
+    : `<span class="name" data-act="expand" data-id="${j.id}" title="${esc(j.full_cmd)}">
     <b>${esc(j.label)}</b> <span class="cmd">· ${esc(j.cmd)}</span></span>`;
 }
 
@@ -741,7 +748,7 @@ function renderRunning(j){
   return `
     <div class="job ${UI.expanded.has(j.id) ? "expanded" : ""}">
       <div class="l1">
-        ${jobName(j)}${marks(j)}
+        ${jobName(j, true)}${marks(j)}
         <span class="mem num"><b>${gb(j.footprint)}</b> / ${estLabel(j)}</span>
       </div>
       <div class="l2 num">
