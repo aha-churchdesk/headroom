@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufReader, Read};
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,7 +15,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use headroom_core::config::Config;
-use headroom_core::model::{GIB, JobState, Outcome, Pressure, Snapshot};
+use headroom_core::model::{FrozenBy, GIB, JobState, Outcome, Pressure, Snapshot};
 use headroom_core::protocol::{ClientMsg, DaemonMsg, Listing, read_msg, write_msg};
 use headroom_core::scheduler::Usage;
 use headroom_core::store::Store;
@@ -173,6 +173,25 @@ fn finish(mut c: Child) -> (i32, String, String) {
 
 fn group_alive(pgid: i32) -> bool {
     unsafe { libc::killpg(pgid, 0) == 0 }
+}
+
+/// Clean up real process groups even if a lifecycle assertion fails.
+struct KillGroups(Vec<i32>);
+
+impl Drop for KillGroups {
+    fn drop(&mut self) {
+        for pgid in &self.0 {
+            unsafe { libc::killpg(*pgid, libc::SIGKILL) };
+        }
+    }
+}
+
+fn process_state(pid: i32) -> String {
+    let out = Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    text(&out.stdout).trim().to_string()
 }
 
 fn quick() -> Config {
@@ -530,6 +549,149 @@ fn freeze_and_resume_stop_and_continue_the_real_process() {
     d.output(&["kill", &id.to_string()]);
     let (_, _, err) = finish(c);
     assert!(err.contains("paused") && err.contains("resumed"), "{err}");
+}
+
+#[test]
+fn shutting_down_the_daemon_resumes_a_frozen_job() {
+    let d = Daemon::start("stop-frozen", Config::default());
+    let release = d.home.join("release");
+    let script = format!(
+        "while [ ! -e {} ]; do sleep 0.05; done; echo recovered",
+        headroom_core::shell::quote(&release.display().to_string())
+    );
+    let mut c = d.spawn(&["run", "--", "/bin/sh", "-c", &script]);
+    let (id, pgid) = d.running();
+    let mut cleanup = KillGroups(vec![pgid]);
+    assert!(d.output(&["freeze", &id.to_string()]).status.success());
+    wait_for("the job stopped", 5, || {
+        process_state(pgid).starts_with('T').then_some(())
+    });
+    drop(d);
+    std::fs::write(release, "resume").unwrap();
+    wait_for("the job finishing after shutdown", 5, || {
+        c.try_wait().unwrap()
+    });
+    let (code, out, _) = finish(c);
+    cleanup.0.clear();
+    assert_eq!((code, out.as_str()), (0, "recovered\n"));
+}
+
+#[test]
+fn a_term_ignoring_subgroup_is_killed_after_the_leader_exits() {
+    let d = Daemon::start("kill-orphan", quick());
+    let pidfile = d.home.join("child.pid");
+    let inner = format!(
+        "trap '' TERM; echo $$ > {}; exec /bin/sleep 60",
+        headroom_core::shell::quote(&pidfile.display().to_string())
+    );
+    let script = format!(
+        "set -m; /bin/sh -c {} & wait",
+        headroom_core::shell::quote(&inner)
+    );
+    let mut c = d.spawn(&["run", "--", "/bin/sh", "-c", &script]);
+    let (id, pgid) = d.running();
+    let mut cleanup = KillGroups(vec![pgid]);
+    let child = wait_for("the TERM-ignoring child", 5, || {
+        std::fs::read_to_string(&pidfile)
+            .ok()?
+            .trim()
+            .parse::<i32>()
+            .ok()
+    });
+    assert_ne!(child, pgid);
+    assert_eq!(unsafe { libc::getpgid(child) }, child);
+    cleanup.0.push(child);
+    assert!(d.output(&["kill", &id.to_string()]).status.success());
+    wait_for("the leader exiting", 5, || c.try_wait().unwrap());
+    wait_for("the detached child killed after grace", 8, || {
+        (unsafe { libc::kill(child, 0) } != 0).then_some(())
+    });
+    finish(c);
+    cleanup.0.clear();
+}
+
+#[test]
+fn losing_the_daemon_resumes_frozen_descendant_groups() {
+    let home = tmp("lost-frozen");
+    let store = Store::at(&home).unwrap();
+    let listener = UnixListener::bind(store.socket()).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let pidfile = home.join("child.pid");
+    let release = home.join("release");
+    let inner = format!(
+        "while [ ! -e {} ]; do sleep 0.05; done",
+        headroom_core::shell::quote(&release.display().to_string())
+    );
+    let script = format!(
+        "set -m; /bin/sh -c {} & echo $! > {}; wait; echo recovered",
+        headroom_core::shell::quote(&inner),
+        headroom_core::shell::quote(&pidfile.display().to_string())
+    );
+    let mut c = Command::new(BIN)
+        .args(["run", "--", "/bin/sh", "-c", &script])
+        .env("HEADROOM_HOME", &home)
+        .env_remove("HEADROOM_JOB")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let (stream, _) = wait_for("the wrapper connecting", 5, || listener.accept().ok());
+    stream.set_nonblocking(false).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut writer = stream.try_clone().unwrap();
+    assert!(matches!(
+        read_msg::<_, ClientMsg>(&mut reader).unwrap(),
+        Some(ClientMsg::Enqueue(_))
+    ));
+    write_msg(
+        &mut writer,
+        &DaemonMsg::Granted {
+            id: 1,
+            retry: 0,
+            low: false,
+            workers: None,
+        },
+    )
+    .unwrap();
+    let pgid = match read_msg::<_, ClientMsg>(&mut reader).unwrap() {
+        Some(ClientMsg::Started { pgid, .. }) => pgid,
+        other => panic!("expected Started, got {other:?}"),
+    };
+    let mut cleanup = KillGroups(vec![pgid]);
+    let child = wait_for("the detached child before freezing", 5, || {
+        std::fs::read_to_string(&pidfile)
+            .ok()?
+            .trim()
+            .parse::<i32>()
+            .ok()
+    });
+    cleanup.0.push(child);
+    assert_ne!(unsafe { libc::getpgid(child) }, pgid);
+    for group in [pgid, child] {
+        assert_eq!(unsafe { libc::killpg(group, libc::SIGSTOP) }, 0);
+        wait_for("the group stopped", 5, || {
+            process_state(group).starts_with('T').then_some(())
+        });
+    }
+    write_msg(
+        &mut writer,
+        &DaemonMsg::Frozen {
+            by: FrozenBy::User,
+            why: None,
+        },
+    )
+    .unwrap();
+    stream.shutdown(std::net::Shutdown::Both).unwrap();
+    std::fs::write(release, "resume").unwrap();
+    wait_for("the wrapper recovering from daemon loss", 5, || {
+        c.try_wait().unwrap()
+    });
+    let (code, out, _) = finish(c);
+    cleanup.0.clear();
+    assert_eq!((code, out.as_str()), (0, "recovered\n"));
 }
 
 #[test]

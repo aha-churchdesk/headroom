@@ -20,16 +20,22 @@ pub struct Proc {
 
 /// The pids of the job whose process group is `pgid`, in ascending order.
 pub fn job_pids(procs: &[Proc], pgid: i32) -> Vec<i32> {
+    let roots: Vec<i32> = procs
+        .iter()
+        .filter(|p| p.pgid == pgid)
+        .map(|p| p.pid)
+        .collect();
+    descendant_pids(procs, &roots)
+}
+
+/// These processes and their descendants, regardless of process group.
+pub fn descendant_pids(procs: &[Proc], roots: &[i32]) -> Vec<i32> {
     let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
     for p in procs {
         children.entry(p.ppid).or_default().push(p.pid);
     }
     let mut seen: BTreeSet<i32> = BTreeSet::new();
-    let mut todo: Vec<i32> = procs
-        .iter()
-        .filter(|p| p.pgid == pgid)
-        .map(|p| p.pid)
-        .collect();
+    let mut todo = roots.to_vec();
     while let Some(pid) = todo.pop() {
         // launchd and the kernel are everyone's ancestors, never a job's.
         if pid <= 1 || !seen.insert(pid) {

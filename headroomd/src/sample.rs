@@ -25,6 +25,81 @@ use crate::view::{AppUsage, ProcInfo};
 
 const PROC_ALL_PIDS: u32 = 1;
 
+/// Remember individual processes, not bare group IDs, so an orphaned task
+/// remains part of its job without signaling a later reuse of its group.
+#[derive(Default)]
+pub(crate) struct ProcessTracker {
+    jobs: HashMap<i32, HashMap<i32, u64>>,
+}
+
+impl ProcessTracker {
+    pub(crate) fn retain(&mut self, pgids: &[i32]) {
+        self.jobs.retain(|pgid, _| pgids.contains(pgid));
+    }
+
+    pub(crate) fn pids(&mut self, table: &[Proc], pgid: i32) -> Vec<i32> {
+        let known = self.jobs.get(&pgid);
+        let mut roots: Vec<i32> = known
+            .into_iter()
+            .flat_map(|known| known.iter())
+            .filter(|(pid, born)| process_start(**pid) == Some(**born))
+            .map(|(pid, _)| *pid)
+            .collect();
+        // A living remembered member anchors its group. Include newly
+        // orphaned members in that group even when their parent vanished
+        // between samples, while rejecting a group reused after everyone died.
+        let anchored: HashSet<i32> = table
+            .iter()
+            .filter(|p| roots.contains(&p.pid))
+            .map(|p| p.pgid)
+            .collect();
+        roots.extend(
+            table
+                .iter()
+                .filter(|p| anchored.contains(&p.pgid) || (known.is_none() && p.pgid == pgid))
+                .map(|p| p.pid),
+        );
+        if known.is_none() && roots.is_empty() {
+            return vec![];
+        }
+        let pids = proctree::descendant_pids(table, &roots);
+        let identities: HashMap<i32, u64> = pids
+            .iter()
+            .filter_map(|&pid| process_start(pid).map(|born| (pid, born)))
+            .collect();
+        let pids = pids
+            .into_iter()
+            .filter(|p| identities.contains_key(p))
+            .collect();
+        self.jobs.insert(pgid, identities);
+        pids
+    }
+
+    pub(crate) fn groups(&mut self, table: &[Proc], pgid: i32) -> Vec<i32> {
+        let pids: HashSet<i32> = self.pids(table, pgid).into_iter().collect();
+        let mut groups: Vec<i32> = table
+            .iter()
+            .filter(|p| pids.contains(&p.pid))
+            .map(|p| p.pgid)
+            .collect();
+        groups.sort_unstable();
+        groups.dedup();
+        groups
+    }
+}
+
+fn process_start(pid: i32) -> Option<u64> {
+    let mut ri: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        libc::proc_pid_rusage(
+            pid,
+            libc::RUSAGE_INFO_V4,
+            (&mut ri as *mut libc::rusage_info_v4).cast(),
+        )
+    };
+    (rc == 0).then_some(ri.ri_proc_start_abstime)
+}
+
 fn sysctl<T: Copy + Default>(name: &str) -> Option<T> {
     let name = CString::new(name).ok()?;
     let mut v = T::default();
@@ -56,6 +131,7 @@ pub fn used_bytes(internal: u64, purgeable: u64, wired: u64, compressed: u64, pa
 }
 
 pub struct Sampler {
+    tracker: ProcessTracker,
     host: libc::mach_port_t,
     page: u64,
     total: Bytes,
@@ -86,6 +162,7 @@ impl Sampler {
         // a few sessions were busy.
         let cores = sysctl::<i32>("hw.physicalcpu").unwrap_or(0).max(0) as u32;
         Self {
+            tracker: ProcessTracker::default(),
             // One send right for the process's life, not one per sample.
             host: unsafe { libc::mach_host_self() },
             page: unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(4096) as u64,
@@ -185,6 +262,7 @@ impl Sampler {
     /// A job with no processes left is absent from the result.
     pub fn groups(&mut self, pgids: &[i32]) -> HashMap<i32, Usage> {
         let table = if pgids.is_empty() { vec![] } else { procs() };
+        self.tracker.retain(pgids);
         let now = Instant::now();
         let elapsed_ns = self
             .prev_at
@@ -197,7 +275,8 @@ impl Sampler {
             let mut cpu_delta = 0u64;
             let mut largest: Option<(Bytes, String)> = None;
             let mut parts: Vec<Part> = Vec::new();
-            for pid in proctree::job_pids(&table, pgid) {
+            let pids = self.tracker.pids(&table, pgid);
+            for &pid in &pids {
                 let mut ri: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
                 let rc = unsafe {
                     libc::proc_pid_rusage(
@@ -246,7 +325,13 @@ impl Sampler {
                 };
                 u.now = largest.map(|(_, cmd)| cmd);
                 u.parts = parts;
-                u.groups = proctree::job_groups(&table, pgid);
+                u.groups = table
+                    .iter()
+                    .filter(|p| pids.contains(&p.pid))
+                    .map(|p| p.pgid)
+                    .collect();
+                u.groups.sort_unstable();
+                u.groups.dedup();
                 out.insert(pgid, u);
             }
         }
@@ -664,6 +749,76 @@ mod tests {
         unsafe { libc::killpg(u.groups[1], libc::SIGKILL) };
         child.kill().unwrap();
         child.wait().unwrap();
+    }
+
+    #[test]
+    fn an_orphan_in_its_own_group_remains_measured_after_its_parent_exits() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "set -m; /bin/sleep 30 & wait"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pgid = child.id() as i32;
+        let mut sampler = Sampler::new();
+        let mut subgroup = None;
+        for _ in 0..100 {
+            if let Some(u) = sampler.groups(&[pgid]).remove(&pgid)
+                && u.procs == 2
+            {
+                subgroup = u.groups.into_iter().find(|g| *g != pgid);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let subgroup = subgroup.expect("background sleep has its own group");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let usage = sampler.groups(&[pgid]);
+        // Clean up before asserting, so a failed assertion cannot leak sleep.
+        unsafe { libc::killpg(subgroup, libc::SIGKILL) };
+        let usage = usage.get(&pgid).expect("orphan still belongs to the job");
+        assert_eq!(usage.procs, 1);
+        assert_eq!(usage.groups, vec![subgroup]);
+        assert!(usage.footprint > 0);
+    }
+
+    #[test]
+    fn a_reused_process_id_does_not_rejoin_a_remembered_job() {
+        let pid = std::process::id() as i32;
+        let pgid = unsafe { libc::getpgid(pid) };
+        let born = process_start(pid).unwrap();
+        let mut tracker = ProcessTracker::default();
+        // A saved identity with this PID but an earlier birth must never
+        // make the current process, or its process group, a signal target.
+        tracker
+            .jobs
+            .insert(pgid, HashMap::from([(pid, born.wrapping_add(1))]));
+        let table = procs();
+        assert!(tracker.groups(&table, pgid).is_empty());
+        assert!(tracker.pids(&table, pgid).is_empty());
+    }
+
+    #[test]
+    fn a_new_orphan_in_a_living_group_is_discovered_after_the_first_sample() {
+        let pid = std::process::id() as i32;
+        let pgid = unsafe { libc::getpgid(pid) };
+        let root = Proc { pid, ppid: 1, pgid };
+        let mut tracker = ProcessTracker::default();
+        assert_eq!(tracker.pids(&[root], pgid), vec![pid]);
+        let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        // Model a child whose intermediate parent exited between samples.
+        let orphan = Proc {
+            pid: child.id() as i32,
+            ppid: 1,
+            pgid,
+        };
+        let pids = tracker.pids(&[root, orphan], pgid);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(
+            pids.contains(&orphan.pid),
+            "the existing group is still anchored by its root"
+        );
     }
 
     #[test]

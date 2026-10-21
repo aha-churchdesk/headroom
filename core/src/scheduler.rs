@@ -180,10 +180,7 @@ impl Scheduler {
         e.job.pgid = Some(pgid);
         // Killed between grant and start: the wrapper may have spawned anyway.
         if e.fate.is_some() {
-            return vec![Effect::Signal {
-                pgid,
-                sig: Sig::Term,
-            }];
+            return self.terminate(pgid, false, self.clock);
         }
         vec![]
     }
@@ -202,9 +199,8 @@ impl Scheduler {
         };
         let mut e = self.jobs.remove(&id).expect("by_conn");
         let mut fx = vec![];
-        if let Some(pgid) = e.job.pgid {
-            self.kills.retain(|(p, _)| *p != pgid);
-        }
+        // The wrapper reports its first child's exit, not the death of all
+        // its descendants. Keep any pending kill until its grace expires.
         let duration_ms = e.job.started_at.map_or(0, |t| now.saturating_sub(t));
         if e.job.started_at.is_some() && e.job.pgid.is_some() {
             let flagged = e.job.was_frozen || e.fate.is_some() || signal.is_some();
@@ -523,7 +519,9 @@ impl Scheduler {
     /// SIGTERM now, SIGKILL after the grace period. A stopped process can't
     /// act on SIGTERM, so a frozen group is continued first.
     fn terminate(&mut self, pgid: i32, frozen: bool, now: Millis) -> Vec<Effect> {
-        self.kills.push((pgid, now + self.cfg.kill_grace_s * 1000));
+        if !self.kills.iter().any(|(p, _)| *p == pgid) {
+            self.kills.push((pgid, now + self.cfg.kill_grace_s * 1000));
+        }
         let mut fx = vec![Effect::Signal {
             pgid,
             sig: Sig::Term,
@@ -1300,6 +1298,22 @@ mod tests {
     }
 
     #[test]
+    fn leader_exit_keeps_escalation_for_surviving_descendants() {
+        let mut s = sched(20);
+        s.enqueue(1, spec("a"), 0);
+        s.started(1, 100);
+        s.control(9, Control::Kill { id: 1 }, 1_000, 0);
+        s.exited(1, None, Some(15), 2_000, 0);
+        assert_eq!(s.pgids(), vec![100]);
+        // The sampler associates remembered descendants with their old root.
+        let mut surviving = usage(100, 0.1);
+        surviving.get_mut(&100).unwrap().groups = vec![300];
+        let fx = s.tick(snap(20), &surviving, 11_000);
+        assert_eq!(signals(&fx), vec![(100, Sig::Kill)]);
+        assert!(s.pgids().is_empty());
+    }
+
+    #[test]
     fn disconnect_of_a_queued_job_just_frees_its_place() {
         let mut s = sched(4);
         s.enqueue(1, spec("a"), 0); // idle queue: admitted
@@ -1481,6 +1495,24 @@ mod tests {
                 sig: Sig::Term
             }]
         );
+        assert_eq!(
+            signals(&s.tick(snap(20), &usage(100, 0.1), 10_000)),
+            vec![(100, Sig::Kill)]
+        );
+    }
+
+    #[test]
+    fn repeated_kills_keep_the_original_grace_deadline() {
+        let mut s = sched(20);
+        s.enqueue(1, spec("a"), 0);
+        s.started(1, 100);
+        s.control(9, Control::Kill { id: 1 }, 0, 0);
+        s.control(9, Control::Kill { id: 1 }, 9_000, 0);
+        assert_eq!(
+            signals(&s.tick(snap(20), &usage(100, 0.1), 10_000)),
+            vec![(100, Sig::Kill)]
+        );
+        assert!(signals(&s.tick(snap(20), &usage(100, 0.1), 19_000)).is_empty());
     }
 
     #[test]

@@ -222,7 +222,15 @@ impl Session {
                 }
             }
         });
-        let first = rx.recv_timeout(Duration::from_millis(500)).ok().flatten()?;
+        let first = match rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(Some(first)) => first,
+            _ => {
+                // The reader owns a clone of this socket. End the lease
+                // before failing open, even if that reader is still blocked.
+                let _ = writer.shutdown(std::net::Shutdown::Both);
+                return None;
+            }
+        };
         Some(Session {
             writer,
             rx,
@@ -415,8 +423,41 @@ impl Session {
                 }
                 Ok(Some(_)) | Err(RecvTimeoutError::Timeout) => {}
                 // The job keeps running without a scheduler; nothing more to hear.
-                Ok(None) | Err(RecvTimeoutError::Disconnected) => *daemon_gone = true,
+                Ok(None) | Err(RecvTimeoutError::Disconnected) => {
+                    // The daemon may have disappeared while this tree was
+                    // stopped. Fail open also means letting it run again.
+                    resume_without_daemon(pgid);
+                    *daemon_gone = true;
+                }
             }
+        }
+    }
+}
+
+fn resume_without_daemon(pgid: i32) {
+    let procs = Command::new("/bin/ps")
+        .args(["-axo", "pid=,ppid=,pgid="])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter_map(|line| {
+                    let mut fields = line.split_whitespace();
+                    Some(headroom_core::proctree::Proc {
+                        pid: fields.next()?.parse().ok()?,
+                        ppid: fields.next()?.parse().ok()?,
+                        pgid: fields.next()?.parse().ok()?,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let own = unsafe { libc::getpgrp() };
+    for group in headroom_core::proctree::job_groups(&procs, pgid) {
+        if group > 1 && group != own {
+            unsafe { libc::killpg(group, libc::SIGCONT) };
         }
     }
 }
@@ -453,6 +494,33 @@ impl Drop for Foreground {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unanswered_handshake_closes_the_queued_lease() {
+        let (client, daemon) = UnixStream::pair().unwrap();
+        daemon
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        assert!(Session::open(client, JobSpec::default()).is_none());
+        let mut daemon = BufReader::new(daemon);
+        assert!(matches!(
+            read_msg::<_, ClientMsg>(&mut daemon).unwrap(),
+            Some(ClientMsg::Enqueue(_))
+        ));
+        assert_eq!(read_msg::<_, ClientMsg>(&mut daemon).unwrap(), None);
+    }
+
+    #[test]
+    fn an_explicit_shell_preserves_bash_syntax() {
+        let options = RunOpts {
+            sh: Some("items=(first second); printf '%s' \"${items[0]}\"".into()),
+            shell: Some("/bin/bash".into()),
+            ..RunOpts::default()
+        };
+        let output = options.command(false, None).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"first");
+    }
 
     fn line(pos: usize, free: &str) -> String {
         format!("queued #{pos} of 2 · next needs 1.5 GB, {free} GB free")
