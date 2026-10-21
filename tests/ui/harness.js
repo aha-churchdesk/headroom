@@ -28,8 +28,12 @@ function node(tag) {
     addEventListener(type, fn) { listeners[type] = fn; },
     _listeners: listeners,
     append() {},
-    focus() {},
-    setSelectionRange() {},
+    focus() { document.activeElement = this; },
+    setSelectionRange(start, end, direction = 'none') {
+      this.selectionStart = start;
+      this.selectionEnd = end;
+      this.selectionDirection = direction;
+    },
   };
   Object.defineProperty(n, 'innerHTML', { get() { return n._html; }, set(v) { n._html = v; } });
   Object.defineProperty(n, 'textContent', { get() { return n._html; }, set(v) { n._html = v; } });
@@ -74,7 +78,7 @@ function loadUI() {
   global.document = {
     body: node('body'),
     activeElement: null,
-    getElementById: id => (byId[id] ||= node('div')),
+    getElementById: id => (byId[id] ||= Object.assign(node('div'), { id })),
     createElement: node,
     querySelectorAll: () => [],
   };

@@ -17,6 +17,7 @@ function test(name, fn) {
   ui.UI.expanded.clear();
   ui.UI.drafts.pattern = '';
   ui.UI.drafts.test = '';
+  document.activeElement = null;
   try {
     fn();
     pass++;
@@ -45,6 +46,23 @@ const tuned = ui.fixture('tuned');
 const tunedHistory = ui.fixture('tuned-history');
 const backfill = ui.fixture('backfill');
 const others = ui.fixture('others');
+
+test('state updates preserve the selected text and direction in both settings inputs', () => {
+  ui.setState(busy);
+  ui.UI.page = 'settings';
+  for (const [draft, id] of [['pattern', 'patIn'], ['test', 'testIn']]) {
+    ui.type(draft, 'custom test');
+    const input = document.getElementById(id);
+    input.focus();
+    for (const [start, end, direction] of [[0, 11, 'backward'], [2, 7, 'forward'], [4, 4, 'none']]) {
+      input.setSelectionRange(start, end, direction);
+      ui.setState(busy);
+      eq(document.activeElement.id, id);
+      eq([input.selectionStart, input.selectionEnd, input.selectionDirection],
+         [start, end, direction], draft);
+    }
+  }
+});
 
 // ── the main view ─────────────────────────────────────────────────────────
 

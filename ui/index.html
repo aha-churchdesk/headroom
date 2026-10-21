@@ -512,6 +512,8 @@ function render(){
   const scroll = view.scrollTop;
   const focus = document.activeElement && document.activeElement.id;
   const caret = focus && document.activeElement.selectionStart;
+  const selectionEnd = focus && document.activeElement.selectionEnd;
+  const selectionDirection = focus && document.activeElement.selectionDirection;
 
   $("head").innerHTML = renderHead(STATE);
   view.innerHTML = UI.page === "main"     ? renderMain(STATE)
@@ -527,7 +529,7 @@ function render(){
   view.scrollTop = scroll;
   if (focus && $(focus)){
     $(focus).focus();
-    if (caret != null) $(focus).setSelectionRange(caret, caret);
+    if (caret != null) $(focus).setSelectionRange(caret, selectionEnd, selectionDirection);
   }
   if (!LIVE) renderTray(STATE);
   refreshTip();
