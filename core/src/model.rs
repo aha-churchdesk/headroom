@@ -153,6 +153,10 @@ pub struct Job {
     /// Why the guard froze it, while it is frozen.
     #[serde(default)]
     pub guard_note: Option<String>,
+    /// The user resumed it from a guard freeze. The guard leaves it alone
+    /// until memory is back to normal, instead of freezing it again.
+    #[serde(default)]
+    pub spared: bool,
     pub pgid: Option<i32>,
     /// How its peak grows with workers, while it may be tuned.
     #[serde(default)]
@@ -202,6 +206,7 @@ impl Job {
             swap_at_start: 0,
             retry: 0,
             guard_note: None,
+            spared: false,
             pgid: None,
             scaling: None,
             tuned: None,

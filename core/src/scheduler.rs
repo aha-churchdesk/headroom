@@ -12,8 +12,8 @@ use crate::admission::{self, Blocked};
 use crate::config::Config;
 use crate::guard::{self, Action, GuardState};
 use crate::model::{
-    Bytes, FrozenBy, HistoryEntry, Job, JobId, JobSpec, JobState, Millis, Outcome, Part, Snapshot,
-    Tuned, merge_parts,
+    Bytes, FrozenBy, HistoryEntry, Job, JobId, JobSpec, JobState, Millis, Outcome, Part, Pressure,
+    Snapshot, Tuned, merge_parts,
 };
 use crate::profile::{Profiles, Run, Scaling};
 use crate::protocol::{Control, DaemonMsg, Listing};
@@ -372,6 +372,7 @@ impl Scheduler {
                 if e.job.state != JobState::Frozen {
                     return Err(format!("job {id} is not frozen"));
                 }
+                e.job.spared = e.job.frozen_by == Some(FrozenBy::Guard);
                 fx.extend(thaw(e));
             }
             Control::Configure { config } => {
@@ -424,7 +425,9 @@ impl Scheduler {
     ) -> Vec<Effect> {
         self.clock = self.clock.max(now);
         self.snap = snap;
+        let normal = self.snap.pressure == Pressure::Normal;
         for e in self.jobs.values_mut() {
+            e.job.spared &= !normal;
             if let Some(u) = e.job.pgid.and_then(|p| usage.get(&p)) {
                 e.job.footprint = u.footprint;
                 e.job.peak = e.job.peak.max(u.footprint);
@@ -1555,6 +1558,54 @@ mod tests {
             s.tick(snap(20), &usage(100, 1.0), t * 1000);
         }
         assert_eq!(s.list().running[0].guard_note, None);
+    }
+
+    #[test]
+    fn a_job_resumed_from_a_guard_freeze_stays_running_until_memory_recovers() {
+        let mut s = sched(20);
+        s.enqueue(1, spec("a"), 0);
+        s.started(1, 100);
+        let critical = Snapshot {
+            pressure: Pressure::Critical,
+            ..snap(1)
+        };
+        let mut t = 0;
+        let mut drive = |s: &mut Scheduler, snap: &Snapshot, secs: u64| {
+            let mut fx = vec![];
+            for _ in 0..secs {
+                t += 1000;
+                fx.extend(s.tick(snap.clone(), &usage(100, 1.0), t));
+            }
+            fx
+        };
+        drive(&mut s, &critical, 11);
+        assert_eq!(s.list().running[0].frozen_by, Some(FrozenBy::Guard));
+        s.control(9, Control::Resume { id: 1 }, 0, 0);
+        // Still critical for a minute: neither frozen again nor killed.
+        let fx = drive(&mut s, &critical, 60);
+        assert!(signals(&fx).is_empty(), "{fx:?}");
+        assert_eq!(s.list().running[0].state, JobState::Running);
+        // Once memory has been normal, the guard may freeze it again.
+        drive(&mut s, &snap(20), 1);
+        let fx = drive(&mut s, &critical, 11);
+        assert_eq!(signals(&fx), vec![(100, Sig::Stop)]);
+    }
+
+    #[test]
+    fn resuming_a_freeze_of_your_own_leaves_the_guard_in_charge() {
+        let mut s = sched(20);
+        s.enqueue(1, spec("a"), 0);
+        s.started(1, 100);
+        s.control(9, Control::Freeze { id: 1 }, 0, 0);
+        s.control(9, Control::Resume { id: 1 }, 0, 0);
+        let critical = Snapshot {
+            pressure: Pressure::Critical,
+            ..snap(1)
+        };
+        let fx: Vec<Effect> = (1..=11)
+            .flat_map(|t| s.tick(critical.clone(), &usage(100, 1.0), t * 1000))
+            .collect();
+        assert_eq!(signals(&fx), vec![(100, Sig::Stop)]);
     }
 
     fn ended_at(s: &mut Scheduler, conn: ConnId, wall: u64) {

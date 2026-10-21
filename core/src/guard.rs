@@ -9,8 +9,9 @@
 //!    actually frees memory, and requeue it once.
 //! 3. **Thaw** guard-frozen jobs, newest first, once pressure is back to normal.
 //!
-//! Only jobs Headroom started are ever touched, and never pinned ones. One
-//! freeze or thaw per window, so a single spike can't freeze everything.
+//! Only jobs Headroom started are ever touched, and never pinned ones, nor
+//! one the user resumed from a guard freeze until memory is normal again.
+//! One freeze or thaw per window, so a single spike can't freeze everything.
 
 use crate::config::{Config, KillMode};
 use crate::model::{FrozenBy, Job, JobId, JobState, Millis, Pressure, Snapshot};
@@ -84,7 +85,7 @@ pub fn step(
     let runaway = |j: &Job| j.footprint > j.runaway_at(cfg.runaway_factor, cfg.runaway_cap);
 
     if cfg.kill_mode == KillMode::FreezeKill {
-        for j in jobs.iter().filter(|j| !j.pinned) {
+        for j in jobs.iter().filter(|j| !j.pinned && !j.spared) {
             let requeue = j.retry < 1;
             // Frozen long enough and the pressure that froze it hasn't gone.
             // A runaway only needs warn: it is the problem, not a bystander.
@@ -136,7 +137,7 @@ pub fn step(
 
     let candidates = || {
         jobs.iter()
-            .filter(|j| j.state == JobState::Running && !j.pinned)
+            .filter(|j| j.state == JobState::Running && !j.pinned && !j.spared)
     };
 
     // A runaway is frozen as soon as memory is tight at all.
@@ -452,6 +453,37 @@ mod tests {
             &Config::default(),
         );
         assert!(matches!(acts[0].1, Action::Kill { id: 1, .. }));
+    }
+
+    #[test]
+    fn a_job_the_user_resumed_is_passed_over_for_the_next_one() {
+        let mut spared = running(2, 5_000);
+        spared.spared = true;
+        let jobs = [running(1, 0), spared.clone()];
+        let acts = drive(
+            &mut GuardState::default(),
+            Pressure::Critical,
+            &jobs,
+            0,
+            10,
+            &Config::default(),
+        );
+        assert!(
+            matches!(acts[..], [(10, Action::Freeze { id: 1, .. })]),
+            "{acts:?}"
+        );
+        // Alone, it is left running however long memory stays critical,
+        // even as a runaway or with swap growing.
+        spared.footprint = 50 * GIB;
+        let s = Snapshot {
+            swap_used: 50 * GIB,
+            ..snap(Pressure::Critical)
+        };
+        let mut gs = GuardState::default();
+        let acts: Vec<Action> = (0..=120)
+            .flat_map(|t| step(&mut gs, t * 1000, &s, &[&spared], &Config::default()))
+            .collect();
+        assert!(acts.is_empty(), "{acts:?}");
     }
 
     #[test]
