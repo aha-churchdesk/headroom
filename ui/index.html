@@ -545,6 +545,7 @@ function render(){
     if (caret != null) $(focus).setSelectionRange(caret, caret);
   }
   if (!LIVE) renderTray(STATE);
+  refreshTip();
 }
 
 const PRESSURE_TIP = {
@@ -1212,8 +1213,12 @@ function dropIndex(e){
 function clearDropMarks(){
   document.querySelectorAll(".drop-before,.drop-after").forEach(n => n.classList.remove("drop-before", "drop-after"));
 }
-$("pop").addEventListener("mouseover", (e) => {
-  const tip = $("tip"), t = e.target.closest && e.target.closest("[data-tip]");
+/* The tooltip follows the element under the pointer, found again after each
+   redraw: the numbers it explains change every second, and the element it
+   was opened on is replaced by the redraw. */
+const POINTER = { x: null, y: null };
+function showTip(t){
+  const tip = $("tip");
   if (!t){ tip.classList.remove("on"); return; }
   tip.textContent = t.dataset.tip;
   tip.classList.add("on");
@@ -1222,8 +1227,17 @@ $("pop").addEventListener("mouseover", (e) => {
   const w = tip.offsetWidth, h = tip.offsetHeight;
   tip.style.left = Math.max(box.left + 6, Math.min(r.left + r.width / 2 - w / 2, box.right - w - 6)) + "px";
   tip.style.top = (r.bottom + 6 + h <= box.bottom ? r.bottom + 6 : r.top - h - 6) + "px";
+}
+function refreshTip(){
+  if (POINTER.x == null || !document.elementFromPoint) return;
+  const el = document.elementFromPoint(POINTER.x, POINTER.y);
+  showTip(el && el.closest ? el.closest("[data-tip]") : null);
+}
+$("pop").addEventListener("mousemove", (e) => {
+  POINTER.x = e.clientX; POINTER.y = e.clientY;
+  showTip(e.target.closest && e.target.closest("[data-tip]"));
 });
-$("pop").addEventListener("mouseleave", () => $("tip").classList.remove("on"));
+$("pop").addEventListener("mouseleave", () => { POINTER.x = null; $("tip").classList.remove("on"); });
 
 // Hovering a graph moves the crosshair on all three. Only the header is
 // redrawn, so the rest of the popover keeps its own hover and scroll.
