@@ -130,11 +130,11 @@ test('a head passed over says how often and until when; the job that went first 
 
 test('a strip above what is running sums up the last 24 hours', () => {
   ui.setState(history);
-  has(ui.view(), 'Last 24h 5 runs 3 failed 0 waited 0s wait p50 0s wait p95 0 shrunk 0 went first');
+  has(ui.view(), 'Last 24h 5 runs 3 failed 0 waited 0s wait p50 0s wait p95 0 went first');
   has(ui.html(), '1 exited with an error, 2 killed to free memory');
   ui.setState(tunedHistory);
   has(ui.view(), '2 runs 0 failed');
-  has(ui.view(), '1 shrunk');
+  lacks(ui.view(), 'shrunk');
   ui.setState(backfill);
   has(ui.view(), '1 went first');
 });
@@ -231,8 +231,8 @@ test('zeros are dimmed, failures are not coloured, and every stat explains itsel
   ui.setState(history);
   const html = ui.html();
   has(html, 'class="" data-tip="1 exited with an error');
-  has(html, 'class="zero" data-tip="Started with fewer workers');
-  eq((html.match(/data-tip=/g) || []).length, 7, 'one tooltip per stat');
+  has(html, 'class="zero" data-tip="Short jobs that started ahead');
+  eq((html.match(/data-tip=/g) || []).length, 6, 'one tooltip per stat');
   lacks(html, 'class="bad"');
   ui.setState(busy);
   eq(busy.last_day.runs, 0, 'the capture has nothing finished yet');

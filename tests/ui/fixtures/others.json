@@ -27,7 +27,7 @@
       "peak": 1075643496,
       "estimate": 1075643496,
       "exit": 0,
-      "ended_ago_s": 1,
+      "ended_ago_s": 0,
       "tuned": null,
       "ahead_of": null,
       "guard": null
@@ -41,7 +41,7 @@
       "peak": 1075643496,
       "estimate": 1075643496,
       "exit": 0,
-      "ended_ago_s": 4,
+      "ended_ago_s": 3,
       "tuned": null,
       "ahead_of": null,
       "guard": null
@@ -55,7 +55,7 @@
       "peak": 0,
       "estimate": 0,
       "exit": 0,
-      "ended_ago_s": 7,
+      "ended_ago_s": 6,
       "tuned": null,
       "ahead_of": "browser-cd · e2e.sh",
       "guard": null
@@ -69,7 +69,7 @@
       "peak": 0,
       "estimate": 536870912,
       "exit": 0,
-      "ended_ago_s": 7,
+      "ended_ago_s": 6,
       "tuned": null,
       "ahead_of": null,
       "guard": null
@@ -111,7 +111,7 @@
       "peak": 1075643496,
       "estimate": 1432289656,
       "exit": 0,
-      "ended_ago_s": 11,
+      "ended_ago_s": 10,
       "tuned": null,
       "ahead_of": null,
       "guard": null
@@ -125,7 +125,7 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": 0,
-      "ended_ago_s": 14,
+      "ended_ago_s": 13,
       "tuned": null,
       "ahead_of": null,
       "guard": null
@@ -139,7 +139,7 @@
       "peak": 1075643496,
       "estimate": 1610612736,
       "exit": 0,
-      "ended_ago_s": 14,
+      "ended_ago_s": 13,
       "tuned": null,
       "ahead_of": null,
       "guard": null
@@ -154,7 +154,6 @@
     "longest_wait_s": 3,
     "wait_p50_s": 3,
     "wait_p95_s": 3,
-    "shrunk": 0,
     "went_first": 1,
     "more": false
   },
@@ -164,9 +163,9 @@
       "total": {
         "runs": 9,
         "failed": 0,
-        "run_s": 16,
+        "run_s": 17,
         "wait_s": 3,
-        "gb_h": 0.0044715711805555555,
+        "gb_h": 0.004619683159722222,
         "peak": 1075643496
       },
       "count": 2,
@@ -176,7 +175,7 @@
           "failed": 0,
           "run_s": 16,
           "wait_s": 3,
-          "gb_h": 0.0044715711805555555,
+          "gb_h": 0.004619683159722222,
           "peak": 1075643496,
           "key": "~/Projects/work-scheduler-mcp|headroom|e2e.sh"
         },
@@ -196,9 +195,9 @@
       "total": {
         "runs": 9,
         "failed": 0,
-        "run_s": 16,
+        "run_s": 17,
         "wait_s": 3,
-        "gb_h": 0.0044715711805555555,
+        "gb_h": 0.004619683159722222,
         "peak": 1075643496
       },
       "count": 2,
@@ -208,7 +207,7 @@
           "failed": 0,
           "run_s": 16,
           "wait_s": 3,
-          "gb_h": 0.0044715711805555555,
+          "gb_h": 0.004619683159722222,
           "peak": 1075643496,
           "key": "~/Projects/work-scheduler-mcp|headroom|e2e.sh"
         },
@@ -228,9 +227,9 @@
       "total": {
         "runs": 9,
         "failed": 0,
-        "run_s": 16,
+        "run_s": 17,
         "wait_s": 3,
-        "gb_h": 0.0044715711805555555,
+        "gb_h": 0.004619683159722222,
         "peak": 1075643496
       },
       "count": 2,
@@ -240,7 +239,7 @@
           "failed": 0,
           "run_s": 16,
           "wait_s": 3,
-          "gb_h": 0.0044715711805555555,
+          "gb_h": 0.004619683159722222,
           "peak": 1075643496,
           "key": "~/Projects/work-scheduler-mcp|headroom|e2e.sh"
         },
@@ -293,10 +292,10 @@
       "path": "~/Projects/work-scheduler-mcp/target/debug/headroom-hog",
       "top": [
         {
-          "pid": 44971,
+          "pid": 31193,
           "bytes": 323650112,
           "cmd": "~/Projects/work-scheduler-mcp/target/debug/headroom-hog 0.3 30",
-          "cwd": "/private/var/folders/g3/qjbw6xys4_1cb6zs26vqbjkr0000gn/T/hr-ui-others-project-38266",
+          "cwd": "/private/var/folders/g3/qjbw6xys4_1cb6zs26vqbjkr0000gn/T/hr-ui-others-project-24625",
           "started_by": [
             "sh",
             "e2e-26826fea9935c678",
@@ -314,10 +313,10 @@
       "path": "/bin/bash",
       "top": [
         {
-          "pid": 44959,
+          "pid": 31181,
           "bytes": 1671552,
           "cmd": "/bin/sh -c '~/Projects/work-scheduler-mcp/target/debug/headroom-hog 0.3 30; true'",
-          "cwd": "/private/var/folders/g3/qjbw6xys4_1cb6zs26vqbjkr0000gn/T/hr-ui-others-project-38266",
+          "cwd": "/private/var/folders/g3/qjbw6xys4_1cb6zs26vqbjkr0000gn/T/hr-ui-others-project-24625",
           "started_by": [
             "e2e-26826fea9935c678",
             "cargo",

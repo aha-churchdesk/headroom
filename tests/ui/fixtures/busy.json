@@ -141,7 +141,6 @@
     "longest_wait_s": 0,
     "wait_p50_s": 0,
     "wait_p95_s": 0,
-    "shrunk": 0,
     "went_first": 0,
     "more": false
   },

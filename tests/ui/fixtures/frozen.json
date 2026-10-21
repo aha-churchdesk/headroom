@@ -31,9 +31,9 @@
       "footprint": 216236536,
       "peak": 216236536,
       "runaway_at": 8589934592,
-      "elapsed_s": 2,
+      "elapsed_s": 1,
       "frozen_s": 0,
-      "waited_s": 2,
+      "waited_s": 1,
       "cpu_pct": 0.0,
       "procs": 1,
       "now": null,
@@ -64,7 +64,7 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": null,
-      "ended_ago_s": 3,
+      "ended_ago_s": 1,
       "tuned": null,
       "ahead_of": null,
       "guard": {
@@ -81,7 +81,7 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": 0,
-      "ended_ago_s": 3,
+      "ended_ago_s": 1,
       "tuned": null,
       "ahead_of": null,
       "guard": null
@@ -95,7 +95,7 @@
       "peak": 0,
       "estimate": 1610612736,
       "exit": 3,
-      "ended_ago_s": 3,
+      "ended_ago_s": 2,
       "tuned": null,
       "ahead_of": null,
       "guard": null
@@ -110,7 +110,6 @@
     "longest_wait_s": 0,
     "wait_p50_s": 0,
     "wait_p95_s": 0,
-    "shrunk": 0,
     "went_first": 0,
     "more": false
   },
@@ -129,21 +128,21 @@
       "rows": [
         {
           "runs": 1,
-          "failed": 1,
-          "run_s": 0,
-          "wait_s": 0,
-          "gb_h": 0.0,
-          "peak": 0,
-          "key": "~/Projects/work-scheduler-mcp|headroom|exit 3"
-        },
-        {
-          "runs": 1,
           "failed": 0,
           "run_s": 0,
           "wait_s": 0,
           "gb_h": 0.0,
           "peak": 0,
           "key": "~/Projects/work-scheduler-mcp|headroom|echo ok"
+        },
+        {
+          "runs": 1,
+          "failed": 1,
+          "run_s": 0,
+          "wait_s": 0,
+          "gb_h": 0.0,
+          "peak": 0,
+          "key": "~/Projects/work-scheduler-mcp|headroom|exit 3"
         },
         {
           "runs": 1,
@@ -170,21 +169,21 @@
       "rows": [
         {
           "runs": 1,
-          "failed": 1,
-          "run_s": 0,
-          "wait_s": 0,
-          "gb_h": 0.0,
-          "peak": 0,
-          "key": "~/Projects/work-scheduler-mcp|headroom|exit 3"
-        },
-        {
-          "runs": 1,
           "failed": 0,
           "run_s": 0,
           "wait_s": 0,
           "gb_h": 0.0,
           "peak": 0,
           "key": "~/Projects/work-scheduler-mcp|headroom|echo ok"
+        },
+        {
+          "runs": 1,
+          "failed": 1,
+          "run_s": 0,
+          "wait_s": 0,
+          "gb_h": 0.0,
+          "peak": 0,
+          "key": "~/Projects/work-scheduler-mcp|headroom|exit 3"
         },
         {
           "runs": 1,
@@ -211,21 +210,21 @@
       "rows": [
         {
           "runs": 1,
-          "failed": 1,
-          "run_s": 0,
-          "wait_s": 0,
-          "gb_h": 0.0,
-          "peak": 0,
-          "key": "~/Projects/work-scheduler-mcp|headroom|exit 3"
-        },
-        {
-          "runs": 1,
           "failed": 0,
           "run_s": 0,
           "wait_s": 0,
           "gb_h": 0.0,
           "peak": 0,
           "key": "~/Projects/work-scheduler-mcp|headroom|echo ok"
+        },
+        {
+          "runs": 1,
+          "failed": 1,
+          "run_s": 0,
+          "wait_s": 0,
+          "gb_h": 0.0,
+          "peak": 0,
+          "key": "~/Projects/work-scheduler-mcp|headroom|exit 3"
         },
         {
           "runs": 1,

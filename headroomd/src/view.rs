@@ -107,7 +107,6 @@ fn last_day(history: &[HistoryEntry], wall: u64) -> Value {
         "longest_wait_s": secs(waits.last().copied().unwrap_or(0)),
         "wait_p50_s": secs(percentile(&waits, 50)),
         "wait_p95_s": secs(percentile(&waits, 95)),
-        "shrunk": count(&|h| h.tuned.is_some()),
         "went_first": count(&|h| h.ahead_of.is_some()),
         "more": history.len() >= HISTORY_MAX && recent.len() == history.len(),
     })
@@ -461,7 +460,7 @@ pub fn tray(l: &Listing) -> (u32, Option<[u8; 3]>, String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use headroom_core::model::{FrozenBy, GIB, JobSpec, Snapshot, Tuned};
+    use headroom_core::model::{FrozenBy, GIB, JobSpec, Snapshot};
 
     fn listing() -> Listing {
         let spec = JobSpec {
@@ -764,16 +763,11 @@ mod tests {
     #[test]
     fn last_day_sums_what_finished_in_it() {
         let wall = 100_000;
-        let mut shrunk = ended(90_000, Outcome::Exited, Some(0), 90_000);
-        shrunk.tuned = Some(Tuned {
-            workers: 3,
-            default: 9,
-        });
         let mut first = ended(80_000, Outcome::Exited, Some(1), 0);
         first.ahead_of = Some("r · e2e".into());
         let h = vec![
             ended(99_990, Outcome::Requeued, None, 30_000),
-            shrunk,
+            ended(90_000, Outcome::Exited, Some(0), 90_000),
             first,
             ended(70_000, Outcome::Cancelled, None, 20_000),
             ended(65_000, Outcome::Exited, None, 0),
@@ -788,7 +782,7 @@ mod tests {
                 "runs": 7, "failed": 2, "killed": 2,
                 "waited": 3, "waited_s": 121, "longest_wait_s": 90,
                 "wait_p50_s": 30, "wait_p95_s": 90,
-                "shrunk": 1, "went_first": 1, "more": false,
+                "went_first": 1, "more": false,
             })
         );
     }
