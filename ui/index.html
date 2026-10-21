@@ -792,19 +792,21 @@ function keyName(k){
 function renderCommands(S){
   const wins = S.commands || [];
   const w = wins.find(x => x.days === UI.cmdDays) || wins[0];
-  if (!w || !w.count) return pageHead("Commands") + `<div class="empty">No runs ${w ? `in the last ${w.days} days` : "yet"}</div>`;
+  if (!w) return pageHead("Commands") + `<div class="empty">No runs yet</div>`;
   const seg = (items, cur, act) => `<span class="seg">${items.map(([v, l]) =>
     `<button class="${v === cur ? "on" : ""}" data-act="${act}" data-val="${v}">${l}</button>`).join("")}</span>`;
+  const controls = `<div class="cmd-ctl">
+    ${seg(wins.map(x => [x.days, `${x.days}d`]), w.days, "cmd_days")}
+    ${seg(CMD_SORTS, UI.cmdSort, "cmd_sort")}
+  </div>`;
+  if (!w.count) return pageHead("Commands") + controls + `<div class="empty">No runs in the last ${w.days} days</div>`;
   const t = w.total;
   const cell = (value, label, tip, cls = "") => `<div class="${cls}" data-tip="${tip}"><b>${value}</b><span>${label}</span></div>`;
   const key = UI.cmdSort;
   const rows = [...w.rows].sort((a, b) => b[key] - a[key] || b.run_s - a.run_s);
   const top = Math.max(...rows.map(r => r[key])) || 1;
   return pageHead("Commands") + `
-    <div class="cmd-ctl">
-      ${seg(wins.map(x => [x.days, `${x.days}d`]), w.days, "cmd_days")}
-      ${seg(CMD_SORTS, key, "cmd_sort")}
-    </div>
+    ${controls}
     <div class="day-row five num cmd-total">
       ${cell(t.runs, t.runs === 1 ? "run" : "runs", "Runs that finished, of every command")}
       ${cell(t.failed, "failed", "Exited with an error, or killed twice to free memory", t.failed ? "" : "zero")}
@@ -864,7 +866,7 @@ function renderProfile(S){
       </div>` : ""}
       <div style="margin-top:14px">
         <button class="chip-btn ${confirming(key) ? "confirm" : "danger"}" data-act="reset_profile"
-          data-key="${esc(UI.profileKey)}" data-confirm="${key}">
+          data-key="${esc(UI.profileKey)}" data-confirm="${esc(key)}">
           ${confirming(key) ? "Reset? Click again" : "Reset profile"}</button>
         <span class="faint" style="font-size:11px;margin-left:6px">Next run starts from the default estimate.</span>
       </div>

@@ -227,6 +227,19 @@ test('the commands page says when there is nothing to show, or more than it list
   has(ui.view(), `The ${week.rows.length} with the most time running, of ${week.rows.length + 60} commands.`);
 });
 
+test('an empty week keeps the controls for reaching older command activity', () => {
+  const week = { ...history.commands[0], count: 0, rows: [] };
+  ui.setState({ ...history, commands: [week, ...history.commands.slice(1)] });
+  ui.click({ act: 'goto', page: 'commands' });
+  has(ui.view(), 'No runs in the last 7 days');
+  ui.click({ act: 'cmd_days', val: '30' });
+  lacks(ui.view(), 'No runs');
+  has(ui.view(), 'headroom-hog');
+  ui.click({ act: 'cmd_days', val: '7' });
+  has(ui.view(), 'No runs in the last 7 days');
+  eq(ui.sent, [], 'changing the period stays in the page');
+});
+
 test('zeros are dimmed, failures are not coloured, and every stat explains itself on hover', () => {
   ui.setState(history);
   const html = ui.html();
@@ -431,6 +444,24 @@ test('a profile with no recorded runs says so', () => {
   ui.UI.profileKey = busy.running[0].key;
   ui.setState(busy);
   has(ui.view(), 'No runs recorded for this command yet.');
+});
+
+test('profile reset escapes repository names and preserves its confirmation key', () => {
+  const key = '/repo/" onpointerenter="alert(1) <&|pnpm test';
+  const profile = Object.values(history.profiles)[0];
+  ui.setState({ ...history, profiles: { [key]: profile } });
+  ui.UI.page = 'profile';
+  ui.UI.profileKey = key;
+  ui.setState(ui.STATE);
+  lacks(ui.html(), ' onpointerenter="alert(1)');
+  const button = ui.find({ act: 'reset_profile', key });
+  eq(button.length, 1);
+  eq(button[0].dataset.confirm, 'reset:' + key);
+  ui.click({ act: 'reset_profile', key });
+  eq(ui.sent, []);
+  has(ui.view(), 'Reset? Click again');
+  ui.click({ act: 'reset_profile', key });
+  eq(ui.sent, [{ cmd: 'reset_profile', key }]);
 });
 
 test('settings send whole values the bridge understands', () => {
