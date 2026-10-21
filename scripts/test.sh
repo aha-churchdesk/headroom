@@ -26,9 +26,9 @@ $RUN cargo clippy --workspace --all-targets --quiet -- -D warnings || status=1
 
 if [ "${1:-}" != "--coverage" ]; then
   step tests
-  $RUN cargo test --workspace --quiet 2>&1 | grep -Ev '^\s*$|^running 0 tests|0 passed; 0 failed' || true
-  # grep swallows cargo's exit status; ask again, quietly, for the verdict.
-  $RUN cargo test --workspace --quiet >/dev/null 2>&1 || { echo "FAILED"; status=1; }
+  $RUN cargo test --workspace --quiet 2>&1 | grep -Ev '^\s*$|^running 0 tests|0 passed; 0 failed'
+  # Keep cargo's verdict from this run; rerunning can hide a flaky failure.
+  if [ "${PIPESTATUS[0]}" -ne 0 ]; then echo "FAILED"; status=1; fi
 else
   step "tests + coverage"
   $RUN cargo llvm-cov clean --workspace >/dev/null 2>&1
