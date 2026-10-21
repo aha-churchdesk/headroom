@@ -7,8 +7,9 @@
 
 use std::collections::VecDeque;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -21,6 +22,7 @@ use crate::tally::Tally;
 pub const HOME_ENV: &str = "HEADROOM_HOME";
 /// `sun_path` is 104 bytes on macOS, including the terminating NUL.
 const SOCKET_MAX: usize = 104;
+static SAVE_ID: AtomicU64 = AtomicU64::new(0);
 
 unsafe extern "C" {
     fn confstr(name: i32, buf: *mut u8, len: usize) -> usize;
@@ -109,10 +111,33 @@ impl Store {
 
     fn save<T: Serialize>(&self, name: &str, value: &T) -> io::Result<()> {
         let path = self.root.join(name);
-        let tmp = path.with_extension("json.tmp");
         let body = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
-        fs::write(&tmp, body)?;
-        fs::rename(&tmp, &path)
+        // Hooks can save newly adopted defaults at the same time as the
+        // daemon. Each writer must own its temporary file until rename.
+        let (tmp, mut file) = loop {
+            let id = SAVE_ID.fetch_add(1, Ordering::Relaxed);
+            let tmp = self
+                .root
+                .join(format!(".{name}.{}.{id}.tmp", std::process::id()));
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)
+            {
+                Ok(file) => break (tmp, file),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        };
+        let result = (|| {
+            file.write_all(&body)?;
+            drop(file);
+            fs::rename(&tmp, &path)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        result
     }
 
     /// The config, with any new default patterns adopted and saved.
@@ -238,6 +263,37 @@ mod tests {
         let s = tmp("missing");
         assert_eq!(s.load_config(), Config::default());
         assert!(s.load_history().is_empty());
+    }
+
+    #[test]
+    fn concurrent_saves_publish_complete_files_without_colliding() {
+        use std::sync::{Arc, Barrier};
+
+        let store = tmp("concurrent");
+        store.save_config(&Config::default()).unwrap();
+        let start = Arc::new(Barrier::new(12));
+        let threads: Vec<_> = (0..12)
+            .map(|worker| {
+                let store = store.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    for turn in 0..8 {
+                        let config = Config {
+                            wait_cap_s: worker * 8 + turn,
+                            ..Config::default()
+                        };
+                        store.save_config(&config).unwrap();
+                        let contents = fs::read(store.root().join("config.json")).unwrap();
+                        serde_json::from_slice::<Config>(&contents).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(fs::read_dir(store.root()).unwrap().count(), 1);
     }
 
     #[test]
