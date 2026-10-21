@@ -754,6 +754,7 @@ function renderRunning(j){
       <div class="l2 num">
         ${fpBar(j)}
         <span class="meta">${frozen ? `❄︎ frozen ${dur(j.frozen_s)}` : dur(j.elapsed_s)}</span>
+        <span class="meta" title="Memory in use now, all its processes">RAM ${gb(j.footprint)} GB</span>
         <span class="meta">CPU ${Math.round(j.cpu_pct)}%</span>
         ${j.tuned ? `<span class="meta" title="Started with fewer workers so it fits in memory; it runs slower">${j.tuned.workers}/${j.tuned.default} workers</span>` : ""}
         <span class="acts-i">
