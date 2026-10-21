@@ -363,8 +363,8 @@ impl Session {
             };
             let pgid = child.id() as i32;
             self.send(&ClientMsg::Started { pid: pgid, pgid });
-            let tty = Foreground::take(pgid);
-            let (status, killed) = self.supervise(&mut child, pgid, &mut daemon_gone);
+            let mut tty = Foreground::take(pgid);
+            let (status, killed) = self.supervise(&mut child, pgid, &mut daemon_gone, &mut tty);
             drop(tty);
             self.send(&ClientMsg::Exited {
                 code: status.code(),
@@ -395,15 +395,59 @@ impl Session {
         child: &mut Child,
         pgid: i32,
         daemon_gone: &mut bool,
+        tty: &mut Option<Foreground>,
     ) -> (ExitStatus, Option<(String, bool)>) {
         let mut killed = None;
+        let mut cancelled = false;
         loop {
-            if let Ok(Some(status)) = child.try_wait() {
-                return (status, killed);
-            }
             let sig = SIGNALLED.swap(0, Ordering::Relaxed);
             if sig != 0 {
-                unsafe { libc::killpg(pgid, sig) };
+                cancelled = true;
+                if *daemon_gone {
+                    unsafe { libc::killpg(pgid, sig) };
+                } else {
+                    // The daemon discovers every subgroup before delivering
+                    // cancellation and retains survivors for grace escalation.
+                    self.send(&ClientMsg::Signal { signal: sig });
+                }
+            }
+            let mut raw = 0;
+            let waited = unsafe {
+                libc::waitpid(child.id() as i32, &mut raw, libc::WNOHANG | libc::WUNTRACED)
+            };
+            if waited < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::EINTR) {
+                    note(&format!("can't wait for command: {error}"));
+                    return (ExitStatus::from_raw(127 << 8), killed);
+                }
+            }
+            if waited > 0 {
+                if libc::WIFEXITED(raw) || libc::WIFSIGNALED(raw) {
+                    return (
+                        ExitStatus::from_raw(raw),
+                        if cancelled { None } else { killed },
+                    );
+                }
+                if libc::WIFSTOPPED(raw)
+                    && matches!(
+                        libc::WSTOPSIG(raw),
+                        libc::SIGTSTP | libc::SIGTTIN | libc::SIGTTOU
+                    )
+                {
+                    self.send(&ClientMsg::TerminalStopped { stopped: true });
+                    if let Some(tty) = tty {
+                        tty.restore();
+                    }
+                    // Let the invoking shell see its own job stop. A daemon
+                    // SIGSTOP deliberately does not suspend this supervisor.
+                    unsafe { libc::raise(libc::WSTOPSIG(raw)) };
+                    if let Some(tty) = tty {
+                        tty.reclaim(pgid);
+                    }
+                    self.send(&ClientMsg::TerminalStopped { stopped: false });
+                    unsafe { libc::killpg(pgid, libc::SIGCONT) };
+                }
             }
             if *daemon_gone {
                 std::thread::sleep(Duration::from_millis(100));
@@ -466,6 +510,7 @@ fn resume_without_daemon(pgid: i32) {
 /// Ctrl-C and keyboard input reach it directly. Restored on drop.
 struct Foreground {
     ours: libc::pid_t,
+    child: libc::pid_t,
 }
 
 impl Foreground {
@@ -475,19 +520,48 @@ impl Foreground {
         }
         unsafe {
             let ours = libc::getpgrp();
-            if libc::tcgetpgrp(0) != ours {
-                return None; // we're in the background ourselves
-            }
-            // Taking the terminal back later happens from the background.
-            libc::signal(libc::SIGTTOU, libc::SIG_IGN);
-            (libc::tcsetpgrp(0, pgid) == 0).then_some(Foreground { ours })
+            let tty = Foreground { ours, child: pgid };
+            tty.reclaim(pgid);
+            Some(tty)
         }
+    }
+
+    fn restore(&self) {
+        unsafe {
+            // A background continuation must not steal the shell's terminal.
+            if libc::tcgetpgrp(0) == self.child {
+                set_foreground(self.ours);
+            }
+        }
+    }
+
+    fn reclaim(&self, pgid: i32) {
+        unsafe {
+            if libc::tcgetpgrp(0) == self.ours {
+                set_foreground(pgid);
+            }
+        }
+    }
+}
+
+/// Changing foreground groups is allowed from the background only while
+/// SIGTTOU is blocked. Preserve the inherited disposition for later children.
+unsafe fn set_foreground(pgid: i32) -> i32 {
+    unsafe {
+        let mut blocked = std::mem::zeroed();
+        let mut previous = std::mem::zeroed();
+        libc::sigemptyset(&mut blocked);
+        libc::sigaddset(&mut blocked, libc::SIGTTOU);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &blocked, &mut previous);
+        let result = libc::tcsetpgrp(0, pgid);
+        libc::pthread_sigmask(libc::SIG_SETMASK, &previous, std::ptr::null_mut());
+        result
     }
 }
 
 impl Drop for Foreground {
     fn drop(&mut self) {
-        unsafe { libc::tcsetpgrp(0, self.ours) };
+        self.restore();
     }
 }
 

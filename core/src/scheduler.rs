@@ -34,12 +34,15 @@ pub enum Sig {
     Cont,
     Term,
     Kill,
+    Int,
+    Hup,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     Send(ConnId, DaemonMsg),
     Signal { pgid: i32, sig: Sig },
+    ContinueWrapper { pid: i32 },
     SaveProfiles,
     SaveHistory,
     SaveConfig,
@@ -67,6 +70,7 @@ enum Fate {
     Requeue(String),
     GiveUp(String),
     ManualKill,
+    Signalled,
 }
 
 #[derive(Clone, Debug)]
@@ -76,6 +80,8 @@ struct Entry {
     fate: Option<Fate>,
     /// Last position report sent, so clients only hear about changes.
     told: Option<(usize, usize, Option<String>)>,
+    terminal_stopped: bool,
+    terminal_wake: bool,
 }
 
 pub struct Scheduler {
@@ -128,6 +134,15 @@ impl Scheduler {
         &self.snap
     }
 
+    /// Daemon shutdown releases its own pauses, preserving shell job control.
+    pub fn shutdown_thaws(&self) -> Vec<i32> {
+        self.jobs
+            .values()
+            .filter(|e| e.job.state == JobState::Frozen && !e.terminal_stopped)
+            .filter_map(|e| e.job.pgid)
+            .collect()
+    }
+
     fn by_conn(&self, conn: ConnId) -> Option<JobId> {
         self.jobs
             .iter()
@@ -165,6 +180,8 @@ impl Scheduler {
                 conn,
                 fate: None,
                 told: None,
+                terminal_stopped: false,
+                terminal_wake: false,
             },
         );
         self.order.push(id);
@@ -242,12 +259,95 @@ impl Scheduler {
             }
             Some(Fate::GiveUp(why)) => (Outcome::GaveUp, Some(why)),
             Some(Fate::ManualKill) => (Outcome::ManualKill, Some("killed by you".into())),
+            Some(Fate::Signalled) => (Outcome::Exited, None),
             None => (Outcome::Exited, None),
         };
         self.push_history(&e.job, duration_ms, code, wall, outcome, why);
         fx.push(Effect::SaveHistory);
         fx.extend(self.settle(now));
         fx
+    }
+
+    /// Forward wrapper cancellation while retaining descendant cleanup after exit.
+    pub fn signalled(&mut self, conn: ConnId, sig: Sig, now: Millis) -> Vec<Effect> {
+        self.clock = self.clock.max(now);
+        if !matches!(sig, Sig::Int | Sig::Term | Sig::Hup) {
+            return vec![];
+        }
+        let Some(e) = self.by_conn(conn).and_then(|id| self.jobs.get_mut(&id)) else {
+            return vec![];
+        };
+        // Cancellation overrides a guard requeue, but preserves the child's
+        // actual exit status and the usual history outcome.
+        e.fate = Some(Fate::Signalled);
+        let Some(pgid) = e.job.pgid else {
+            return vec![];
+        };
+        let frozen = e.job.state == JobState::Frozen;
+        let mut fx = self.terminate(pgid, frozen, now);
+        fx[0] = Effect::Signal { pgid, sig };
+        fx
+    }
+
+    /// A child killed by a terminal signal still needs descendant cleanup,
+    /// while a guard/manual kill must retain its already decided outcome.
+    pub fn child_signalled(&mut self, conn: ConnId, sig: Sig, now: Millis) -> Vec<Effect> {
+        if self
+            .by_conn(conn)
+            .and_then(|id| self.jobs.get(&id))
+            .is_none_or(|e| e.fate.is_some())
+        {
+            return vec![];
+        }
+        self.signalled(conn, sig, now)
+    }
+
+    /// The wrapper owns terminal ordering; the daemon stops/resumes its whole tree.
+    pub fn terminal_stopped(&mut self, conn: ConnId, stopped: bool, now: Millis) -> Vec<Effect> {
+        self.clock = self.clock.max(now);
+        let Some(e) = self.by_conn(conn).and_then(|id| self.jobs.get_mut(&id)) else {
+            return vec![];
+        };
+        e.terminal_stopped = stopped;
+        if !stopped {
+            e.terminal_wake = false;
+        }
+        if stopped && e.fate.is_some() {
+            // Termination can win just before the wrapper reports its stop.
+            // Keep waking it until it acknowledges continuation and can reap.
+            e.terminal_wake = true;
+            let mut fx = vec![];
+            if let Some(pgid) = e.job.pgid {
+                fx.push(Effect::Signal {
+                    pgid,
+                    sig: Sig::Cont,
+                });
+            }
+            if let Some(pid) = e.job.spec.pid {
+                fx.push(Effect::ContinueWrapper { pid });
+            }
+            return fx;
+        }
+        if stopped && e.job.state != JobState::Queued {
+            freeze(e, FrozenBy::User, now);
+            return e
+                .job
+                .pgid
+                .map(|pgid| {
+                    vec![Effect::Signal {
+                        pgid,
+                        sig: Sig::Stop,
+                    }]
+                })
+                .unwrap_or_default();
+        } else if !stopped
+            && e.job.state == JobState::Frozen
+            && e.job.frozen_by == Some(FrozenBy::User)
+        {
+            // The wrapper sends this only after restoring foreground ownership.
+            return thaw(e);
+        }
+        vec![]
     }
 
     /// The client went away. A running job's processes are ended with it.
@@ -330,6 +430,12 @@ impl Scheduler {
                     return self.apply_control(Control::Cancel { id }, now, wall, fx);
                 }
                 let e = self.jobs.get_mut(&id).expect("checked");
+                if e.terminal_stopped {
+                    e.terminal_wake = true;
+                    if let Some(pid) = e.job.spec.pid {
+                        fx.push(Effect::ContinueWrapper { pid });
+                    }
+                }
                 e.fate = Some(Fate::ManualKill);
                 let (conn, pgid) = (e.conn, e.job.pgid);
                 fx.push(Effect::Send(
@@ -371,6 +477,12 @@ impl Scheduler {
                     return Err(format!("job {id} is not frozen"));
                 }
                 e.job.spared = e.job.frozen_by == Some(FrozenBy::Guard);
+                if e.terminal_stopped {
+                    e.terminal_wake = true;
+                    if let Some(pid) = e.job.spec.pid {
+                        fx.push(Effect::ContinueWrapper { pid });
+                    }
+                }
                 fx.extend(thaw(e));
             }
             Control::Configure { config } => {
@@ -436,6 +548,18 @@ impl Scheduler {
             }
         }
         let mut fx = vec![];
+
+        // A control can arrive after the stop notice but before the wrapper
+        // actually suspends. Repeat CONT until its continuation acknowledges it.
+        for e in self
+            .jobs
+            .values()
+            .filter(|e| e.terminal_stopped && e.terminal_wake)
+        {
+            if let Some(pid) = e.job.spec.pid {
+                fx.push(Effect::ContinueWrapper { pid });
+            }
+        }
 
         // Only jobs with a process group can be frozen or killed, and only
         // jobs not already on their way out.
@@ -1311,6 +1435,118 @@ mod tests {
         let fx = s.tick(snap(20), &surviving, 11_000);
         assert_eq!(signals(&fx), vec![(100, Sig::Kill)]);
         assert!(s.pgids().is_empty());
+    }
+
+    #[test]
+    fn wrapper_signals_keep_the_original_signal_and_cleanup_deadline_after_exit() {
+        for sig in [Sig::Int, Sig::Term, Sig::Hup] {
+            let mut s = sched(20);
+            s.enqueue(1, spec("a"), 0);
+            s.started(1, 100);
+            assert_eq!(signals(&s.signalled(1, sig, 1_000)), vec![(100, sig)]);
+            s.signalled(1, sig, 9_000);
+            s.exited(1, None, Some(15), 9_100, 0);
+            assert_eq!(s.history[0].outcome, Outcome::Exited);
+            assert_eq!(s.pgids(), vec![100]);
+            assert_eq!(
+                signals(&s.tick(snap(20), &usage(100, 0.1), 11_000)),
+                vec![(100, Sig::Kill)]
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_stops_pause_the_whole_tree_as_a_user_pause() {
+        let mut s = sched(20);
+        s.enqueue(1, spec("a"), 0);
+        s.started(1, 100);
+        assert_eq!(
+            signals(&s.terminal_stopped(1, true, 1_000)),
+            vec![(100, Sig::Stop)]
+        );
+        let job = &s.list().running[0];
+        assert_eq!(job.state, JobState::Frozen);
+        assert_eq!(job.frozen_by, Some(FrozenBy::User));
+        assert!(
+            s.shutdown_thaws().is_empty(),
+            "shell pauses survive daemon shutdown"
+        );
+        let mut critical = snap(20);
+        critical.pressure = Pressure::Critical;
+        assert!(signals(&s.tick(critical, &usage(100, 0.1), 60_000)).is_empty());
+        assert_eq!(
+            signals(&s.terminal_stopped(1, false, 61_000)),
+            vec![(100, Sig::Cont)]
+        );
+        assert_eq!(s.list().running[0].state, JobState::Running);
+        assert_eq!(s.list().running[0].frozen_by, None);
+        s.control(9, Control::Freeze { id: 1 }, 62_000, 0);
+        assert_eq!(
+            s.shutdown_thaws(),
+            vec![100],
+            "daemon pauses are released on shutdown"
+        );
+    }
+
+    #[test]
+    fn a_child_signal_exit_does_not_replace_the_guards_requeue() {
+        let mut s = sched(20);
+        s.enqueue(1, spec("a"), 0);
+        s.started(1, 100);
+        s.apply_guard(
+            Action::Kill {
+                id: 1,
+                requeue: true,
+                why: "pressure".into(),
+            },
+            1_000,
+        );
+        assert!(s.child_signalled(1, Sig::Term, 1_100).is_empty());
+        s.exited(1, None, Some(15), 1_100, 0);
+        assert_eq!(s.history[0].outcome, Outcome::Requeued);
+        assert_eq!(s.list().running[0].retry, 1);
+    }
+
+    #[test]
+    fn terminal_control_retries_wrapper_wakes_until_continuation_is_acknowledged() {
+        for kill in [false, true] {
+            let mut s = sched(20);
+            let mut job = spec("a");
+            job.pid = Some(99);
+            s.enqueue(1, job, 0);
+            s.started(1, 100);
+            s.terminal_stopped(1, true, 1_000);
+            let control = if kill {
+                Control::Kill { id: 1 }
+            } else {
+                Control::Resume { id: 1 }
+            };
+            let wake = Effect::ContinueWrapper { pid: 99 };
+            assert!(s.control(9, control, 1_001, 0).contains(&wake));
+            assert!(s.tick(snap(20), &usage(100, 0.1), 2_000).contains(&wake));
+            s.terminal_stopped(1, false, 2_001);
+            assert!(!s.tick(snap(20), &usage(100, 0.1), 3_000).contains(&wake));
+        }
+    }
+
+    #[test]
+    fn a_stop_notice_after_kill_still_wakes_the_wrapper_and_terminating_tree() {
+        let mut s = sched(20);
+        let mut job = spec("a");
+        job.pid = Some(99);
+        s.enqueue(1, job, 0);
+        s.started(1, 100);
+        s.control(9, Control::Kill { id: 1 }, 1_000, 0);
+        let fx = s.terminal_stopped(1, true, 1_001);
+        assert_eq!(signals(&fx), vec![(100, Sig::Cont)]);
+        assert!(fx.contains(&Effect::ContinueWrapper { pid: 99 }));
+        assert!(
+            s.tick(snap(20), &usage(100, 0.1), 2_000)
+                .contains(&Effect::ContinueWrapper { pid: 99 })
+        );
+        s.terminal_stopped(1, false, 2_001);
+        s.exited(1, None, Some(15), 2_002, 0);
+        assert_eq!(s.history[0].outcome, Outcome::ManualKill);
     }
 
     #[test]

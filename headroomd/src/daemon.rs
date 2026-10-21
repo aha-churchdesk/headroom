@@ -10,7 +10,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use headroom_core::model::{JobId, JobState, Snapshot};
+use headroom_core::model::{JobId, Snapshot};
 use headroom_core::proctree;
 use headroom_core::protocol::{ClientMsg, DaemonMsg};
 use headroom_core::scheduler::{Effect, Scheduler, Sig, Usage};
@@ -34,6 +34,8 @@ fn signal(pgid: i32, sig: Sig, processes: &mut ProcessTracker) {
         Sig::Cont => libc::SIGCONT,
         Sig::Term => libc::SIGTERM,
         Sig::Kill => libc::SIGKILL,
+        Sig::Int => libc::SIGINT,
+        Sig::Hup => libc::SIGHUP,
     };
     let groups = processes.groups(&sample::procs(), pgid);
     // Never a pgid of 0 or 1, nor our own: killpg(0) would hit our group.
@@ -153,7 +155,24 @@ pub fn run_with(
                     None => sched.enqueue(c, spec, ms()),
                 },
                 ClientMsg::Started { pgid, .. } => sched.started(c, pgid),
-                ClientMsg::Exited { code, signal } => sched.exited(c, code, signal, ms(), wall()),
+                ClientMsg::Signal { signal } => match signal {
+                    libc::SIGINT => sched.signalled(c, Sig::Int, ms()),
+                    libc::SIGTERM => sched.signalled(c, Sig::Term, ms()),
+                    libc::SIGHUP => sched.signalled(c, Sig::Hup, ms()),
+                    _ => vec![],
+                },
+                ClientMsg::TerminalStopped { stopped } => sched.terminal_stopped(c, stopped, ms()),
+                ClientMsg::Exited { code, signal } => {
+                    let now = ms();
+                    let mut fx = match signal {
+                        Some(libc::SIGINT) => sched.child_signalled(c, Sig::Int, now),
+                        Some(libc::SIGTERM) => sched.child_signalled(c, Sig::Term, now),
+                        Some(libc::SIGHUP) => sched.child_signalled(c, Sig::Hup, now),
+                        _ => vec![],
+                    };
+                    fx.extend(sched.exited(c, code, signal, now, wall()));
+                    fx
+                }
                 ClientMsg::List => vec![Effect::Send(c, DaemonMsg::Jobs(sched.list()))],
                 ClientMsg::Control(ctl) => sched.control(c, ctl, ms(), wall()),
             },
@@ -166,16 +185,9 @@ pub fn run_with(
         };
         apply(&store, &sched, &conns, &mut processes, fx);
     }
-    // A stopped process cannot finish on its own once the queue goes away.
-    for job in sched
-        .list()
-        .running
-        .iter()
-        .filter(|j| j.state == JobState::Frozen)
-    {
-        if let Some(pgid) = job.pgid {
-            signal(pgid, Sig::Cont, &mut processes);
-        }
+    // Release daemon pauses. Shell Ctrl-Z stays paused until shell fg/bg.
+    for pgid in sched.shutdown_thaws() {
+        signal(pgid, Sig::Cont, &mut processes);
     }
     drop(server);
     let _ = fs::remove_file(&sock);
@@ -208,6 +220,11 @@ fn apply(
         match e {
             Effect::Send(c, m) => server::send(conns, c, &m),
             Effect::Signal { pgid, sig } => signal(pgid, sig, processes),
+            Effect::ContinueWrapper { pid } => {
+                if pid > 1 {
+                    unsafe { libc::kill(pid, libc::SIGCONT) };
+                }
+            }
             Effect::SaveProfiles => profiles = true,
             Effect::SaveHistory => history = true,
             Effect::SaveConfig => config = true,

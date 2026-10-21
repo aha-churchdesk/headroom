@@ -611,6 +611,78 @@ fn a_term_ignoring_subgroup_is_killed_after_the_leader_exits() {
 }
 
 #[test]
+fn wrapper_cancellation_reaches_detached_groups_and_keeps_grace_escalation() {
+    for (name, delay, signal, ignore) in [
+        ("early", 0, libc::SIGTERM, false),
+        ("early-ignore", 0, libc::SIGTERM, true),
+        ("sampled-ignore", 2, libc::SIGTERM, true),
+        ("interrupt", 0, libc::SIGINT, false),
+        ("hangup", 0, libc::SIGHUP, false),
+    ] {
+        let d = Daemon::start(&format!("wrapper-{name}"), quick());
+        let pidfile = d.home.join("detached.pid");
+        // Wait for the child to install its handler before publishing readiness.
+        let inner = format!(
+            "{}; open({:?},'w').write(str(__import__('os').getpid())); time.sleep(60)",
+            if ignore {
+                "import signal; signal.signal(signal.SIGTERM,signal.SIG_IGN)"
+            } else {
+                "pass"
+            },
+            pidfile.display().to_string()
+        );
+        let script = format!(
+            "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',{:?}],start_new_session=True); time.sleep(60)",
+            format!("import time; {inner}")
+        );
+        let mut wrapper = d.spawn(&["run", "--", "python3", "-c", &script]);
+        let (_, root) = d.running();
+        let mut cleanup = KillGroups(vec![root]);
+        let detached = wait_for("a detached child ready for cancellation", 5, || {
+            std::fs::read_to_string(&pidfile).ok()?.parse::<i32>().ok()
+        });
+        cleanup.0.push(detached);
+        assert_eq!(unsafe { libc::getpgid(detached) }, detached);
+        std::thread::sleep(Duration::from_secs(delay));
+        assert_eq!(unsafe { libc::kill(wrapper.id() as i32, signal) }, 0);
+        let status = wait_for("the signalled wrapper to exit", 6, || {
+            wrapper.try_wait().unwrap()
+        });
+        assert_eq!(status.code(), Some(128 + signal), "{name}");
+        wait_for(
+            "the detached group to end after cancellation grace",
+            6,
+            || (!group_alive(detached)).then_some(()),
+        );
+        let history = wait_for("cancellation history", 5, || {
+            d.ls().history.first().cloned()
+        });
+        assert_eq!(history.outcome, Outcome::Exited);
+        assert!(d.ls().running.is_empty() && d.ls().queued.is_empty());
+        finish(wrapper);
+        cleanup.0.clear();
+    }
+}
+
+#[test]
+fn terminal_job_control_stops_and_resumes_the_wrapper_with_its_child() {
+    let d = Daemon::start("terminal-control", quick());
+    let out = Command::new("python3")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/job_control.py"))
+        .arg(BIN)
+        .env("HEADROOM_HOME", &d.home)
+        .env_remove("HEADROOM_JOB")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}\n{}",
+        text(&out.stdout),
+        text(&out.stderr)
+    );
+}
+
+#[test]
 fn losing_the_daemon_resumes_frozen_descendant_groups() {
     let home = tmp("lost-frozen");
     let store = Store::at(&home).unwrap();

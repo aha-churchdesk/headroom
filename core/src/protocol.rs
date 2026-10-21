@@ -21,6 +21,14 @@ pub enum ClientMsg {
         pid: i32,
         pgid: i32,
     },
+    /// Cancel the running lease with the wrapper's INT, TERM or HUP.
+    Signal {
+        signal: i32,
+    },
+    /// Terminal job control has stopped or continued the child.
+    TerminalStopped {
+        stopped: bool,
+    },
     Exited {
         code: Option<i32>,
         signal: Option<i32>,
