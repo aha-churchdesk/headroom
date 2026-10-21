@@ -829,6 +829,18 @@ mod tests {
     }
 
     #[test]
+    fn a_script_fed_through_a_here_doc_is_not_read_as_commands() {
+        // From a real session: a file name in the Python matched `tsc`.
+        let py = "W=.claude/worktrees; python3 - <<'EOF'\nimport re\nbusy = open('.claude/worktrees/tsc-fe-1020.txt').read()\nEOF";
+        assert_eq!(cls(py), Class::Light);
+        // A heavy command after the body still counts.
+        assert_eq!(
+            cls("cat <<EOF > notes\nvitest\nEOF\npnpm test"),
+            heavy("pnpm test", "pnpm")
+        );
+    }
+
+    #[test]
     fn corepack_runs_the_package_manager_it_picks() {
         assert_eq!(
             cls("corepack yarn typecheck"),

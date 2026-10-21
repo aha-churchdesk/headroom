@@ -2,10 +2,12 @@
 //!
 //! This is not a shell parser. Classification only needs the simple commands
 //! inside a line (`cd web && pnpm test | tee log` holds `cd web`, `pnpm test`
-//! and `tee log`) with their quotes removed. Anything fancier — `$(…)`,
-//! here-docs, functions — is read as plain words, and the worst outcome of
-//! that is a command classified as light, which runs ungated as it would
-//! without Headroom.
+//! and `tee log`) with their quotes removed. A here-doc's body is input to
+//! its command, not commands, so it is skipped: a Python script fed to
+//! `python3 - <<'EOF'` must not be read as shell. Anything fancier, `$(…)`
+//! or functions, is read as plain words, and the worst outcome of that is a
+//! command classified as light, which runs ungated as it would without
+//! Headroom.
 
 /// Split a command line into simple commands, each a list of words with
 /// quotes and backslash escapes resolved.
@@ -14,6 +16,9 @@ pub fn simple_commands(line: &str) -> Vec<Vec<String>> {
     let mut words: Vec<String> = Vec::new();
     let mut word = String::new();
     let mut in_word = false;
+    // Here-docs opened on the current line: delimiter, and whether `<<-`
+    // strips leading tabs. Their bodies start after the next newline.
+    let mut docs: Vec<(String, bool)> = Vec::new();
     let mut chars = line.chars().peekable();
 
     let end_word = |word: &mut String, in_word: &mut bool, words: &mut Vec<String>| {
@@ -61,10 +66,48 @@ pub fn simple_commands(line: &str) -> Vec<Vec<String>> {
                     word.push(n.unwrap_or('\\'));
                 }
             },
+            '<' if chars.peek() == Some(&'<') => {
+                chars.next();
+                end_word(&mut word, &mut in_word, &mut words);
+                if chars.peek() == Some(&'<') {
+                    // `<<<word`, a here-string: the word is ordinary text.
+                    chars.next();
+                    continue;
+                }
+                let strip = chars.next_if_eq(&'-').is_some();
+                while chars.next_if(|c| *c == ' ' || *c == '\t').is_some() {}
+                let mut delim = String::new();
+                while let Some(c) = chars.next_if(|c| !c.is_whitespace() && !";&|()<>".contains(*c))
+                {
+                    if c != '\'' && c != '"' && c != '\\' {
+                        delim.push(c);
+                    }
+                }
+                if !delim.is_empty() {
+                    docs.push((delim, strip));
+                }
+            }
             ';' | '&' | '|' | '\n' | '(' | ')' => {
                 end_word(&mut word, &mut in_word, &mut words);
                 if !words.is_empty() {
                     out.push(std::mem::take(&mut words));
+                }
+                if c == '\n' {
+                    for (delim, strip) in docs.drain(..) {
+                        // Up to and including the delimiter's own line; an
+                        // unterminated body runs to the end.
+                        loop {
+                            let body: String = chars.by_ref().take_while(|&c| c != '\n').collect();
+                            let l = if strip {
+                                body.trim_start_matches('\t')
+                            } else {
+                                &body
+                            };
+                            if l == delim || chars.peek().is_none() {
+                                break;
+                            }
+                        }
+                    }
                 }
             }
             c if c.is_whitespace() => end_word(&mut word, &mut in_word, &mut words),
@@ -178,6 +221,49 @@ mod tests {
                 "{w:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_here_doc_body_is_input_not_commands() {
+        let script = "python3 - <<'EOF'\nx = open('w/tsc-fe-1020.txt').read()\nimport os; os.system('pnpm test')\nEOF\npnpm lint";
+        assert_eq!(sc(script), ex(&[&["python3", "-"], &["pnpm", "lint"]]));
+        // Bare and double-quoted delimiters, and the rest of the opening
+        // line still counts.
+        assert_eq!(
+            sc("cat <<END | pnpm test\nrm -rf x\nEND"),
+            ex(&[&["cat"], &["pnpm", "test"]])
+        );
+        assert_eq!(
+            sc("cat <<\"X\"\nvitest\nX\necho ok"),
+            ex(&[&["cat"], &["echo", "ok"]])
+        );
+    }
+
+    #[test]
+    fn here_doc_edge_cases() {
+        // `<<-` lets the closing delimiter be indented with tabs.
+        assert_eq!(
+            sc("cat <<-EOF\n\tvitest\n\tEOF\necho ok"),
+            ex(&[&["cat"], &["echo", "ok"]])
+        );
+        // Without `-`, an indented delimiter doesn't close it.
+        assert_eq!(sc("cat <<EOF\n\tEOF\nvitest"), ex(&[&["cat"]]));
+        // Two on one line: bodies follow in order.
+        assert_eq!(
+            sc("paste <<A <<B\n1\nA\n2\nB\ntsc"),
+            ex(&[&["paste"], &["tsc"]])
+        );
+        // Unterminated: the rest is body.
+        assert_eq!(sc("cat <<EOF\npnpm test"), ex(&[&["cat"]]));
+        // A here-string is a word, not a here-doc.
+        assert_eq!(
+            sc("grep x <<< \"a b\"\npnpm test"),
+            ex(&[&["grep", "x", "a b"], &["pnpm", "test"]])
+        );
+        // A single `<` is a redirection, read as before.
+        assert_eq!(sc("wc -l < f"), ex(&[&["wc", "-l", "<", "f"]]));
+        // `<<` with no delimiter at the end: nothing to skip.
+        assert_eq!(sc("cat <<"), ex(&[&["cat"]]));
     }
 
     #[test]
