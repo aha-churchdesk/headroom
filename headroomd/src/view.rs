@@ -12,6 +12,7 @@ use headroom_core::model::{Bytes, HistoryEntry, Job, JobState, Outcome, Pressure
 use headroom_core::profile::Profiles;
 use headroom_core::protocol::Listing;
 use headroom_core::scheduler::{HISTORY, HISTORY_DAY_S, HISTORY_MAX};
+use headroom_core::tally::{Day, TALLY_DAYS, Tally};
 use serde_json::{Value, json};
 
 /// One unmanaged app's memory, for the "Other apps" page.
@@ -50,6 +51,7 @@ pub enum Login {
 pub struct Extras<'a> {
     pub cfg: &'a Config,
     pub profiles: &'a Profiles,
+    pub tally: &'a Tally,
     pub others: &'a [AppUsage],
     /// Per agent: installed | not_installed | stale | absent.
     pub hooks: &'a [(&'static str, &'static str)],
@@ -97,6 +99,49 @@ fn last_day(history: &[HistoryEntry], wall: u64) -> Value {
         "went_first": count(&|h| h.ahead_of.is_some()),
         "more": history.len() >= HISTORY_MAX && recent.len() == history.len(),
     })
+}
+
+/// The Commands page's windows, in days.
+const WINDOWS: [u64; 3] = [7, 30, TALLY_DAYS];
+/// Commands listed per window. The page re-sorts these by runs, memory or
+/// waiting, so a command that is cheap per run but frequent may be missing
+/// from those orders past this many.
+const COMMANDS: usize = 50;
+
+fn day_json(d: &Day) -> Value {
+    json!({
+        "runs": d.runs,
+        "failed": d.failed,
+        "run_s": secs(d.run_ms),
+        "wait_s": secs(d.wait_ms),
+        "gb_h": d.mib_s as f64 / 1024.0 / 3600.0,
+        "peak": d.peak,
+    })
+}
+
+/// Per window: the commands that ran in it, most time running first, and
+/// the totals over every command.
+fn commands(t: &Tally, wall: u64) -> Value {
+    WINDOWS
+        .iter()
+        .map(|&days| {
+            let rows = t.window(wall, days);
+            let mut total = Day::default();
+            for (_, d) in &rows {
+                total.add(d);
+            }
+            json!({
+                "days": days,
+                "total": day_json(&total),
+                "count": rows.len(),
+                "rows": rows.iter().take(COMMANDS).map(|(k, d)| {
+                    let mut v = day_json(d);
+                    v["key"] = json!(k);
+                    v
+                }).collect::<Vec<_>>(),
+            })
+        })
+        .collect()
 }
 
 fn job_json(j: &Job, now: u64, cfg: &Config) -> Value {
@@ -201,6 +246,12 @@ pub fn state(l: &Listing, x: &Extras) -> Value {
         .map(|j| j.spec.key.as_str())
         .collect();
     keys.extend(l.history.iter().take(HISTORY).map(|h| h.key.as_str()));
+    // The Commands page opens these too.
+    let listed: Vec<(&str, Day)> = WINDOWS
+        .iter()
+        .flat_map(|&days| x.tally.window(x.wall, days).into_iter().take(COMMANDS))
+        .collect();
+    keys.extend(listed.iter().map(|(k, _)| *k));
     let profiles: BTreeMap<&str, Value> = keys
         .into_iter()
         .filter_map(|k| {
@@ -266,6 +317,7 @@ pub fn state(l: &Listing, x: &Extras) -> Value {
         "banners": banners(l, x),
         "history": history,
         "last_day": last_day(&l.history, x.wall),
+        "commands": commands(x.tally, x.wall),
         "profiles": profiles,
         "others": x.others.iter().map(|o| json!({
             "name": o.name,
@@ -409,6 +461,7 @@ mod tests {
         Extras {
             cfg,
             profiles: p,
+            tally: Box::leak(Box::default()),
             others: &[],
             hooks: &[("claude", "installed"), ("codex", "absent")],
             classify: None,
@@ -465,6 +518,90 @@ mod tests {
             ahead_of: None,
             waited_ms,
         }
+    }
+
+    #[test]
+    fn commands_lists_each_window_most_time_first_with_totals() {
+        let mut t = Tally::default();
+        let wall = 100 * 86_400;
+        let run = |key: &str, at: u64, ms: u64, exit: i32| HistoryEntry {
+            key: key.into(),
+            duration_ms: ms,
+            peak: 2 << 30,
+            ..ended(at, Outcome::Exited, Some(exit), 3_000)
+        };
+        t.add(&run("/r|lint", wall - 20 * 86_400, 600_000, 0));
+        t.add(&run("/r|test", wall - 60, 60_000, 0));
+        t.add(&run("/r|test", wall, 60_000, 1));
+        let v = commands(&t, wall);
+        let days: Vec<u64> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w["days"].as_u64().unwrap())
+            .collect();
+        assert_eq!(days, [7, 30, TALLY_DAYS]);
+        let week = &v[0];
+        assert_eq!(week["count"], 1, "lint ran before the week");
+        assert_eq!(week["rows"][0]["key"], "/r|test");
+        assert_eq!(week["rows"][0]["runs"], 2);
+        assert_eq!(week["rows"][0]["failed"], 1);
+        assert_eq!(week["rows"][0]["wait_s"], 6);
+        // 2 GB for two minutes.
+        assert!((week["rows"][0]["gb_h"].as_f64().unwrap() - 4.0 / 60.0).abs() < 1e-9);
+        let month = &v[1];
+        assert_eq!(month["rows"][0]["key"], "/r|lint", "ten minutes beats two");
+        assert_eq!(month["total"]["runs"], 3);
+        assert_eq!(month["total"]["run_s"], 720);
+        // An empty tally still gives every window, with nothing in it.
+        let none = commands(&Tally::default(), wall);
+        assert_eq!(none[2]["count"], 0);
+        assert_eq!(none[2]["total"]["runs"], 0);
+    }
+
+    #[test]
+    fn a_command_from_weeks_ago_still_opens_its_profile() {
+        let (cfg, d) = (Config::default(), HashSet::new());
+        let mut p = Profiles::default();
+        let run = headroom_core::profile::Run {
+            peak: 3 << 30,
+            duration_ms: 60_000,
+            exit: Some(0),
+            flagged: false,
+            at: 1,
+            workers: None,
+        };
+        p.record("/r|old", "/r|old", run);
+        let wall = 100 * 86_400;
+        let mut t = Tally::default();
+        t.add(&HistoryEntry {
+            key: "/r|old".into(),
+            ..ended(wall - 20 * 86_400, Outcome::Exited, Some(0), 0)
+        });
+        let mut x = extras(&cfg, &p, &d);
+        (x.tally, x.wall) = (&t, wall);
+        let v = state(&listing(), &x);
+        assert_eq!(v["commands"][1]["rows"][0]["key"], "/r|old");
+        assert_eq!(v["profiles"]["/r|old"]["samples"], 1);
+        // Not in any window, not sent: the 90-day page stops there too.
+        x.wall += 200 * 86_400;
+        assert!(state(&listing(), &x)["profiles"].get("/r|old").is_none());
+    }
+
+    #[test]
+    fn commands_lists_at_most_fifty_per_window_but_totals_all() {
+        let mut t = Tally::default();
+        let wall = 100 * 86_400;
+        for i in 0..(COMMANDS as u64 + 5) {
+            t.add(&HistoryEntry {
+                key: format!("/r|c{i}"),
+                ..ended(wall, Outcome::Exited, Some(0), 0)
+            });
+        }
+        let v = commands(&t, wall);
+        assert_eq!(v[0]["rows"].as_array().unwrap().len(), COMMANDS);
+        assert_eq!(v[0]["count"], COMMANDS + 5);
+        assert_eq!(v[0]["total"]["runs"], COMMANDS + 5);
     }
 
     #[test]

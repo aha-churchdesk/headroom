@@ -19,6 +19,7 @@ use headroom_core::hooksettings::{self, Scope, Status};
 use headroom_core::profile::Profiles;
 use headroom_core::protocol::{ClientMsg, Control, DaemonMsg, Listing, request};
 use headroom_core::store::Store;
+use headroom_core::tally::Tally;
 use serde_json::Value;
 
 use crate::bridge::{self, Do, UiCmd};
@@ -53,6 +54,7 @@ pub struct App {
     classify: Option<Value>,
     cfg: Config,
     profiles: Profiles,
+    tally: Tally,
     others: Vec<AppUsage>,
     hooks: Vec<(&'static str, &'static str)>,
     login: Login,
@@ -93,6 +95,7 @@ impl App {
         let mut app = Self {
             cfg: store.load_config(),
             profiles: store.load_profiles(),
+            tally: store.load_tally(),
             store,
             socket,
             home,
@@ -136,6 +139,7 @@ impl App {
     pub fn refresh_settings(&mut self) {
         self.cfg = self.store.load_config();
         self.profiles = self.store.load_profiles();
+        self.tally = self.store.load_tally();
         self.login = login::state(&self.home);
     }
 
@@ -193,6 +197,7 @@ impl App {
             &Extras {
                 cfg: &self.cfg,
                 profiles: &self.profiles,
+                tally: &self.tally,
                 others: &self.others,
                 hooks: &self.hooks,
                 classify: self.classify.clone(),

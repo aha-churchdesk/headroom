@@ -198,9 +198,10 @@ button:disabled{ cursor:default; opacity:.4; }
 }
 .sec-h .why{ text-transform:none; letter-spacing:0; font-weight:500; font-size:11.5px; color:var(--text-dim); }
 .sec-h .why.blocked{ color:var(--warn); }
-.day-row{ display:grid; grid-template-columns:repeat(6, minmax(0, 1fr)); margin:0 14px 6px;
-  background:var(--bg-elev); border-radius:8px; }
-.day-row > div{ display:flex; flex-direction:column; gap:1px; padding:6px 7px; min-width:0; }
+.day-row{ display:grid; grid-template-columns:repeat(6, minmax(0, 1fr)); margin:0 14px 6px; }
+.day-row.five{ grid-template-columns:repeat(5, minmax(0, 1fr)); }
+.day-row > div{ display:flex; flex-direction:column; gap:1px; padding:2px 7px; min-width:0; }
+.day-row > div:first-child{ padding-left:0; }
 .day-row > div + div{ border-left:1px solid var(--sep-soft); }
 .day-row b{ font-size:14px; font-weight:650; }
 .day-row span{ font-size:10px; color:var(--text-dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -295,6 +296,14 @@ button:disabled{ cursor:default; opacity:.4; }
 .gtag.guard{ color:#1c1c1e; background:var(--warn); }
 .gtag.user{ color:var(--text-dim); background:var(--bg-sunk); }
 
+.cmd-ctl{ display:flex; justify-content:space-between; gap:8px; padding:10px 14px 8px; }
+.cmd-total{ padding-top:2px; border-bottom:1px solid var(--sep-soft); }
+.crow .l1 .n{ white-space:nowrap; font-size:11.5px; color:var(--text-dim); }
+.crow .l1 .n b{ color:var(--text); font-weight:600; }
+.crow .cbar{ height:3px; border-radius:2px; background:var(--track); margin:4px 0 3px; }
+.crow .cbar i{ display:block; height:100%; border-radius:2px; background:var(--accent); }
+.crow .bad{ color:var(--bad); }
+.cmd-note{ padding:8px 14px 12px; font-size:11px; color:var(--text-faint); }
 .prof{ padding:12px 14px; }
 .prof .key{ font-size:11.5px; color:var(--text-dim); word-break:break-all; }
 .prof svg{ display:block; margin:12px 0 4px; width:100%; height:64px; }
@@ -331,7 +340,7 @@ button:disabled{ cursor:default; opacity:.4; }
 .stepper button:hover{ background:var(--bg-elev); color:var(--text); }
 .stepper span{ min-width:64px; text-align:center; font-weight:600; font-size:12px; border-left:1px solid var(--sep-soft); border-right:1px solid var(--sep-soft); line-height:24px; }
 .seg{ display:inline-flex; background:var(--bg-sunk); border-radius:7px; padding:2px; }
-.seg button{ padding:3px 10px; border-radius:5px; font-size:11.5px; color:var(--text-dim); }
+.seg button{ padding:3px 10px; border-radius:5px; font-size:11.5px; color:var(--text-dim); white-space:nowrap; }
 .seg button.on{ background:var(--bg); color:var(--text); font-weight:600; box-shadow:0 1px 2px rgba(0,0,0,.12); }
 .toggle{ width:34px; height:20px; border-radius:10px; background:var(--bg-sunk); position:relative; border:1px solid var(--sep); }
 .toggle::after{ content:""; position:absolute; top:1px; left:1px; width:16px; height:16px; border-radius:50%; background:#fff; box-shadow:0 1px 2px rgba(0,0,0,.25); transition:left .15s; }
@@ -451,8 +460,10 @@ function reasonText(r){
    ═══════════════════════════════════════════════════════════ */
 let STATE = null;
 const UI = {
-  page: "main",           // main | history | profile | others | settings
+  page: "main",           // main | history | commands | profile | others | settings
   profileKey: null,
+  cmdDays: 7,             // Commands page: window in days, and the column it sorts by
+  cmdSort: "run_s",
   expanded: new Set(),
   openApps: new Set(),    // Other apps rows showing their processes
   confirm: null,          // { key, until } — second click within 3 s acts
@@ -490,6 +501,7 @@ function render(){
   $("head").innerHTML = renderHead(STATE);
   view.innerHTML = UI.page === "main"     ? renderMain(STATE)
                  : UI.page === "history"  ? renderHistory(STATE)
+                 : UI.page === "commands" ? renderCommands(STATE)
                  : UI.page === "profile"  ? renderProfile(STATE)
                  : UI.page === "others"   ? renderOthers(STATE)
                  :                          renderSettings(STATE);
@@ -707,6 +719,7 @@ function renderDetail(j){
 function renderFoot(){
   return `
     <button data-act="goto" data-page="history">History ▸</button>
+    <button data-act="goto" data-page="commands">Commands ▸</button>
     <button data-act="goto" data-page="others">Other apps ▸</button>
     <button data-act="goto" data-page="settings">Settings ▸</button>`;
 }
@@ -733,6 +746,51 @@ function renderHistory(S){
       <div class="l2 num">${dur(r.duration_s)} · peak ${gb(r.peak)} / est ${gb(r.estimate)} GB${r.tuned ? ` · ${r.tuned.workers}/${r.tuned.default} workers` : ""}${r.ahead_of ? ` · started ahead of ${esc(r.ahead_of)}` : ""} · ${ago(r.ended_ago_s)}
         ${r.guard && r.guard.why ? `<br>${esc(r.guard.why)}` : ""}</div>
     </div>`).join("") : `<div class="empty">No runs yet</div>`);
+}
+
+const CMD_SORTS = [["run_s", "Time"], ["runs", "Runs"], ["gb_h", "Memory"], ["wait_s", "Waiting"]];
+/** GB-hours: a decimal while small, whole numbers past 10. */
+const gbh = v => v >= 10 ? v.toFixed(0) : v >= 0.05 ? v.toFixed(1) : v > 0 ? "&lt;0.1" : "0";
+
+/** "repo path|subdir|command" → the command in bold, where it ran after it. */
+function keyName(k){
+  const parts = String(k ?? "").split("|");
+  const where = keyLabel(parts.slice(0, -1).join("|"));
+  return `<b>${esc(parts[parts.length - 1])}</b>${where ? ` <span class="dim">· ${esc(where)}</span>` : ""}`;
+}
+
+function renderCommands(S){
+  const wins = S.commands || [];
+  const w = wins.find(x => x.days === UI.cmdDays) || wins[0];
+  if (!w || !w.count) return pageHead("Commands") + `<div class="empty">No runs ${w ? `in the last ${w.days} days` : "yet"}</div>`;
+  const seg = (items, cur, act) => `<span class="seg">${items.map(([v, l]) =>
+    `<button class="${v === cur ? "on" : ""}" data-act="${act}" data-val="${v}">${l}</button>`).join("")}</span>`;
+  const t = w.total;
+  const cell = (value, label, tip, cls = "") => `<div class="${cls}" title="${tip}"><b>${value}</b><span>${label}</span></div>`;
+  const key = UI.cmdSort;
+  const rows = [...w.rows].sort((a, b) => b[key] - a[key] || b.run_s - a.run_s);
+  const top = Math.max(...rows.map(r => r[key])) || 1;
+  return pageHead("Commands") + `
+    <div class="cmd-ctl">
+      ${seg(wins.map(x => [x.days, `${x.days}d`]), w.days, "cmd_days")}
+      ${seg(CMD_SORTS, key, "cmd_sort")}
+    </div>
+    <div class="day-row five num cmd-total">
+      ${cell(t.runs, t.runs === 1 ? "run" : "runs", "Runs that finished, of every command")}
+      ${cell(t.failed, "failed", "Exited with an error, or killed twice to free memory", t.failed ? "bad" : "zero")}
+      ${cell(dur(t.run_s), "running", "Time the commands ran")}
+      ${cell(dur(t.wait_s), "waiting", "Time in the queue before starting", t.wait_s ? "" : "zero")}
+      ${cell(gbh(t.gb_h), "GB·h", "Peak memory × run time, summed: the memory held from other work")}
+    </div>` + rows.map(r => `
+    <div class="hrow crow" data-act="profile" data-key="${esc(r.key)}">
+      <div class="l1"><span class="name">${keyName(r.key)}</span>
+        <span class="n num"><b>${r.runs}</b> run${r.runs === 1 ? "" : "s"}</span></div>
+      <div class="cbar"><i style="width:${(r[key] / top * 100).toFixed(1)}%"></i></div>
+      <div class="l2 num">${dur(r.run_s)} running · ${gbh(r.gb_h)} GB·h · peak ${gb(r.peak)} GB${
+        r.wait_s ? ` · waited ${dur(r.wait_s)}` : ""}${
+        r.failed ? ` · <span class="bad">${r.failed} failed</span>` : ""}</div>
+    </div>`).join("") + `
+    <div class="cmd-note">${w.count > rows.length ? `The ${rows.length} with the most time running, of ${w.count} commands. ` : ""}Kept for ${wins[wins.length - 1].days} days. GB·h is peak memory × run time.</div>`;
 }
 
 function sparkline(peaks, p90){
@@ -985,9 +1043,11 @@ $("pop").addEventListener("click", (e) => {
     case "goto":    UI.page = d.page; $("view").scrollTop = 0; break;
     case "expand":  UI.expanded.has(id) ? UI.expanded.delete(id) : UI.expanded.add(id); break;
     case "expand_app": UI.openApps.has(d.name) ? UI.openApps.delete(d.name) : UI.openApps.add(d.name); break;
-    case "profile": UI.profileFrom = UI.page === "main" ? "main" : "history";
+    case "profile": UI.profileFrom = UI.page === "main" || UI.page === "commands" ? UI.page : "history";
                     UI.page = "profile"; UI.profileKey = d.key; break;
     case "snippet": UI.snippet = !UI.snippet; break;
+    case "cmd_days": UI.cmdDays = Number(d.val); break;
+    case "cmd_sort": UI.cmdSort = d.val; break;
     case "hold":    send({ cmd:"hold", on: !STATE.held }); return;
     case "freeze": case "resume": case "kill": case "cancel": case "top":
                     send({ cmd: d.act, id }); return;
@@ -1144,6 +1204,24 @@ const J = {
     full_cmd:"npx jest --runInBand", cwd:"~/Projects/form-service", estimate:G(1.5), samples:0, waited_s:4 }),
 };
 
+/* Design data for the Commands page: [key, runs, failed, run_s, wait_s, gb_h, peak GB] per window. */
+const COMMANDS = [
+  [7,  [["/Users/me/Projects/browser-churchdesk|vitest run", 41, 3, 6120, 410, 5.9, 4.1],
+        ["/Users/me/Projects/browser-churchdesk|playwright test", 9, 2, 3300, 950, 3.4, 4.6],
+        ["/Users/me/Projects/fix-main|tsc --noEmit", 63, 7, 2950, 120, 1.0, 1.3],
+        ["/Users/me/Projects/browser-churchdesk|pnpm build", 12, 0, 2540, 300, 4.9, 7.1],
+        ["/Users/me/Projects/form-service|jest", 18, 1, 860, 0, 0.3, 1.5]]],
+  [30, [["/Users/me/Projects/browser-churchdesk|vitest run", 160, 9, 24100, 1900, 23.4, 4.6],
+        ["/Users/me/Projects/fix-main|tsc --noEmit", 240, 31, 11800, 400, 4.1, 1.4],
+        ["/Users/me/Projects/browser-churchdesk|playwright test", 30, 6, 10900, 3100, 11.2, 4.9]]],
+  [90, []],
+].map(([days, rows]) => {
+  rows = rows.map(([key, runs, failed, run_s, wait_s, gb_h, peak]) => ({ key, runs, failed, run_s, wait_s, gb_h, peak:G(peak) }));
+  const sum = f => rows.reduce((n, r) => n + r[f], 0);
+  return { days, count: rows.length, rows, total: { runs:sum("runs"), failed:sum("failed"), run_s:sum("run_s"),
+    wait_s:sum("wait_s"), gb_h:sum("gb_h"), peak:Math.max(0, ...rows.map(r => r.peak)) } };
+});
+
 function base(over){
   return Object.assign({
     system: { pressure:"normal", mem_total:G(36), mem_used:G(27.1), mem_available:G(8.9), swap_used:G(0.4), cpu_pct:63 },
@@ -1158,6 +1236,7 @@ function base(over){
       { id:"r4", label:"browser-cd", cmd:"playwright test", key:"browser-churchdesk · playwright test", duration_s:30, peak:G(1.0), estimate:G(4.2), exit:null, ended_ago_s:5400,
         guard:{ action:"cancelled", why:"cancelled from menu bar" } },
     ],
+    commands: COMMANDS,
     profiles: PROFILES, others: OTHERS,
     settings: structuredClone(BASE_SETTINGS), classify:null,
   }, over);

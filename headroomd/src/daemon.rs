@@ -84,6 +84,7 @@ pub fn run_with(
         store.load_profiles(),
         store.load_history(),
     );
+    sched.tally = store.load_tally();
     let start = Instant::now();
     let ms = || start.elapsed().as_millis() as u64;
 
@@ -147,6 +148,7 @@ fn apply(store: &Store, sched: &Scheduler, conns: &Conns, fx: Vec<Effect>) {
     }
     if history {
         let _ = store.save_history(&sched.history);
+        let _ = store.save_tally(&sched.tally);
     }
     if config {
         let _ = store.save_config(&sched.cfg);

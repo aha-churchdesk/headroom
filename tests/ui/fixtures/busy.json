@@ -35,9 +35,9 @@
       "footprint": 323650112,
       "peak": 323650112,
       "runaway_at": 8589934592,
-      "elapsed_s": 2,
+      "elapsed_s": 1,
       "frozen_s": 0,
-      "waited_s": 2,
+      "waited_s": 1,
       "cpu_pct": 0.0,
       "procs": 1,
       "retry": 0,
@@ -61,9 +61,9 @@
       "footprint": 1212656,
       "peak": 1212656,
       "runaway_at": 8589934592,
-      "elapsed_s": 2,
+      "elapsed_s": 1,
       "frozen_s": 0,
-      "waited_s": 2,
+      "waited_s": 1,
       "cpu_pct": 0.0,
       "procs": 1,
       "retry": 0,
@@ -91,7 +91,7 @@
       "runaway_at": 8589934592,
       "elapsed_s": 0,
       "frozen_s": 0,
-      "waited_s": 2,
+      "waited_s": 1,
       "cpu_pct": 0.0,
       "procs": 0,
       "retry": 0,
@@ -117,7 +117,7 @@
       "runaway_at": 8589934592,
       "elapsed_s": 0,
       "frozen_s": 0,
-      "waited_s": 2,
+      "waited_s": 1,
       "cpu_pct": 0.0,
       "procs": 0,
       "retry": 0,
@@ -140,6 +140,47 @@
     "went_first": 0,
     "more": false
   },
+  "commands": [
+    {
+      "days": 7,
+      "total": {
+        "runs": 0,
+        "failed": 0,
+        "run_s": 0,
+        "wait_s": 0,
+        "gb_h": 0.0,
+        "peak": 0
+      },
+      "count": 0,
+      "rows": []
+    },
+    {
+      "days": 30,
+      "total": {
+        "runs": 0,
+        "failed": 0,
+        "run_s": 0,
+        "wait_s": 0,
+        "gb_h": 0.0,
+        "peak": 0
+      },
+      "count": 0,
+      "rows": []
+    },
+    {
+      "days": 90,
+      "total": {
+        "runs": 0,
+        "failed": 0,
+        "run_s": 0,
+        "wait_s": 0,
+        "gb_h": 0.0,
+        "peak": 0
+      },
+      "count": 0,
+      "rows": []
+    }
+  ],
   "profiles": {},
   "others": [],
   "settings": {
@@ -160,8 +201,10 @@
       "* typecheck",
       "vitest",
       "jest",
+      "mocha",
       "playwright",
       "tsc",
+      "eslint",
       "nx",
       "turbo",
       "next build",

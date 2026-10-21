@@ -113,7 +113,9 @@ The popover lists running and queued jobs and why the queue is waiting (`next ne
 - freeze, resume or kill a running job;
 - **hold** the queue during a call or a demo (running jobs carry on).
 
-It also has a history of the last 50 runs with each command's memory profile, the top memory users Headroom doesn't manage, and settings.
+It also has a history of the last 50 runs with each command's memory profile, a Commands page, the top memory users Headroom doesn't manage, and settings.
+
+The Commands page ranks the commands that ran in the last 7, 30 or 90 days by time running, number of runs, memory or time waiting. Memory is GB-hours: each run's peak times its run time, the memory it kept from other work. Totals are kept per command and day for 90 days.
 
 ## CLI
 
@@ -143,7 +145,7 @@ claude mcp add headroom -- headroom mcp
 
 ## Files
 
-Everything lives in `~/Library/Application Support/dev.headroom/` (or `$HEADROOM_HOME`): `config.json`, `profiles.json`, `history.json` and the daemon's socket. Delete `profiles.json` to forget what Headroom has learned.
+Everything lives in `~/Library/Application Support/dev.headroom/` (or `$HEADROOM_HOME`): `config.json`, `profiles.json`, `history.json`, `stats.json` (the Commands page's totals) and the daemon's socket. Delete `profiles.json` to forget what Headroom has learned.
 
 `headroomd --headless` runs the queue without the menu bar. `headroomd --probe` prints what it measures and exits.
 

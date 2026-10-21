@@ -28,8 +28,8 @@
       "low": false,
       "estimate": 1610612736,
       "samples": 0,
-      "footprint": 216220128,
-      "peak": 216220128,
+      "footprint": 216236536,
+      "peak": 216236536,
       "runaway_at": 8589934592,
       "elapsed_s": 2,
       "frozen_s": 0,
@@ -50,7 +50,7 @@
       "job_id": "4",
       "label": "sc-49201",
       "cmd": "headroom-hog",
-      "why": "memory critical for 1 s. Frozen jobs stop growing but keep their memory; kill frees it."
+      "why": "memory critical for 2 s. Frozen jobs stop growing but keep their memory; kill frees it."
     }
   ],
   "history": [
@@ -112,6 +112,131 @@
     "went_first": 0,
     "more": false
   },
+  "commands": [
+    {
+      "days": 7,
+      "total": {
+        "runs": 3,
+        "failed": 1,
+        "run_s": 0,
+        "wait_s": 0,
+        "gb_h": 0.0,
+        "peak": 0
+      },
+      "count": 3,
+      "rows": [
+        {
+          "runs": 1,
+          "failed": 1,
+          "run_s": 0,
+          "wait_s": 0,
+          "gb_h": 0.0,
+          "peak": 0,
+          "key": "~/Projects/work-scheduler-mcp|headroom|exit 3"
+        },
+        {
+          "runs": 1,
+          "failed": 0,
+          "run_s": 0,
+          "wait_s": 0,
+          "gb_h": 0.0,
+          "peak": 0,
+          "key": "~/Projects/work-scheduler-mcp|headroom|echo ok"
+        },
+        {
+          "runs": 1,
+          "failed": 0,
+          "run_s": 0,
+          "wait_s": 0,
+          "gb_h": 0.0,
+          "peak": 0,
+          "key": "~/Projects/work-scheduler-mcp|headroom|sleep 60"
+        }
+      ]
+    },
+    {
+      "days": 30,
+      "total": {
+        "runs": 3,
+        "failed": 1,
+        "run_s": 0,
+        "wait_s": 0,
+        "gb_h": 0.0,
+        "peak": 0
+      },
+      "count": 3,
+      "rows": [
+        {
+          "runs": 1,
+          "failed": 1,
+          "run_s": 0,
+          "wait_s": 0,
+          "gb_h": 0.0,
+          "peak": 0,
+          "key": "~/Projects/work-scheduler-mcp|headroom|exit 3"
+        },
+        {
+          "runs": 1,
+          "failed": 0,
+          "run_s": 0,
+          "wait_s": 0,
+          "gb_h": 0.0,
+          "peak": 0,
+          "key": "~/Projects/work-scheduler-mcp|headroom|echo ok"
+        },
+        {
+          "runs": 1,
+          "failed": 0,
+          "run_s": 0,
+          "wait_s": 0,
+          "gb_h": 0.0,
+          "peak": 0,
+          "key": "~/Projects/work-scheduler-mcp|headroom|sleep 60"
+        }
+      ]
+    },
+    {
+      "days": 90,
+      "total": {
+        "runs": 3,
+        "failed": 1,
+        "run_s": 0,
+        "wait_s": 0,
+        "gb_h": 0.0,
+        "peak": 0
+      },
+      "count": 3,
+      "rows": [
+        {
+          "runs": 1,
+          "failed": 1,
+          "run_s": 0,
+          "wait_s": 0,
+          "gb_h": 0.0,
+          "peak": 0,
+          "key": "~/Projects/work-scheduler-mcp|headroom|exit 3"
+        },
+        {
+          "runs": 1,
+          "failed": 0,
+          "run_s": 0,
+          "wait_s": 0,
+          "gb_h": 0.0,
+          "peak": 0,
+          "key": "~/Projects/work-scheduler-mcp|headroom|echo ok"
+        },
+        {
+          "runs": 1,
+          "failed": 0,
+          "run_s": 0,
+          "wait_s": 0,
+          "gb_h": 0.0,
+          "peak": 0,
+          "key": "~/Projects/work-scheduler-mcp|headroom|sleep 60"
+        }
+      ]
+    }
+  ],
   "profiles": {
     "~/Projects/work-scheduler-mcp|headroom|echo ok": {
       "peaks": [
@@ -149,8 +274,10 @@
       "* typecheck",
       "vitest",
       "jest",
+      "mocha",
       "playwright",
       "tsc",
+      "eslint",
       "nx",
       "turbo",
       "next build",

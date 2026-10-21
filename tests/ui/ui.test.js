@@ -11,6 +11,8 @@ const failures = [];
 function test(name, fn) {
   ui.sent.length = 0;
   ui.UI.page = 'main';
+  ui.UI.cmdDays = 7;
+  ui.UI.cmdSort = 'run_s';
   ui.UI.confirm = null;
   ui.UI.expanded.clear();
   ui.UI.drafts.pattern = '';
@@ -131,6 +133,59 @@ test('the strip shows the median and 99th percentile wait, and the totals on hov
   has(ui.html(), 'Time in the queue before starting: 4m14 in all, longest 2m11');
   ui.setState(history);
   has(ui.html(), 'No job had to wait');
+});
+
+test('the commands page ranks what ran by time, with runs, memory and failures', () => {
+  ui.setState(history);
+  ui.click({ act: 'goto', page: 'commands' });
+  const week = history.commands[0];
+  const t = week.total;
+  has(ui.view(), `${t.runs} runs ${t.failed} failed`);
+  const rows = ui.view().split(' running · ').length - 1;
+  eq(rows, week.rows.length, 'one row per command');
+  // Most time running first: the hog ran, the shell one-liners didn't.
+  const first = week.rows[0];
+  eq(first.key.split('|').pop(), 'headroom-hog');
+  has(ui.view(), 'headroom-hog · work-scheduler-mcp · headroom 1 run');
+  has(ui.view(), '<0.1 GB·h');
+  has(ui.view(), '1 failed');
+  lacks(ui.view(), 'of 4 commands');
+});
+
+test('the commands page re-sorts and switches windows without asking the daemon', () => {
+  ui.setState(history);
+  ui.click({ act: 'goto', page: 'commands' });
+  const order = () => ui.view().match(/(headroom-hog|exit 3|echo ok|sleep 60) ·/g).map(m => m.slice(0, -2));
+  eq(order()[0], 'headroom-hog');
+  ui.click({ act: 'cmd_sort', val: 'runs' });
+  // All ran once: ties keep the time order.
+  eq(order()[0], 'headroom-hog');
+  ui.click({ act: 'cmd_days', val: '30' });
+  eq(ui.UI.cmdDays, 30);
+  has(ui.html(), 'class="on" data-act="cmd_days" data-val="30"');
+  eq(ui.sent.length, 0, 'sorting and windows stay in the page');
+});
+
+test('a command opens its profile, and back returns to the commands page', () => {
+  ui.setState(history);
+  ui.click({ act: 'goto', page: 'commands' });
+  const key = history.commands[0].rows[0].key;
+  ui.click({ act: 'profile', key });
+  eq(ui.UI.page, 'profile');
+  eq(ui.find({ act: 'goto', page: 'commands' }).length, 1, 'back goes to commands');
+});
+
+test('the commands page says when there is nothing to show, or more than it lists', () => {
+  const { commands, ...older } = history;
+  ui.setState(older);
+  ui.click({ act: 'goto', page: 'commands' });
+  has(ui.view(), 'No runs yet');
+  const empty = { days: 7, count: 0, rows: [], total: { runs: 0, failed: 0, run_s: 0, wait_s: 0, gb_h: 0, peak: 0 } };
+  ui.setState({ ...history, commands: [empty] });
+  has(ui.view(), 'No runs in the last 7 days');
+  const week = history.commands[0];
+  ui.setState({ ...history, commands: [{ ...week, count: week.rows.length + 60 }] });
+  has(ui.view(), `The ${week.rows.length} with the most time running, of ${week.rows.length + 60} commands.`);
 });
 
 test('zeros are dimmed and failures stand out', () => {

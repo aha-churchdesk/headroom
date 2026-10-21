@@ -16,6 +16,7 @@ use serde::de::DeserializeOwned;
 use crate::config::Config;
 use crate::model::HistoryEntry;
 use crate::profile::Profiles;
+use crate::tally::Tally;
 
 pub const HOME_ENV: &str = "HEADROOM_HOME";
 /// `sun_path` is 104 bytes on macOS, including the terminating NUL.
@@ -142,6 +143,20 @@ impl Store {
     pub fn save_history(&self, h: &VecDeque<HistoryEntry>) -> io::Result<()> {
         self.save("history.json", h)
     }
+
+    /// Per-command totals. A store from before they were kept starts from
+    /// the runs its history holds.
+    pub fn load_tally(&self) -> Tally {
+        if self.root.join("stats.json").exists() {
+            self.load("stats.json")
+        } else {
+            Tally::from_history(&self.load_history())
+        }
+    }
+
+    pub fn save_tally(&self, t: &Tally) -> io::Result<()> {
+        self.save("stats.json", t)
+    }
 }
 
 #[cfg(test)]
@@ -180,6 +195,41 @@ mod tests {
         s.save_profiles(&p).unwrap();
         assert_eq!(s.load_profiles(), p);
         assert!(!s.root().join("profiles.json.tmp").exists());
+    }
+
+    #[test]
+    fn the_tally_starts_from_the_history_until_it_is_saved() {
+        let s = tmp("tally");
+        assert_eq!(s.load_tally(), Tally::default());
+        let run = HistoryEntry {
+            id: 1,
+            label: "r".into(),
+            cmd: "pnpm test".into(),
+            key: "/r|test".into(),
+            duration_ms: 1_000,
+            peak: 1,
+            estimate: 1,
+            exit: Some(0),
+            ended_at: 100,
+            outcome: crate::model::Outcome::Exited,
+            why: None,
+            tuned: None,
+            ahead_of: None,
+            waited_ms: 0,
+        };
+        s.save_history(&VecDeque::from([run.clone()])).unwrap();
+        let from_history = s.load_tally();
+        assert_eq!(from_history.window(100, 1)[0].1.runs, 1);
+        // Once saved, the saved totals are what count, not the history.
+        let mut t = from_history.clone();
+        t.add(&run);
+        s.save_tally(&t).unwrap();
+        assert_eq!(s.load_tally(), t);
+        // A corrupt file is kept aside, not rebuilt from a history that
+        // holds only the last day.
+        fs::write(s.root().join("stats.json"), "{ truncated").unwrap();
+        assert_eq!(s.load_tally(), Tally::default());
+        assert!(s.root().join("stats.json.corrupt").exists());
     }
 
     #[test]

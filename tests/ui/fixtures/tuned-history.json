@@ -71,7 +71,7 @@
       "peak": 538510056,
       "estimate": 1610612736,
       "exit": 0,
-      "ended_ago_s": 5,
+      "ended_ago_s": 4,
       "tuned": null,
       "ahead_of": null,
       "guard": null
@@ -89,6 +89,77 @@
     "went_first": 0,
     "more": false
   },
+  "commands": [
+    {
+      "days": 7,
+      "total": {
+        "runs": 2,
+        "failed": 0,
+        "run_s": 8,
+        "wait_s": 0,
+        "gb_h": 0.0011865234375,
+        "peak": 538510056
+      },
+      "count": 1,
+      "rows": [
+        {
+          "runs": 2,
+          "failed": 0,
+          "run_s": 8,
+          "wait_s": 0,
+          "gb_h": 0.0011865234375,
+          "peak": 538510056,
+          "key": "~/Projects/work-scheduler-mcp|headroom|vitest run"
+        }
+      ]
+    },
+    {
+      "days": 30,
+      "total": {
+        "runs": 2,
+        "failed": 0,
+        "run_s": 8,
+        "wait_s": 0,
+        "gb_h": 0.0011865234375,
+        "peak": 538510056
+      },
+      "count": 1,
+      "rows": [
+        {
+          "runs": 2,
+          "failed": 0,
+          "run_s": 8,
+          "wait_s": 0,
+          "gb_h": 0.0011865234375,
+          "peak": 538510056,
+          "key": "~/Projects/work-scheduler-mcp|headroom|vitest run"
+        }
+      ]
+    },
+    {
+      "days": 90,
+      "total": {
+        "runs": 2,
+        "failed": 0,
+        "run_s": 8,
+        "wait_s": 0,
+        "gb_h": 0.0011865234375,
+        "peak": 538510056
+      },
+      "count": 1,
+      "rows": [
+        {
+          "runs": 2,
+          "failed": 0,
+          "run_s": 8,
+          "wait_s": 0,
+          "gb_h": 0.0011865234375,
+          "peak": 538510056,
+          "key": "~/Projects/work-scheduler-mcp|headroom|vitest run"
+        }
+      ]
+    }
+  ],
   "profiles": {
     "~/Projects/work-scheduler-mcp|headroom|vitest run": {
       "peaks": [
@@ -119,8 +190,10 @@
       "* typecheck",
       "vitest",
       "jest",
+      "mocha",
       "playwright",
       "tsc",
+      "eslint",
       "nx",
       "turbo",
       "next build",

@@ -16,6 +16,7 @@ use crate::model::{
 };
 use crate::profile::{Profiles, Run, Scaling};
 use crate::protocol::{Control, DaemonMsg, Listing};
+use crate::tally::Tally;
 
 pub type ConnId = u64;
 
@@ -72,6 +73,8 @@ pub struct Scheduler {
     pub cfg: Config,
     pub profiles: Profiles,
     pub history: VecDeque<HistoryEntry>,
+    /// Per-command totals; saved with the history.
+    pub tally: Tally,
     pub held: bool,
     jobs: BTreeMap<JobId, Entry>,
     /// Queued job ids in queue order: pinned first, then the user's order.
@@ -99,6 +102,7 @@ impl Scheduler {
             cfg,
             profiles,
             history,
+            tally: Tally::default(),
             held: false,
             jobs: BTreeMap::new(),
             order: Vec::new(),
@@ -589,7 +593,7 @@ impl Scheduler {
         outcome: Outcome,
         why: Option<String>,
     ) {
-        self.history.push_front(HistoryEntry {
+        let h = HistoryEntry {
             id: j.id,
             label: j.spec.label.clone(),
             cmd: j.spec.cmd.clone(),
@@ -607,7 +611,9 @@ impl Scheduler {
                 .started_at
                 .unwrap_or(self.clock)
                 .saturating_sub(j.enqueued_at),
-        });
+        };
+        self.tally.add(&h);
+        self.history.push_front(h);
         let mut i = 0;
         self.history.retain(|h| {
             i += 1;
@@ -1061,6 +1067,9 @@ mod tests {
         );
         assert_eq!(s.history[0].outcome, Outcome::Exited);
         assert_eq!(s.history[0].exit, Some(1));
+        let t = s.tally.window(42, 1);
+        assert_eq!(t[0].0, "/r|pnpm test");
+        assert_eq!((t[0].1.runs, t[0].1.failed, t[0].1.run_ms), (1, 1, 3_000));
     }
 
     #[test]
