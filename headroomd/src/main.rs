@@ -32,6 +32,8 @@ const GLYPH: u32 = 18;
 const LIST_EVERY: Duration = Duration::from_secs(1);
 const SETTINGS_EVERY: Duration = Duration::from_secs(3);
 const HOOKS_EVERY: Duration = Duration::from_secs(5);
+/// How often the memory and CPU graphs are saved; a crash loses at most this.
+const TREND_EVERY: Duration = Duration::from_secs(300);
 
 static STOP: AtomicBool = AtomicBool::new(false);
 
@@ -239,6 +241,7 @@ fn main() -> wry::Result<()> {
     let mut next_list = Instant::now();
     let mut next_settings = Instant::now();
     let mut next_hooks = Instant::now();
+    let mut next_trend = Instant::now() + TREND_EVERY;
     let mut daemon_thread = Some(daemon_thread);
 
     event_loop.run(move |event, _, control_flow| {
@@ -360,6 +363,10 @@ fn main() -> wry::Result<()> {
                 .set_attached(attached.load(Ordering::Relaxed));
             app.borrow_mut().poll();
             update_tray();
+            if now >= next_trend {
+                next_trend = now + TREND_EVERY;
+                app.borrow().save_trend();
+            }
             if visible {
                 if now >= next_settings {
                     next_settings = now + SETTINGS_EVERY;
@@ -383,6 +390,7 @@ fn main() -> wry::Result<()> {
         }
 
         if quit {
+            app.borrow().save_trend();
             // Stop our daemon (if we run one) so it removes its socket.
             stop.store(true, Ordering::Relaxed);
             if let Some(t) = daemon_thread.take() {

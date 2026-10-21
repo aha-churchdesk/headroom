@@ -20,6 +20,7 @@ use headroom_core::profile::Profiles;
 use headroom_core::protocol::{ClientMsg, Control, DaemonMsg, Listing, request};
 use headroom_core::store::Store;
 use headroom_core::tally::Tally;
+use headroom_core::trend::Trend;
 use serde_json::Value;
 
 use crate::bridge::{self, Do, UiCmd};
@@ -55,6 +56,7 @@ pub struct App {
     cfg: Config,
     profiles: Profiles,
     tally: Tally,
+    trend: Trend,
     others: Vec<AppUsage>,
     hooks: Vec<(&'static str, &'static str)>,
     login: Login,
@@ -96,6 +98,7 @@ impl App {
             cfg: store.load_config(),
             profiles: store.load_profiles(),
             tally: store.load_tally(),
+            trend: store.load_trend(),
             store,
             socket,
             home,
@@ -121,6 +124,7 @@ impl App {
     pub fn poll(&mut self) -> bool {
         match request(&self.socket, &ClientMsg::List) {
             Ok(DaemonMsg::Jobs(l)) => {
+                self.trend.record(&l.snapshot, wall());
                 self.listing = Some(l);
                 true
             }
@@ -176,6 +180,11 @@ impl App {
             .collect();
     }
 
+    /// Losing a save costs a few minutes of graph; the next one retries.
+    pub fn save_trend(&self) {
+        let _ = self.store.save_trend(&self.trend);
+    }
+
     pub fn refresh_hooks(&mut self) {
         self.hooks = hook_states(&self.home, &self.cli);
     }
@@ -198,6 +207,7 @@ impl App {
                 cfg: &self.cfg,
                 profiles: &self.profiles,
                 tally: &self.tally,
+                trend: &self.trend,
                 others: &self.others,
                 hooks: &self.hooks,
                 classify: self.classify.clone(),

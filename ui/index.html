@@ -160,6 +160,23 @@ button:disabled{ cursor:default; opacity:.4; }
 .pill.normal{ background:var(--good); }
 .pill.warn{ background:var(--warn); color:#1c1c1e; }
 .pill.critical{ background:var(--bad); }
+.head .gbtn{ margin-left:auto; font-size:11px; color:var(--text-dim); padding:1px 6px; border-radius:5px; }
+.head .gbtn:hover, .head .gbtn.on{ background:var(--bg-sunk); color:var(--text); }
+.graphs{ margin-top:9px; }
+.graphs .g-top{ display:flex; align-items:center; gap:8px; font-size:11px; color:var(--text-dim); margin-bottom:4px; }
+.graphs .g-top .readout{ flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.graphs .g-top .seg button{ padding:1px 8px; font-size:10.5px; }
+.graph{ margin-top:5px; }
+.graph .g-h{ display:flex; justify-content:space-between; font-size:10.5px; color:var(--text-dim); }
+.graph .g-h b{ color:var(--text); font-weight:600; }
+.graph .plot{ display:block; width:100%; height:34px; background:var(--bg-sunk); border-radius:4px; cursor:crosshair; }
+.graph .plot .area{ fill:var(--accent); opacity:.18; }
+.graph .plot .line{ fill:none; stroke:var(--accent); stroke-width:1.6; stroke-linejoin:round; vector-effect:non-scaling-stroke; }
+.graph .plot .dot{ fill:var(--accent); }
+.graph .plot .hair{ stroke:var(--text); stroke-width:1; opacity:.5; vector-effect:non-scaling-stroke; }
+.graph .plot .p1{ fill:var(--warn); }
+.graph .plot .p2{ fill:var(--bad); }
+.graphs .g-x{ display:flex; justify-content:space-between; font-size:9.5px; color:var(--text-faint); margin-top:2px; }
 .head .alert{
   margin-top:8px; font-size:11.5px; padding:6px 9px; border-radius:7px;
   background:color-mix(in srgb, var(--warn) 16%, transparent);
@@ -464,6 +481,9 @@ const UI = {
   profileKey: null,
   cmdDays: 7,             // Commands page: window in days, and the column it sorts by
   cmdSort: "run_s",
+  graph: false,           // memory, swap and CPU graphs open under the header
+  graphWin: 3600,
+  graphAt: null,          // seconds ago under the pointer, while hovering a graph
   expanded: new Set(),
   openApps: new Set(),    // Other apps rows showing their processes
   confirm: null,          // { key, until } — second click within 3 s acts
@@ -544,8 +564,77 @@ function renderHead(S){
       <span>${gb(m.mem_available)} GB available</span>·
       <span>swap ${gb(m.swap_used)} GB</span>·
       <span>CPU ${Math.round(m.cpu_pct)}%</span>
+      <button class="gbtn ${UI.graph ? "on" : ""}" data-act="graph" title="Memory, swap and CPU over time">Graph ${UI.graph ? "▴" : "▾"}</button>
     </div>
+    ${UI.graph ? renderGraphs(S) : ""}
     ${alert}`;
+}
+
+/* Memory, swap and CPU over time: three charts, one scale each, sharing
+   the time axis and one readout. Points: [ago_s, mem, swap, cpu, pressure]. */
+const GW = 372, GH = 34;
+const PRESSURE = ["normal", "warn", "critical"];
+
+function ago_short(s){
+  return s < 60 ? "now" : s < 3600 ? `${Math.round(s / 60)} min ago` : `${(s / 3600).toFixed(s < 36000 ? 1 : 0)} h ago`;
+}
+
+function plot(w, val, top, hover){
+  const x = ago => (GW * (1 - ago / w.window_s)).toFixed(1);
+  const y = v => (GH - 2 - Math.min(1, v / top) * (GH - 4)).toFixed(1);
+  let line = "", area = "", dots = "", seg = [], prev = null;
+  const flush = () => {
+    if (seg.length === 1) dots += `<circle class="dot" cx="${seg[0][0]}" cy="${seg[0][1]}" r="1.8"/>`;
+    else if (seg.length){
+      const pts = seg.map(([a, b]) => `${a},${b}`).join("L");
+      line += `M${pts}`;
+      area += `M${seg[0][0]},${GH}L${pts}L${seg[seg.length - 1][0]},${GH}Z`;
+    }
+    seg = [];
+  };
+  for (const p of w.points){
+    // The app wasn't running: leave the gap.
+    if (prev && prev[0] - p[0] > 2 * w.step_s) flush();
+    seg.push([x(p[0]), y(val(p))]);
+    prev = p;
+  }
+  flush();
+  const hair = hover ? `<line class="hair" x1="${x(hover[0])}" x2="${x(hover[0])}" y1="0" y2="${GH}"/>` : "";
+  return { x, svg: inner => `<svg class="plot" viewBox="0 0 ${GW} ${GH}" preserveAspectRatio="none" data-graph="1">
+    ${inner || ""}<path class="area" d="${area}"/><path class="line" d="${line}"/>${dots}${hair}</svg>` };
+}
+
+function renderGraphs(S){
+  const wins = S.trend || [];
+  const w = wins.find(x => x.window_s === UI.graphWin) || wins[0];
+  if (!w) return "";
+  const pts = w.points;
+  const total = S.system.mem_total;
+  const hover = UI.graphAt == null || !pts.length ? null
+    : pts.reduce((a, b) => Math.abs(b[0] - UI.graphAt) < Math.abs(a[0] - UI.graphAt) ? b : a);
+  const max = i => pts.reduce((n, p) => Math.max(n, p[i]), 0);
+  const swapTop = Math.max(GiB, max(2) * 1.15);
+  const readout = !pts.length ? "Collecting: a point every 30 s"
+    : hover ? `${ago_short(hover[0])} · ${gb(hover[1])} GB · swap ${gb(hover[2])} GB · CPU ${hover[3]}%${hover[4] ? ` · pressure ${PRESSURE[hover[4]].toUpperCase()}` : ""}`
+    : `Peak ${gb(max(1))} GB · swap ${gb(max(2))} GB · CPU ${max(3)}%`;
+  const mem = plot(w, p => p[1], total, hover);
+  const strip = pts.filter(p => p[4]).map(p =>
+    `<rect class="p${p[4]}" x="${mem.x(p[0])}" y="${GH - 3}" width="${Math.max(1.5, GW * w.step_s / w.window_s).toFixed(1)}" height="3"/>`).join("");
+  const chart = (name, value, svg, tip) => `
+    <div class="graph" title="${tip}">
+      <div class="g-h"><span>${name}</span><b class="num">${value}</b></div>${svg}</div>`;
+  const now = hover || pts[pts.length - 1];
+  return `
+    <div class="graphs">
+      <div class="g-top"><span class="readout num">${readout}</span>
+        <span class="seg">${[[3600, "1h"], [86400, "24h"]].map(([v, l]) =>
+          `<button class="${v === w.window_s ? "on" : ""}" data-act="graph_win" data-val="${v}">${l}</button>`).join("")}</span></div>
+      ${chart("Memory", now ? `${gb(now[1])} / ${gb(total)} GB` : "", mem.svg(strip),
+        "Most memory in use in each step. Marks along the bottom: memory pressure warn (amber) or critical (red).")}
+      ${chart("Swap", now ? `${gb(now[2])} GB` : "", plot(w, p => p[2], swapTop, hover).svg(), "Most swap in use in each step")}
+      ${chart("CPU", now ? `${now[3]}%` : "", plot(w, p => p[3], 100, hover).svg(), "Average CPU use in each step")}
+      <div class="g-x"><span>${w.window_s === 3600 ? "1 h ago" : "24 h ago"}</span><span>now</span></div>
+    </div>`;
 }
 
 function renderLastDay(h){
@@ -1048,6 +1137,8 @@ $("pop").addEventListener("click", (e) => {
     case "snippet": UI.snippet = !UI.snippet; break;
     case "cmd_days": UI.cmdDays = Number(d.val); break;
     case "cmd_sort": UI.cmdSort = d.val; break;
+    case "graph":   UI.graph = !UI.graph; UI.graphAt = null; break;
+    case "graph_win": UI.graphWin = Number(d.val); UI.graphAt = null; break;
     case "hold":    send({ cmd:"hold", on: !STATE.held }); return;
     case "freeze": case "resume": case "kill": case "cancel": case "top":
                     send({ cmd: d.act, id }); return;
@@ -1102,6 +1193,22 @@ function dropIndex(e){
 function clearDropMarks(){
   document.querySelectorAll(".drop-before,.drop-after").forEach(n => n.classList.remove("drop-before", "drop-after"));
 }
+// Hovering a graph moves the crosshair on all three. Only the header is
+// redrawn, so the rest of the popover keeps its own hover and scroll.
+$("head").addEventListener("mousemove", (e) => {
+  const svg = e.target.closest("[data-graph]");
+  const w = STATE && (STATE.trend || []).find(x => x.window_s === UI.graphWin);
+  const at = svg && w ? Math.round(w.window_s * (1 - (e.clientX - svg.getBoundingClientRect().left) / svg.getBoundingClientRect().width)) : null;
+  if (at === UI.graphAt) return;
+  UI.graphAt = at;
+  $("head").innerHTML = renderHead(STATE);
+});
+$("head").addEventListener("mouseleave", () => {
+  if (UI.graphAt == null) return;
+  UI.graphAt = null;
+  $("head").innerHTML = renderHead(STATE);
+});
+
 $("pop").addEventListener("dragstart", (e) => {
   const row = e.target.closest("[data-qid]");
   if (!row) return;
@@ -1222,6 +1329,24 @@ const COMMANDS = [
     wait_s:sum("wait_s"), gb_h:sum("gb_h"), peak:Math.max(0, ...rows.map(r => r.peak)) } };
 });
 
+/* Design data for the graphs: a busy afternoon with one warn spell, and a
+   day with the Mac asleep overnight (a gap). */
+function TREND(){
+  const win = (window_s, step_s, gapFrom, gapTo) => {
+    const points = [];
+    for (let ago = window_s - step_s; ago >= 0; ago -= step_s){
+      if (ago >= gapFrom && ago < gapTo) continue;
+      const t = (window_s - ago) / window_s;
+      const mem = 20 + 7 * Math.sin(t * 9) + 4 * Math.sin(t * 31);
+      const lvl = mem > 30 ? 1 : 0;
+      points.push([ago, G(Math.min(35, mem)), G(Math.max(0, 0.2 + 2.4 * t * t)),
+        Math.round(35 + 30 * Math.sin(t * 17) ** 2 + 25 * (Math.sin(t * 53) > .6)), lvl]);
+    }
+    return { window_s, step_s, points };
+  };
+  return [win(3600, 30, -1, -1), win(86400, 300, 50400, 79200)];
+}
+
 function base(over){
   return Object.assign({
     system: { pressure:"normal", mem_total:G(36), mem_used:G(27.1), mem_available:G(8.9), swap_used:G(0.4), cpu_pct:63 },
@@ -1236,7 +1361,7 @@ function base(over){
       { id:"r4", label:"browser-cd", cmd:"playwright test", key:"browser-churchdesk · playwright test", duration_s:30, peak:G(1.0), estimate:G(4.2), exit:null, ended_ago_s:5400,
         guard:{ action:"cancelled", why:"cancelled from menu bar" } },
     ],
-    commands: COMMANDS,
+    commands: COMMANDS, trend: TREND(),
     profiles: PROFILES, others: OTHERS,
     settings: structuredClone(BASE_SETTINGS), classify:null,
   }, over);

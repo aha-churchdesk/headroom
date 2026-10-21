@@ -18,7 +18,7 @@
   "queued": [],
   "banners": [
     {
-      "id": "h4-1792569301",
+      "id": "h4-1792571045",
       "kind": "gave_up",
       "job_id": "4",
       "label": "sc-49201",
@@ -26,7 +26,7 @@
       "why": "memory still critical 1 s after freezing; peak 0.2 GB vs est 1.5 GB. The agent was told: exit 137."
     },
     {
-      "id": "h4-1792569296",
+      "id": "h4-1792571040",
       "kind": "requeued",
       "job_id": "4",
       "label": "sc-49201",
@@ -41,7 +41,7 @@
       "cmd": "headroom-hog",
       "key": "~/Projects/work-scheduler-mcp|headroom|headroom-hog",
       "duration_s": 4,
-      "peak": 216236536,
+      "peak": 216252920,
       "estimate": 1610612736,
       "exit": null,
       "ended_ago_s": 1,
@@ -58,7 +58,7 @@
       "cmd": "headroom-hog",
       "key": "~/Projects/work-scheduler-mcp|headroom|headroom-hog",
       "duration_s": 3,
-      "peak": 216236536,
+      "peak": 216252920,
       "estimate": 1610612736,
       "exit": null,
       "ended_ago_s": 6,
@@ -135,8 +135,8 @@
         "failed": 2,
         "run_s": 8,
         "wait_s": 0,
-        "gb_h": 0.00043701171875,
-        "peak": 216236536
+        "gb_h": 0.00043836805555555556,
+        "peak": 216252920
       },
       "count": 4,
       "rows": [
@@ -145,8 +145,8 @@
           "failed": 1,
           "run_s": 7,
           "wait_s": 0,
-          "gb_h": 0.00043701171875,
-          "peak": 216236536,
+          "gb_h": 0.00043836805555555556,
+          "peak": 216252920,
           "key": "~/Projects/work-scheduler-mcp|headroom|headroom-hog"
         },
         {
@@ -185,8 +185,8 @@
         "failed": 2,
         "run_s": 8,
         "wait_s": 0,
-        "gb_h": 0.00043701171875,
-        "peak": 216236536
+        "gb_h": 0.00043836805555555556,
+        "peak": 216252920
       },
       "count": 4,
       "rows": [
@@ -195,8 +195,8 @@
           "failed": 1,
           "run_s": 7,
           "wait_s": 0,
-          "gb_h": 0.00043701171875,
-          "peak": 216236536,
+          "gb_h": 0.00043836805555555556,
+          "peak": 216252920,
           "key": "~/Projects/work-scheduler-mcp|headroom|headroom-hog"
         },
         {
@@ -235,8 +235,8 @@
         "failed": 2,
         "run_s": 8,
         "wait_s": 0,
-        "gb_h": 0.00043701171875,
-        "peak": 216236536
+        "gb_h": 0.00043836805555555556,
+        "peak": 216252920
       },
       "count": 4,
       "rows": [
@@ -245,8 +245,8 @@
           "failed": 1,
           "run_s": 7,
           "wait_s": 0,
-          "gb_h": 0.00043701171875,
-          "peak": 216236536,
+          "gb_h": 0.00043836805555555556,
+          "peak": 216252920,
           "key": "~/Projects/work-scheduler-mcp|headroom|headroom-hog"
         },
         {
@@ -276,6 +276,41 @@
           "peak": 0,
           "key": "~/Projects/work-scheduler-mcp|headroom|sleep 60"
         }
+      ]
+    }
+  ],
+  "trend": [
+    {
+      "window_s": 3600,
+      "step_s": 30,
+      "points": [
+        [
+          36,
+          17179869184,
+          0,
+          0.0,
+          2
+        ],
+        [
+          6,
+          17179869184,
+          0,
+          0.0,
+          0
+        ]
+      ]
+    },
+    {
+      "window_s": 86400,
+      "step_s": 300,
+      "points": [
+        [
+          246,
+          17179869184,
+          0,
+          0.0,
+          2
+        ]
       ]
     }
   ],

@@ -97,6 +97,7 @@ function loadUI() {
     /** The view's markup, for what only shows on hover (titles). */
     html: () => byId.view._html,
     head: () => text(byId.head._html),
+    headHtml: () => byId.head._html,
     page: () => text(page()),
     find,
     /** Click the rendered element matching these data-* values; it must be
