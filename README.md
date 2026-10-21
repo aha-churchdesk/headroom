@@ -33,7 +33,7 @@ A foreground command waits at most 8 minutes in the queue (under the 10 minute l
 
 ## Install
 
-From source (Rust 1.97, pinned in `mise.toml`):
+From source (Rust 1.99, pinned in `mise.toml`):
 
 ```sh
 git clone https://github.com/aha-churchdesk/headroom
