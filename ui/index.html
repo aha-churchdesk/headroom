@@ -846,12 +846,13 @@ function renderProfile(S){
     <div class="prof">
       <div class="key mono" title="${esc(UI.profileKey)}">${esc(keyLabel(UI.profileKey))}</div>
       ${p.peaks.length ? sparkline(p.peaks, p.p90) : ""}
-      <div class="faint" style="font-size:10.5px">Peak memory of the last ${p.peaks.length} runs · dashed line = p90 estimate</div>
+      <div class="faint" style="font-size:10.5px">Measured peaks from ${p.peaks.length} clean run${p.peaks.length === 1 ? "" : "s"} · dashed line = historical estimate</div>
       <div class="stats num">
-        <div class="stat"><div class="k">estimate (p90)</div><div class="v">${gb(p.p90)} GB</div></div>
+        <div class="stat"><div class="k">historical estimate</div><div class="v">${gb(p.p90)} GB</div></div>
         <div class="stat"><div class="k">median time</div><div class="v">${dur(p.median_s)}</div></div>
-        <div class="stat"><div class="k">runs</div><div class="v">${p.samples}</div></div>
+        <div class="stat"><div class="k">measured runs</div><div class="v">${p.samples}</div></div>
       </div>
+      <div class="faint" style="font-size:10.5px">Based on measured peaks and the default estimate, with interrupted runs as a lower bound. Scheduling may reserve more for the command's default worker count.</div>
       ${(p.parts || []).length ? `
       <div class="parts">
         <div class="k">Runs inside it</div>

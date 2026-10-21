@@ -327,9 +327,11 @@ pub fn state(l: &Listing, x: &Extras) -> Value {
             let peaks: Vec<Bytes> = p
                 .runs
                 .iter()
-                .filter(|r| !r.flagged)
+                .filter(|r| !r.flagged && r.peak > 0)
                 .map(|r| r.peak)
                 .collect();
+            // This summarizes observed peaks. Scheduling can reserve more at
+            // a known default worker count, which cannot be read from a key.
             let est = x.profiles.estimate(k, "", cfg.default_estimate);
             Some((
                 k,
@@ -626,6 +628,62 @@ mod tests {
         assert_eq!(inner(&j), Some("git"));
         j.now = Some("git hook run pre-commit".into());
         assert_eq!(inner(&j), Some("git hook run pre-commit"));
+    }
+
+    #[test]
+    fn profile_charts_exclude_unmeasured_and_interrupted_peaks_but_keep_run_counts() {
+        use headroom_core::profile::Run;
+        let (cfg, mut p, d) = (Config::default(), Profiles::default(), HashSet::new());
+        let key = "/r|vitest run";
+        for (peak, flagged, duration_ms) in [
+            (0, false, 1_000),
+            (4 * GIB, false, 3_000),
+            (8 * GIB, true, 9_000),
+        ] {
+            p.record(
+                key,
+                key,
+                Run {
+                    peak,
+                    flagged,
+                    duration_ms,
+                    exit: Some(0),
+                    at: 0,
+                    workers: Some(2),
+                    parts: vec![],
+                },
+            );
+        }
+        let v = state(&listing(), &extras(&cfg, &p, &d));
+        let profile = &v["profiles"][key];
+        assert_eq!(profile["peaks"], json!([4 * GIB]));
+        assert_eq!(profile["samples"], 1);
+        assert_eq!(profile["runs"], 3);
+        assert_eq!(profile["median_s"], 1, "unmeasured durations still count");
+        assert_eq!(
+            profile["p90"],
+            8 * GIB,
+            "interrupted peaks remain a lower bound"
+        );
+
+        let mut unmeasured = Profiles::default();
+        unmeasured.record(
+            key,
+            key,
+            Run {
+                peak: 0,
+                flagged: false,
+                duration_ms: 1_000,
+                exit: Some(0),
+                at: 0,
+                workers: None,
+                parts: vec![],
+            },
+        );
+        let v = state(&listing(), &extras(&cfg, &unmeasured, &d));
+        assert_eq!(v["profiles"][key]["peaks"], json!([]));
+        assert_eq!(v["profiles"][key]["samples"], 0);
+        assert_eq!(v["profiles"][key]["runs"], 1);
     }
 
     #[test]

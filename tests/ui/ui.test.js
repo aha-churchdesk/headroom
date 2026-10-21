@@ -399,11 +399,30 @@ test('a profile opens from history, labelled without the raw key', () => {
   ui.click({ act: 'profile', key });
   const v = ui.view();
   has(v, 'work-scheduler-mcp · headroom · echo ok');
-  has(v, 'estimate (p90)');
+  has(v, 'historical estimate');
   ui.click({ act: 'reset_profile', key });
   eq(ui.sent, [], 'reset is armed, not sent');
   ui.click({ act: 'reset_profile', key });
   eq(ui.sent, [{ cmd: 'reset_profile', key }]);
+});
+
+test('a profile separates measured runs and historical estimates from scheduling', () => {
+  const key = '/repo|vitest run';
+  const profile = { peaks: [2 * 2 ** 30], p90: 3 * 2 ** 30,
+                    median_s: 12, samples: 1, runs: 3 };
+  ui.setState({ ...history, profiles: { [key]: profile } });
+  ui.UI.page = 'profile';
+  ui.UI.profileKey = key;
+  ui.setState({ ...history, profiles: { [key]: profile } });
+  has(ui.view(), 'Measured peaks from 1 clean run · dashed line = historical estimate');
+  has(ui.view(), 'historical estimate 3 GB median time 12s measured runs 1');
+  has(ui.view(), "Scheduling may reserve more for the command's default worker count.");
+  lacks(ui.view(), 'estimate (p90)');
+  eq((ui.html().match(/<circle /g) || []).length, 1, 'only measured peaks are charted');
+
+  ui.setState({ ...history, profiles: { [key]: { ...profile, peaks: [], samples: 0 } } });
+  has(ui.view(), 'measured runs 0');
+  lacks(ui.html(), '<svg');
 });
 
 test('a profile with no recorded runs says so', () => {

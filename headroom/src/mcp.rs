@@ -15,7 +15,7 @@ use headroom_core::protocol::{ClientMsg, Control, DaemonMsg, Listing, request};
 use headroom_core::store::Store;
 use serde_json::{Map, Value, json};
 
-use crate::context::{git_context, git_hook_installed};
+use crate::context::{git_context, git_hook_installed, tunable};
 
 const PROTOCOL: &str = "2025-06-18";
 
@@ -155,15 +155,22 @@ fn estimate(store: &Store, command: &str, cwd: &Path) -> Value {
             let git = git_context(cwd);
             let (cmd, program) = describe_in(command, &cfg, &hooked);
             let (key, fallback) = profile_keys(&git.repo, &git.subdir, &cmd, &program);
-            let e = store
-                .load_profiles()
-                .estimate(&key, &fallback, cfg.default_estimate);
+            let profiles = store.load_profiles();
+            let workers = tunable(command, cwd).map(|t| t.default_workers);
+            let observed = profiles.estimate(&key, &fallback, cfg.default_estimate);
+            let e = profiles.estimate_for_workers(&key, &fallback, cfg.default_estimate, workers);
             json!({
                 "queued": true,
                 "profile": key,
                 "estimate_gb": gb(e.bytes),
                 "profiled_runs": e.samples,
-                "basis": if e.samples == 0 { "no runs of its own yet: the repository's or the default estimate" } else { "p90 of past peaks" },
+                "basis": if e.bytes > observed.bytes {
+                    "past peaks raised to the memory model at the command's default worker count"
+                } else if e.samples == 0 {
+                    "no measured runs of its own yet: the repository's or the default estimate, with interrupted runs as a lower bound"
+                } else {
+                    "p90 of measured past peaks, blended with the repository's or default estimate until three runs; interrupted runs set a lower bound"
+                },
             })
         }
     }
@@ -515,6 +522,79 @@ mod tests {
         );
         assert_eq!(known["structuredContent"]["estimate_gb"], 4.0);
         assert_eq!(known["structuredContent"]["profiled_runs"], 3);
+    }
+
+    #[test]
+    fn estimates_use_script_worker_metadata_even_when_tuning_is_disabled() {
+        let (s, cwd) = store("estimate-workers");
+        std::fs::write(
+            cwd.join("package.json"),
+            r#"{"scripts":{"test":"vitest run"}}"#,
+        )
+        .unwrap();
+        let command = "pnpm test";
+        let tune = tunable(command, &cwd).expect("the script runs a tunable tool");
+        let fresh = estimate(&s, command, &cwd);
+        let key = fresh["profile"].as_str().unwrap();
+        let mut profiles = Profiles::default();
+        // Different peaks at ten workers leave some fixed cost in the fitted
+        // model, so it exceeds the raw p90 even on a single-core test host.
+        for i in 0..20 {
+            profiles.record(
+                key,
+                key,
+                Run {
+                    peak: match i {
+                        0 => 8 * GIB,
+                        1 => 6 * GIB,
+                        _ => 2 * GIB,
+                    },
+                    workers: Some(if i < 2 { 10 } else { 2 }),
+                    duration_ms: 1000,
+                    exit: Some(0),
+                    flagged: false,
+                    at: 0,
+                    parts: vec![],
+                },
+            );
+        }
+        s.save_profiles(&profiles).unwrap();
+        assert_eq!(profiles.get(key).unwrap().p90(), Some(2 * GIB));
+        let expected = profiles
+            .get(key)
+            .unwrap()
+            .scaling()
+            .unwrap()
+            .at(tune.default_workers);
+        assert!(expected > 2 * GIB);
+        for disabled in ["neither", "all", "vitest"] {
+            let mut cfg = s.load_config();
+            cfg.tune = disabled != "all";
+            cfg.tune_off = if disabled == "vitest" {
+                vec!["vitest".into()]
+            } else {
+                vec![]
+            };
+            s.save_config(&cfg).unwrap();
+            let result = tool(&s, &cwd, "estimate_command", json!({ "command": command }));
+            let content = &result["structuredContent"];
+            assert_eq!(content["estimate_gb"], gb(expected), "{disabled}");
+            assert_eq!(content["profiled_runs"], 20);
+            assert!(
+                content["basis"]
+                    .as_str()
+                    .unwrap()
+                    .contains("default worker count")
+            );
+        }
+        // User-owned worker settings also disable metadata in the run path.
+        std::fs::write(
+            cwd.join("package.json"),
+            r#"{"scripts":{"test":"vitest run --maxWorkers=2"}}"#,
+        )
+        .unwrap();
+        assert_eq!(tunable(command, &cwd), None);
+        assert_eq!(estimate(&s, command, &cwd)["estimate_gb"], 2.0);
     }
 
     #[test]

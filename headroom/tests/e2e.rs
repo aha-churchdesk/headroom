@@ -871,10 +871,11 @@ fn a_job_that_does_not_fit_runs_with_fewer_workers() {
 #[test]
 fn a_quick_job_starts_ahead_while_the_running_one_overruns() {
     // The same 1 GB job takes 1 s three times, then runs on. Past its usual
-    // second it is expected to take as long again, so a job that is done at
-    // once may start ahead of another 1 GB one waiting for it.
+    // second it is expected to take as long again, so a known small job
+    // may start ahead of another 1 GB one waiting for it.
     let bin = tmp("overrun-bin");
     let secs = bin.join("secs");
+    let quick_secs = bin.join("quick-secs");
     let script = |name: &str, body: String| {
         let p = bin.join(name);
         std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
@@ -882,7 +883,10 @@ fn a_quick_job_starts_ahead_while_the_running_one_overruns() {
         p.display().to_string()
     };
     let big = script("e2e.sh", format!("exec {HOG} 1 $(cat {})", secs.display()));
-    let quick = script("lint.sh", "true".into());
+    let quick = script(
+        "lint.sh",
+        format!("exec {HOG} 0.05 $(cat {})", quick_secs.display()),
+    );
     let d = Daemon::start(
         "overrun",
         Config {
@@ -891,10 +895,14 @@ fn a_quick_job_starts_ahead_while_the_running_one_overruns() {
         },
     );
     std::fs::write(&secs, "1").unwrap();
+    std::fs::write(&quick_secs, "1").unwrap();
     for _ in 0..3 {
         d.output(&["run", "--", &big]);
         d.output(&["run", "--", &quick]);
     }
+    // Warm runs must last long enough to measure their small footprint.
+    // An unmeasured immediate exit is not evidence of zero memory use.
+    std::fs::write(&quick_secs, "0").unwrap();
     std::fs::write(&secs, "8").unwrap();
     let running = d.spawn(&["run", "--", &big]);
     d.running();

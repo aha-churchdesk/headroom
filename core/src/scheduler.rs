@@ -15,7 +15,7 @@ use crate::model::{
     Bytes, FrozenBy, HistoryEntry, Job, JobId, JobSpec, JobState, Millis, Outcome, Part, Pressure,
     Snapshot, Tuned, merge_parts,
 };
-use crate::profile::{Profiles, Run, Scaling};
+use crate::profile::{Estimate, Profiles, Run, Scaling};
 use crate::protocol::{Control, DaemonMsg, Listing};
 use crate::tally::Tally;
 
@@ -151,9 +151,7 @@ impl Scheduler {
         if self.by_conn(conn).is_some() {
             return vec![reply(conn, Err("this connection already has a job".into()))];
         }
-        let est = self
-            .profiles
-            .estimate(&spec.key, &spec.fallback_key, self.cfg.default_estimate);
+        let est = self.estimate_for(&spec);
         let id = self.next_id;
         self.next_id += 1;
         let scaling = self.scaling_for(&spec);
@@ -225,6 +223,10 @@ impl Scheduler {
             };
             self.profiles
                 .record(&e.job.spec.key, &e.job.spec.fallback_key, run);
+            self.reestimate(Some(&e.job.spec.key));
+            if e.job.spec.fallback_key != e.job.spec.key {
+                self.reestimate(Some(&e.job.spec.fallback_key));
+            }
             fx.push(Effect::SaveProfiles);
         }
         let (outcome, why) = match e.fate.take() {
@@ -545,6 +547,17 @@ impl Scheduler {
         self.profiles.get(&spec.key)?.scaling()
     }
 
+    /// Recorded peaks include runs with fewer workers. Starting untouched
+    /// reserves the model's memory at the default count, even with tuning off.
+    fn estimate_for(&self, spec: &JobSpec) -> Estimate {
+        self.profiles.estimate_for_workers(
+            &spec.key,
+            &spec.fallback_key,
+            self.cfg.default_estimate,
+            spec.tune.map(|t| t.default_workers),
+        )
+    }
+
     fn median_for(&self, spec: &JobSpec) -> Option<u64> {
         self.profiles.get(&spec.key)?.median_ms()
     }
@@ -555,28 +568,23 @@ impl Scheduler {
             .jobs
             .values()
             .filter(|e| e.job.state == JobState::Queued)
-            .filter(|e| key.is_none_or(|k| e.job.spec.key == k))
+            .filter(|e| key.is_none_or(|k| e.job.spec.key == k || e.job.spec.fallback_key == k))
             .map(|e| e.job.id)
             .collect();
         for id in ids {
             let spec = self.jobs[&id].job.spec.clone();
-            let est =
-                self.profiles
-                    .estimate(&spec.key, &spec.fallback_key, self.cfg.default_estimate);
+            let est = self.estimate_for(&spec);
             let scaling = self.scaling_for(&spec);
             let median = self.median_for(&spec);
             let j = &mut self.jobs.get_mut(&id).expect("queued").job;
             (j.estimate, j.samples, j.scaling) = (est.bytes, est.samples, scaling);
             j.median_ms = median;
+            self.jobs.get_mut(&id).expect("queued").told = None;
         }
     }
 
     fn requeue(&mut self, mut e: Entry, now: Millis) {
-        let est = self.profiles.estimate(
-            &e.job.spec.key,
-            &e.job.spec.fallback_key,
-            self.cfg.default_estimate,
-        );
+        let est = self.estimate_for(&e.job.spec);
         let scaling = self.scaling_for(&e.job.spec);
         let median = self.median_for(&e.job.spec);
         let j = &mut e.job;
@@ -951,6 +959,97 @@ mod tests {
         s.exited(1, Some(0), None, 1_000, 7);
         assert_eq!(s.profiles.get(&sp.key).unwrap().runs[3].workers, Some(9));
         assert_eq!(s.history[0].tuned, None);
+    }
+
+    #[test]
+    fn tuned_history_reserves_the_default_worker_count_before_admission() {
+        for tune in [true, false] {
+            let mut s = sched(8);
+            s.cfg.tune = tune;
+            let mut sp = own("vitest run");
+            sp.tune = Some(Tunable {
+                tool: Tool::Vitest,
+                default_workers: 10,
+                npm: false,
+            });
+            for i in 0..20 {
+                s.profiles.record(
+                    &sp.key,
+                    &sp.fallback_key,
+                    Run {
+                        peak: if i < 2 { 8 * GIB } else { 2 * GIB },
+                        workers: Some(if i < 2 { 10 } else { 2 }),
+                        duration_ms: 60_000,
+                        exit: Some(0),
+                        flagged: false,
+                        at: 0,
+                        parts: vec![],
+                    },
+                );
+            }
+            assert_eq!(s.profiles.get(&sp.key).unwrap().p90(), Some(2 * GIB));
+            s.enqueue(9, spec("blocker"), 0);
+            let fx = s.enqueue(1, sp.clone(), 0);
+            if tune {
+                assert!(sent(&fx, 1).iter().any(|m| {
+                    matches!(
+                        m,
+                        DaemonMsg::Granted {
+                            workers: Some(_),
+                            ..
+                        }
+                    )
+                }));
+            } else {
+                assert!(!granted(&fx, 1));
+                assert!(s.list().queued[0].estimate >= 8 * GIB);
+            }
+            // Reconfiguration must also preserve the default-count estimate.
+            s.held = true;
+            s.enqueue(2, sp, 0);
+            s.reestimate(None);
+            assert!(s.list().queued.iter().all(|j| j.estimate >= 8 * GIB));
+        }
+    }
+
+    #[test]
+    fn completing_a_run_refreshes_exact_and_fallback_consumers() {
+        let mut s = sched(4);
+        let sp = spec("build");
+        for _ in 0..2 {
+            s.profiles.record(
+                &sp.key,
+                &sp.fallback_key,
+                Run {
+                    peak: 3 * GIB,
+                    workers: None,
+                    duration_ms: 1_000,
+                    exit: Some(0),
+                    flagged: false,
+                    at: 0,
+                    parts: vec![],
+                },
+            );
+        }
+        s.enqueue(1, sp.clone(), 0);
+        s.started(1, 100);
+        s.control(9, Control::Hold { on: true }, 0, 0);
+        s.enqueue(2, sp, 0);
+        s.enqueue(3, spec("other-build"), 0);
+        assert!(s.list().queued.iter().all(|j| j.estimate == 3 * GIB));
+        s.tick(snap(4), &usage(100, 12.0), 1_000);
+        let fx = s.exited(1, Some(0), None, 60_000, 100);
+        assert!(s.list().queued.iter().all(|j| j.estimate == 12 * GIB));
+        assert_eq!(s.list().queued[0].median_ms, Some(1_000));
+        assert!(
+            sent(&fx, 3).iter().any(|m| {
+                matches!(m, DaemonMsg::Queued { estimate, .. } if *estimate == 12 * GIB)
+            })
+        );
+        s.control(9, Control::ResetProfile { key: "/r|x".into() }, 60_000, 100);
+        let q = s.list().queued;
+        assert_eq!(q[0].estimate, 12 * GIB);
+        assert_eq!(q[1].estimate, 3 * GIB);
     }
 
     #[test]

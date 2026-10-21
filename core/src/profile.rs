@@ -77,7 +77,9 @@ impl Profile {
     fn clean_peaks(&self) -> Vec<Bytes> {
         self.runs
             .iter()
-            .filter(|r| !r.flagged)
+            // A command can finish between samples. Its zero peak means
+            // unmeasured memory, while its duration is still useful.
+            .filter(|r| !r.flagged && r.peak > 0)
             .map(|r| r.peak)
             .collect()
     }
@@ -131,7 +133,7 @@ impl Profile {
         let pts: Vec<(u32, Bytes)> = self
             .runs
             .iter()
-            .filter(|r| !r.flagged)
+            .filter(|r| !r.flagged && r.peak > 0)
             .filter_map(|r| r.workers.filter(|&n| n > 0).map(|n| (n, r.peak)))
             .collect();
         let mut counts: BTreeMap<u32, usize> = BTreeMap::new();
@@ -167,7 +169,10 @@ impl Profile {
     }
 
     pub fn samples(&self) -> u32 {
-        self.runs.iter().filter(|r| !r.flagged).count() as u32
+        self.runs
+            .iter()
+            .filter(|r| !r.flagged && r.peak > 0)
+            .count() as u32
     }
 }
 
@@ -225,6 +230,25 @@ impl Profiles {
             bytes: blended.max(own.flagged_floor()),
             samples: n,
         }
+    }
+
+    /// Reserve for the command's default workers, since observed peaks may
+    /// come from runs with fewer workers. This floor also applies when worker
+    /// tuning is disabled; the command then starts with its default count.
+    pub fn estimate_for_workers(
+        &self,
+        key: &str,
+        fallback: &str,
+        default: Bytes,
+        workers: Option<u32>,
+    ) -> Estimate {
+        let mut est = self.estimate(key, fallback, default);
+        if let Some(workers) = workers
+            && let Some(scaling) = self.get(key).and_then(Profile::scaling)
+        {
+            est.bytes = est.bytes.max(scaling.at(workers));
+        }
+        est
     }
 
     pub fn reset(&mut self, key: &str) -> bool {
@@ -364,6 +388,32 @@ mod tests {
     }
 
     #[test]
+    fn default_workers_raise_tuned_history_without_lowering_other_floors() {
+        let mut p = Profiles::default();
+        for i in 0..20 {
+            p.record("k", "f", if i < 2 { at(8.0, 10) } else { at(2.0, 2) });
+        }
+        assert_eq!(p.estimate("k", "f", DEF).bytes, 2 * GIB);
+        let est = p.estimate_for_workers("k", "f", DEF, Some(10));
+        assert!(est.bytes >= 8 * GIB);
+        assert_eq!(est.samples, 20);
+        assert_eq!(
+            p.estimate_for_workers("k", "f", DEF, None),
+            p.estimate("k", "f", DEF)
+        );
+        p.record("k", "f", flagged(12.0));
+        assert_eq!(
+            p.estimate_for_workers("k", "f", DEF, Some(10)).bytes,
+            12 * GIB
+        );
+        assert_eq!(
+            p.estimate_for_workers("unknown", "f", DEF, Some(10)),
+            p.estimate("unknown", "f", DEF),
+            "the fallback mixes commands, so its scaling is not used"
+        );
+    }
+
+    #[test]
     fn one_run_blends_a_third_of_the_way_from_the_default() {
         let mut p = Profiles::default();
         p.record("k", "k", run(4.5));
@@ -406,6 +456,73 @@ mod tests {
         let e = p.estimate("k", "f", DEF);
         assert_eq!(e.samples, 0);
         assert_eq!(e.bytes, DEF);
+    }
+
+    #[test]
+    fn unsampled_runs_keep_the_prior_and_duration_without_learning_zero_memory() {
+        let mut p = Profiles::default();
+        for duration_ms in [10, 30, 20] {
+            p.record(
+                "k",
+                "f",
+                Run {
+                    duration_ms,
+                    ..at(0.0, 8)
+                },
+            );
+        }
+        assert_eq!(
+            p.estimate("k", "f", DEF),
+            Estimate {
+                bytes: DEF,
+                samples: 0
+            }
+        );
+        let own = p.get("k").unwrap();
+        assert_eq!(own.p90(), None);
+        assert_eq!(own.scaling(), None);
+        assert_eq!(own.median_ms(), Some(20));
+        assert!(own.runs.iter().all(|r| !r.flagged));
+    }
+
+    #[test]
+    fn unsampled_worker_counts_do_not_change_measured_peaks_or_scaling() {
+        let mut p = Profiles::default();
+        for _ in 0..3 {
+            p.record("k", "f", at(8.0, 8));
+        }
+        let scaling = p.get("k").unwrap().scaling();
+        for _ in 0..16 {
+            p.record(
+                "k",
+                "f",
+                Run {
+                    duration_ms: 10,
+                    ..at(0.0, 2)
+                },
+            );
+        }
+        assert_eq!(
+            p.estimate("k", "f", DEF),
+            Estimate {
+                bytes: 8 * GIB,
+                samples: 3
+            }
+        );
+        assert_eq!(p.estimate("new", "f", DEF).bytes, 8 * GIB);
+        assert_eq!(p.get("k").unwrap().scaling(), scaling);
+        assert_eq!(p.get("k").unwrap().median_ms(), Some(10));
+        // If all remembered attempts were unmeasured, return to the prior.
+        for _ in 0..KEEP {
+            p.record("k", "f", at(0.0, 2));
+        }
+        assert_eq!(
+            p.estimate("k", "f", DEF),
+            Estimate {
+                bytes: DEF,
+                samples: 0
+            }
+        );
     }
 
     #[test]
