@@ -143,6 +143,7 @@ pub fn run(o: RunOpts) -> i32 {
         low: o.low,
         background: o.background,
         tune,
+        pid: Some(std::process::id() as i32),
     };
     let wait_cap = (!o.background).then(|| o.wait_cap.unwrap_or(cfg.wait_cap_s));
     match Session::open(stream, spec) {
@@ -268,6 +269,8 @@ impl Session {
                         note(&format!("{msg}; running directly"));
                         return direct(o);
                     }
+                    // Part of a job already running: a turbo task's shim.
+                    Ok(Some(DaemonMsg::Inside { .. })) => return direct(o),
                     Ok(Some(_)) => {}
                     Ok(None) | Err(RecvTimeoutError::Disconnected) => {
                         note("scheduler went away; running directly");

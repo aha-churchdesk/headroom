@@ -10,7 +10,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use headroom_core::model::Snapshot;
+use headroom_core::model::{JobId, Snapshot};
 use headroom_core::proctree;
 use headroom_core::protocol::{ClientMsg, DaemonMsg};
 use headroom_core::scheduler::{Effect, Scheduler, Sig, Usage};
@@ -126,7 +126,10 @@ pub fn run_with(
             .min(Duration::from_millis(200));
         let fx = match rx.recv_timeout(wait) {
             Ok(Event::Msg(c, msg)) => match *msg {
-                ClientMsg::Enqueue(spec) => sched.enqueue(c, spec, ms()),
+                ClientMsg::Enqueue(spec) => match spec.pid.and_then(|p| enclosing(&sched, p)) {
+                    Some(id) => vec![Effect::Send(c, DaemonMsg::Inside { id })],
+                    None => sched.enqueue(c, spec, ms()),
+                },
                 ClientMsg::Started { pgid, .. } => sched.started(c, pgid),
                 ClientMsg::Exited { code, signal } => sched.exited(c, code, signal, ms(), wall()),
                 ClientMsg::List => vec![Effect::Send(c, DaemonMsg::Jobs(sched.list()))],
@@ -162,6 +165,20 @@ pub fn run_with(
     }
     let _ = fs::remove_file(&sock);
     Ok(())
+}
+
+/// The running job whose processes include `pid`.
+fn enclosing(sched: &Scheduler, pid: i32) -> Option<JobId> {
+    let jobs: Vec<(JobId, i32)> = sched
+        .list()
+        .running
+        .iter()
+        .filter_map(|j| j.pgid.map(|g| (j.id, g)))
+        .collect();
+    if jobs.is_empty() {
+        return None;
+    }
+    proctree::job_of(&sample::procs(), &jobs, pid)
 }
 
 fn apply(store: &Store, sched: &Scheduler, conns: &Conns, spans: &Spans, fx: Vec<Effect>) {

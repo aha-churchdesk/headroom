@@ -78,6 +78,12 @@ pub struct JobSpec {
     /// Set when the command can be told to use fewer workers.
     #[serde(default)]
     pub tune: Option<Tunable>,
+    /// The asking process. One inside a running job's processes runs
+    /// directly: it is part of that job, even when the tools between them
+    /// dropped `HEADROOM_JOB` (turbo passes its tasks only the variables it
+    /// is told to), and queued it would wait for memory its parent holds.
+    #[serde(default)]
+    pub pid: Option<i32>,
 }
 
 /// A job started with fewer workers than it would use untouched.

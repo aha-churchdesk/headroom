@@ -101,6 +101,10 @@ pub enum DaemonMsg {
         requeued: bool,
     },
     Cancelled,
+    /// The asking process is part of running job `id`: run directly.
+    Inside {
+        id: JobId,
+    },
     Jobs(Listing),
     Ok,
     Error {

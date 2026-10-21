@@ -55,6 +55,14 @@ pub fn job_groups(procs: &[Proc], pgid: i32) -> Vec<i32> {
     groups
 }
 
+/// The job, among `jobs` (id and process group), whose processes include
+/// `pid`.
+pub fn job_of<T: Copy>(procs: &[Proc], jobs: &[(T, i32)], pid: i32) -> Option<T> {
+    jobs.iter()
+        .find(|(_, pgid)| job_pids(procs, *pgid).contains(&pid))
+        .map(|(id, _)| *id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,6 +120,18 @@ mod tests {
         // A group whose leader is launchd's child doesn't pull launchd's
         // other children in.
         assert_eq!(job_pids(&procs, 1), [] as [i32; 0]);
+    }
+
+    #[test]
+    fn a_task_belongs_to_the_job_that_started_it() {
+        let jobs = [(7u64, 20), (8u64, 50)];
+        // turbo's task 31, in a group of its own, is part of job 7.
+        assert_eq!(job_of(&turbo(), &jobs, 31), Some(7));
+        assert_eq!(job_of(&turbo(), &jobs, 50), Some(8));
+        // `headroom run` itself (10) is above the job, not in it.
+        assert_eq!(job_of(&turbo(), &jobs, 10), None);
+        assert_eq!(job_of(&turbo(), &[] as &[(u64, i32)], 31), None);
+        assert_eq!(job_of(&turbo(), &jobs, 999), None);
     }
 
     #[test]

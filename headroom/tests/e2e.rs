@@ -312,6 +312,26 @@ fn a_nested_run_goes_straight_through() {
     assert_eq!(text(&o.stdout), "inner\n");
 }
 
+#[test]
+fn a_nested_run_whose_environment_was_dropped_still_goes_straight_through() {
+    // turbo passes its tasks only the variables it is told to. The daemon
+    // sees the inner run is part of the outer job and lets it run.
+    let d = Daemon::start("nested-env", Config::default());
+    let line =
+        format!("{BIN} hold on && env -u HEADROOM_JOB {BIN} run --wait-cap 2 --sh 'echo inner'");
+    let o = d.output(&["run", "--sh", &line]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+    assert_eq!(text(&o.stdout), "inner\n");
+    assert_eq!(
+        d.ls().history.len(),
+        1,
+        "only the outer job ran through the queue"
+    );
+    // Outside any job, the same run still queues: held, it gives up with 75.
+    let o = d.output(&["run", "--wait-cap", "1", "--sh", "echo outer"]);
+    assert_eq!(o.status.code(), Some(75), "{}", text(&o.stderr));
+}
+
 /// A shims directory holding `npm` as a link to the real binary, and a
 /// stand-in for the real npm that says what it saw.
 fn shimmed_npm(name: &str) -> (PathBuf, PathBuf) {
