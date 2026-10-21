@@ -113,41 +113,41 @@ test('a head passed over says how often and until when; the job that went first 
   has(ui.view(), `started ahead of ${head.label} · ${head.cmd}`);
 });
 
-test('one line above what is running sums up the last 24 hours', () => {
+test('a strip above what is running sums up the last 24 hours', () => {
   ui.setState(history);
-  has(ui.view(), '24h 5 runs · 1 failed · 2 killed Running');
+  has(ui.view(), 'Last 24h 5 runs 3 failed 0s wait p50 0s wait p99 0 shrunk 0 went first Running');
+  has(ui.html(), '1 exited with an error, 2 killed to free memory');
   ui.setState(tunedHistory);
-  has(ui.view(), '24h 2 runs · 1 shrunk Running');
+  has(ui.view(), '2 runs 0 failed');
+  has(ui.view(), '1 shrunk');
   ui.setState(backfill);
-  has(ui.view(), '· 1 went first');
+  has(ui.view(), '1 went first');
 });
 
-test('the 24 hours show the median and 99th percentile wait, and the totals on hover', () => {
-  ui.setState({ ...history, last_day: { ...history.last_day, runs: 4, failed: 0, killed: 0,
+test('the strip shows the median and 99th percentile wait, and the totals on hover', () => {
+  ui.setState({ ...history, last_day: { ...history.last_day, runs: 1, failed: 0, killed: 0,
     waited_s: 254, longest_wait_s: 131, wait_p50_s: 12, wait_p99_s: 131 } });
-  has(ui.view(), '24h 4 runs · wait p50 12s, p99 2m11 Running');
+  has(ui.view(), '1 run 0 failed 12s wait p50 2m11 wait p99');
   has(ui.html(), 'Time in the queue before starting: 4m14 in all, longest 2m11');
-  // Most jobs started at once: the median says so.
-  ui.setState({ ...history, last_day: { ...history.last_day, runs: 4, failed: 0, killed: 0,
-    waited_s: 40, longest_wait_s: 40, wait_p50_s: 0, wait_p99_s: 40 } });
-  has(ui.view(), '24h 4 runs · wait p50 0s, p99 40s Running');
   ui.setState(history);
-  lacks(ui.view(), 'wait p50');
-  lacks(ui.html(), 'Time in the queue');
+  has(ui.html(), 'No job had to wait');
 });
 
-test('a quiet day says so', () => {
-  eq(busy.last_day.runs, 0, 'the capture has nothing finished yet');
+test('zeros are dimmed and failures stand out', () => {
+  ui.setState(history);
+  const html = ui.html();
+  has(html, 'class="bad" title="1 exited');
+  has(html, 'class="zero" title="Started with fewer workers');
   ui.setState(busy);
-  has(ui.view(), '24h nothing finished Running');
-  // Cancelled jobs are not runs, but their wait still counts.
-  ui.setState({ ...busy, last_day: { ...busy.last_day, waited_s: 40, longest_wait_s: 40, wait_p50_s: 40, wait_p99_s: 40 } });
-  has(ui.view(), '24h 0 runs · wait p50 40s, p99 40s');
+  eq(busy.last_day.runs, 0, 'the capture has nothing finished yet');
+  has(ui.view(), 'Last 24h 0 runs 0 failed 0s wait p50');
+  lacks(ui.html(), 'class="bad"');
 });
 
 test('a busier day than the history holds is a floor', () => {
   ui.setState({ ...history, last_day: { ...history.last_day, runs: 2000, more: true } });
-  has(ui.view(), '24h 2000+ runs');
+  has(ui.view(), '2000+ runs');
+  has(ui.html(), 'History keeps 2,000 runs');
 });
 
 test('a head never passed over shows no count', () => {

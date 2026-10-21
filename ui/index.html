@@ -198,9 +198,14 @@ button:disabled{ cursor:default; opacity:.4; }
 }
 .sec-h .why{ text-transform:none; letter-spacing:0; font-weight:500; font-size:11.5px; color:var(--text-dim); }
 .sec-h .why.blocked{ color:var(--warn); }
-.sec.day{ padding:7px 0 2px; }
-.sec.day .why{ min-width:0; }
-.sec.day .nw{ white-space:nowrap; }
+.day-row{ display:grid; grid-template-columns:repeat(6, minmax(0, 1fr)); margin:0 14px 6px;
+  background:var(--bg-elev); border-radius:8px; }
+.day-row > div{ display:flex; flex-direction:column; gap:1px; padding:6px 7px; min-width:0; }
+.day-row > div + div{ border-left:1px solid var(--sep-soft); }
+.day-row b{ font-size:14px; font-weight:650; }
+.day-row span{ font-size:10px; color:var(--text-dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.day-row .zero b{ color:var(--text-faint); font-weight:500; }
+.day-row .bad b{ color:var(--bad); }
 .empty{ padding:6px 14px 10px; color:var(--text-faint); font-size:12px; }
 
 /* Job rows */
@@ -532,18 +537,25 @@ function renderHead(S){
 }
 
 function renderLastDay(h){
-  const parts = !h.runs && !h.waited_s ? ["nothing finished"] : [
-    `${h.runs}${h.more ? "+" : ""} ${h.runs === 1 ? "run" : "runs"}`,
-    h.failed && `${h.failed} failed`,
-    h.killed && `${h.killed} killed`,
-    h.waited_s && `wait p50 ${dur(h.wait_p50_s)}, p99 ${dur(h.wait_p99_s)}`,
-    h.shrunk && `${h.shrunk} shrunk`,
-    h.went_first && `${h.went_first} went first`,
-  ].filter(Boolean);
-  const tip = `Jobs that finished in the last 24 hours${h.waited_s ? `. Time in the queue before starting: ${dur(h.waited_s)} in all, longest ${dur(h.longest_wait_s)}` : ""}`;
+  const bad = h.failed + h.killed;
+  const cell = (value, label, tip, cls = "") => `
+        <div class="${cls}" title="${tip}"><b>${value}</b><span>${label}</span></div>`;
+  const waits = h.waited_s
+    ? `Time in the queue before starting: ${dur(h.waited_s)} in all, longest ${dur(h.longest_wait_s)}`
+    : "No job had to wait";
   return `
-    <div class="sec day" title="${tip}"><div class="sec-h">24h
-      <span class="why">${parts.map(p => `<span class="nw">${p}</span>`).join(" · ")}</span></div></div>`;
+    <div class="sec day">
+      <div class="sec-h">Last 24h</div>
+      <div class="day-row num">
+        ${cell(`${h.runs}${h.more ? "+" : ""}`, h.runs === 1 ? "run" : "runs",
+          h.more ? "History keeps 2,000 runs; more than that finished today" : "Jobs that finished", h.runs ? "" : "zero")}
+        ${cell(bad, "failed", `${h.failed} exited with an error, ${h.killed} killed to free memory`, bad ? "bad" : "zero")}
+        ${cell(dur(h.wait_p50_s), "wait p50", `Half the jobs waited this long or less. ${waits}`, h.wait_p50_s ? "" : "zero")}
+        ${cell(dur(h.wait_p99_s), "wait p99", `99 in 100 jobs waited this long or less. ${waits}`, h.wait_p99_s ? "" : "zero")}
+        ${cell(h.shrunk, "shrunk", "Started with fewer workers so they fit", h.shrunk ? "" : "zero")}
+        ${cell(h.went_first, "went first", "Short jobs that started ahead of a bigger one waiting for memory", h.went_first ? "" : "zero")}
+      </div>
+    </div>`;
 }
 
 function renderMain(S){
