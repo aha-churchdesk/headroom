@@ -318,14 +318,14 @@ impl Session {
                     }
                     Ok(Some(DaemonMsg::Error { msg })) => {
                         note(&format!("{msg}; running directly"));
-                        return direct(o);
+                        return self.direct_supervised(o);
                     }
                     // Part of a job already running: a turbo task's shim.
-                    Ok(Some(DaemonMsg::Inside { .. })) => return direct(o),
+                    Ok(Some(DaemonMsg::Inside { .. })) => return self.direct_supervised(o),
                     Ok(Some(_)) => {}
                     Ok(None) | Err(RecvTimeoutError::Disconnected) => {
                         note("scheduler went away; running directly");
-                        return direct(o);
+                        return self.direct_supervised(o);
                     }
                     Err(RecvTimeoutError::Timeout) => {}
                 }
@@ -366,11 +366,6 @@ impl Session {
             let mut tty = Foreground::take(pgid);
             let (status, killed) = self.supervise(&mut child, pgid, &mut daemon_gone, &mut tty);
             drop(tty);
-            self.send(&ClientMsg::Exited {
-                code: status.code(),
-                signal: status.signal(),
-            });
-
             match killed {
                 Some((why, true)) => {
                     note(&format!(
@@ -385,6 +380,64 @@ impl Session {
                     return EXIT_GAVE_UP;
                 }
                 _ => return code_of(status),
+            }
+        }
+    }
+
+    /// Once our signal handlers are installed, fallback still needs a
+    /// supervisor to forward wrapper-targeted signals and manage the terminal.
+    fn direct_supervised(&mut self, o: &RunOpts) -> i32 {
+        let _ = self.writer.shutdown(std::net::Shutdown::Both);
+        let mut cmd = o.command(false, None);
+        cmd.process_group(0);
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                note(&format!("can't start: {e}"));
+                return 127;
+            }
+        };
+        let pgid = child.id() as i32;
+        let mut tty = Foreground::take(pgid);
+        let (status, _) = self.supervise(&mut child, pgid, &mut true, &mut tty);
+        code_of(status)
+    }
+
+    /// The daemon sends Ok after deciding this attempt's fate, before sending
+    /// any retry grant. Reading through it also drains notices still in the
+    /// socket or reader thread when waitpid first observes the child's exit.
+    fn finish_attempt(
+        &mut self,
+        status: ExitStatus,
+        daemon_gone: bool,
+        killed: &mut Option<(String, bool)>,
+    ) {
+        if daemon_gone {
+            return;
+        }
+        self.send(&ClientMsg::Exited {
+            code: status.code(),
+            signal: status.signal(),
+        });
+        let deadline = Instant::now() + Duration::from_millis(500);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match self.recv(remaining) {
+                Ok(Some(DaemonMsg::Ok)) => break,
+                Ok(Some(DaemonMsg::Killed { why, requeued })) => {
+                    *killed = Some((why, requeued));
+                }
+                // Older daemons do not acknowledge exits. Their next queue
+                // update or grant follows the kill notice and belongs to drive.
+                Ok(Some(msg @ (DaemonMsg::Queued { .. } | DaemonMsg::Granted { .. }))) => {
+                    self.peeked = Some(Some(msg));
+                    break;
+                }
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => break,
             }
         }
     }
@@ -419,15 +472,16 @@ impl Session {
                 let error = std::io::Error::last_os_error();
                 if error.raw_os_error() != Some(libc::EINTR) {
                     note(&format!("can't wait for command: {error}"));
-                    return (ExitStatus::from_raw(127 << 8), killed);
+                    let status = ExitStatus::from_raw(127 << 8);
+                    self.finish_attempt(status, *daemon_gone, &mut killed);
+                    return (status, killed);
                 }
             }
             if waited > 0 {
                 if libc::WIFEXITED(raw) || libc::WIFSIGNALED(raw) {
-                    return (
-                        ExitStatus::from_raw(raw),
-                        if cancelled { None } else { killed },
-                    );
+                    let status = ExitStatus::from_raw(raw);
+                    self.finish_attempt(status, *daemon_gone, &mut killed);
+                    return (status, if cancelled { None } else { killed });
                 }
                 if libc::WIFSTOPPED(raw)
                     && matches!(

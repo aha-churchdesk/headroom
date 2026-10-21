@@ -29,6 +29,7 @@ pub enum ClientMsg {
     TerminalStopped {
         stopped: bool,
     },
+    /// Report an attempt ending. The daemon replies Ok before any retry grant.
     Exited {
         code: Option<i32>,
         signal: Option<i32>,

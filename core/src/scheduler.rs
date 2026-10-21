@@ -143,6 +143,11 @@ impl Scheduler {
             .collect()
     }
 
+    /// Terminations already owed when the daemon stops accepting work.
+    pub fn shutdown_kills(&self) -> Vec<(i32, Millis)> {
+        self.kills.clone()
+    }
+
     fn by_conn(&self, conn: ConnId) -> Option<JobId> {
         self.jobs
             .iter()

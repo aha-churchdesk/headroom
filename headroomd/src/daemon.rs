@@ -170,6 +170,9 @@ pub fn run_with(
                         Some(libc::SIGHUP) => sched.child_signalled(c, Sig::Hup, now),
                         _ => vec![],
                     };
+                    // The acknowledgment follows all prior kill notices and
+                    // precedes settle's possible grant for the next attempt.
+                    fx.push(Effect::Send(c, DaemonMsg::Ok));
                     fx.extend(sched.exited(c, code, signal, now, wall()));
                     fx
                 }
@@ -191,6 +194,26 @@ pub fn run_with(
     }
     drop(server);
     let _ = fs::remove_file(&sock);
+    // A termination already requested remains our responsibility after the
+    // leases close. Honor its grace deadline without admitting any more work.
+    let mut pending = sched.shutdown_kills();
+    while !pending.is_empty() {
+        let table = sample::procs();
+        let now = ms();
+        pending.retain(|&(pgid, deadline)| {
+            if processes.pids(&table, pgid).is_empty() {
+                return false;
+            }
+            if now >= deadline {
+                signal(pgid, Sig::Kill, &mut processes);
+                return false;
+            }
+            true
+        });
+        if !pending.is_empty() {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
     Ok(())
 }
 

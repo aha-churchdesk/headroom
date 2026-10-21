@@ -682,6 +682,100 @@ fn terminal_job_control_stops_and_resumes_the_wrapper_with_its_child() {
     );
 }
 
+fn runtime_lifecycle_case(case: &str) {
+    let out = Command::new("python3")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/runtime_lifecycle.py"))
+        .args([BIN, case])
+        .env_remove("HEADROOM_JOB")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{case}: {}\n{}",
+        text(&out.stdout),
+        text(&out.stderr)
+    );
+}
+
+#[test]
+fn pending_kill_disposition_survives_a_starved_wrapper() {
+    runtime_lifecycle_case("retry");
+    runtime_lifecycle_case("retry-legacy");
+}
+
+#[test]
+fn queued_fallback_forwards_wrapper_signals() {
+    for case in ["term", "int", "hup", "error", "inside"] {
+        runtime_lifecycle_case(case);
+    }
+}
+
+#[test]
+fn an_older_daemon_without_exit_acknowledgments_does_not_block_exit() {
+    runtime_lifecycle_case("legacy");
+}
+
+#[test]
+fn shutdown_finishes_an_already_requested_termination() {
+    let d = Daemon::start("shutdown-pending-kill", quick());
+    let ready = d.home.join("ready");
+    let script = format!(
+        "trap '' TERM; echo ready > {}; while :; do sleep 1; done",
+        headroom_core::shell::quote(&ready.display().to_string())
+    );
+    let mut wrapper = d.spawn(&["run", "--", "/bin/sh", "-c", &script]);
+    let (id, pgid) = d.running();
+    let _cleanup = KillGroups(vec![pgid]);
+    wait_for("the child ignoring TERM", 5, || {
+        ready.exists().then_some(())
+    });
+    assert!(d.output(&["kill", &id.to_string()]).status.success());
+    drop(d);
+    let status = wait_for("termination completed during shutdown", 4, || {
+        wrapper.try_wait().unwrap()
+    });
+    assert_eq!(status.code(), Some(137));
+    wait_for("the terminated process group", 4, || {
+        (!group_alive(pgid)).then_some(())
+    });
+    finish(wrapper);
+}
+
+#[test]
+fn shutdown_finishes_termination_of_an_orphaned_subgroup() {
+    let d = Daemon::start("shutdown-orphan", quick());
+    let pidfile = d.home.join("child.pid");
+    let inner = format!(
+        "trap '' TERM; echo $$ > {}; exec /bin/sleep 60",
+        headroom_core::shell::quote(&pidfile.display().to_string())
+    );
+    let script = format!(
+        "set -m; /bin/sh -c {} & wait",
+        headroom_core::shell::quote(&inner)
+    );
+    let mut wrapper = d.spawn(&["run", "--", "/bin/sh", "-c", &script]);
+    let (id, pgid) = d.running();
+    let mut cleanup = KillGroups(vec![pgid]);
+    let child = wait_for("the TERM-ignoring subgroup", 5, || {
+        std::fs::read_to_string(&pidfile)
+            .ok()?
+            .trim()
+            .parse::<i32>()
+            .ok()
+    });
+    cleanup.0.push(child);
+    assert_eq!(unsafe { libc::getpgid(child) }, child);
+    assert!(d.output(&["kill", &id.to_string()]).status.success());
+    wait_for("the leader exiting before shutdown", 5, || {
+        wrapper.try_wait().unwrap()
+    });
+    drop(d);
+    wait_for("shutdown killing the orphaned subgroup", 4, || {
+        (!group_alive(child)).then_some(())
+    });
+    finish(wrapper);
+}
+
 #[test]
 fn losing_the_daemon_resumes_frozen_descendant_groups() {
     let home = tmp("lost-frozen");
