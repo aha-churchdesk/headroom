@@ -105,8 +105,6 @@ Patterns are editable in the menu bar's Settings page.
 
 The icon is a four-bar memory gauge. It turns amber or red under memory pressure, and the title shows running·queued jobs, with ❄︎ while something is frozen and ⏸︎ while the queue is held.
 
-**Graph** under the memory bar shows memory (with memory pressure marked), swap and CPU over the last hour or day, one point per 30 seconds while the app runs.
-
 The popover lists running and queued jobs and why the queue is waiting (`next needs 4.2 GB, 2.9 GB free`). A running job shows its memory and CPU, and the largest process inside it when that isn't the command itself: `git commit`, then `↳ tsc --noEmit` while the hook runs. From it you can:
 
 - drag queued jobs to reorder them, move one to the top, or cancel it;
@@ -147,7 +145,7 @@ claude mcp add headroom -- headroom mcp
 
 ## Files
 
-Everything lives in `~/Library/Application Support/dev.headroom/` (or `$HEADROOM_HOME`): `config.json`, `profiles.json`, `history.json`, `stats.json` (the Commands page's totals), `trend.json` (the graphs) and the daemon's socket. Delete `profiles.json` to forget what Headroom has learned.
+Everything lives in `~/Library/Application Support/dev.headroom/` (or `$HEADROOM_HOME`): `config.json`, `profiles.json`, `history.json`, `stats.json` (the Commands page's totals) and the daemon's socket. Delete `profiles.json` to forget what Headroom has learned.
 
 `headroomd --headless` runs the queue without the menu bar. `headroomd --probe` prints what it measures and exits.
 

@@ -13,9 +13,6 @@ function test(name, fn) {
   ui.UI.page = 'main';
   ui.UI.cmdDays = 7;
   ui.UI.cmdSort = 'run_s';
-  ui.UI.graph = false;
-  ui.UI.graphWin = 3600;
-  ui.UI.graphAt = null;
   ui.UI.confirm = null;
   ui.UI.expanded.clear();
   ui.UI.drafts.pattern = '';
@@ -203,55 +200,6 @@ test('the commands page says when there is nothing to show, or more than it list
   const week = history.commands[0];
   ui.setState({ ...history, commands: [{ ...week, count: week.rows.length + 60 }] });
   has(ui.view(), `The ${week.rows.length} with the most time running, of ${week.rows.length + 60} commands.`);
-});
-
-test('the graph button opens memory, swap and CPU over the last hour or day', () => {
-  ui.setState(history);
-  lacks(ui.head(), 'Swap');
-  ui.click({ act: 'graph' });
-  const h = ui.head();
-  has(h, 'Memory 16 / 64 GB Swap 0 GB CPU 0%');
-  has(h, 'Peak 16 GB · swap 0 GB · CPU 0%');
-  has(h, '1 h ago now');
-  eq((ui.headHtml().match(/data-graph="1"/g) || []).length, 3, 'three charts');
-  ui.click({ act: 'graph_win', val: '86400' });
-  has(ui.head(), '24 h ago now');
-  eq(ui.sent.length, 0, 'the graphs stay in the page');
-  ui.click({ act: 'graph' });
-  lacks(ui.head(), 'Swap');
-});
-
-test('pointing at a time shows every value then, and critical pressure is marked', () => {
-  ui.setState(history);
-  ui.click({ act: 'graph' });
-  // Critical while the guard test ran; the strip marks it in red.
-  has(ui.headHtml(), 'class="p2"');
-  ui.UI.graphAt = 40;
-  ui.setState(history);
-  has(ui.head(), 'now · 16 GB · swap 0 GB · CPU 0% · pressure CRITICAL');
-  eq((ui.headHtml().match(/class="hair"/g) || []).length, 3, 'one crosshair per chart');
-});
-
-test('the graphs say they are collecting before the first point, and leave gaps open', () => {
-  const pt = (ago, gb) => [ago, gb * 2 ** 30, 0, 10, 0];
-  const day = { window_s: 86400, step_s: 300, points: [] };
-  ui.setState({ ...history, trend: [{ window_s: 3600, step_s: 30, points: [] }, day] });
-  ui.click({ act: 'graph' });
-  has(ui.head(), 'Collecting: a point every 30 s');
-  // Two runs of points an hour apart: two lines, not one across the gap.
-  ui.setState({ ...history, trend: [{ window_s: 3600, step_s: 30, points: [] },
-    { ...day, points: [pt(9000, 10), pt(8700, 11), pt(3000, 12), pt(2700, 13)] }] });
-  ui.click({ act: 'graph_win', val: '86400' });
-  const mem = ui.headHtml().match(/class="line" d="([^"]*)"/)[1];
-  eq((mem.match(/M/g) || []).length, 2, 'the gap stays open');
-  // One lone point is a dot.
-  ui.setState({ ...history, trend: [{ window_s: 3600, step_s: 30, points: [pt(10, 12)] }, day] });
-  ui.click({ act: 'graph_win', val: '3600' });
-  eq((ui.headHtml().match(/class="dot"/g) || []).length, 3);
-  // A state from before the graphs: the button opens nothing.
-  const { trend, ...older } = history;
-  ui.setState(older);
-  lacks(ui.head(), 'Swap');
 });
 
 test('zeros are dimmed, failures are not coloured, and every stat explains itself on hover', () => {

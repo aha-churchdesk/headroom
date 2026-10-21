@@ -13,7 +13,6 @@ use headroom_core::profile::Profiles;
 use headroom_core::protocol::Listing;
 use headroom_core::scheduler::{HISTORY, HISTORY_DAY_S, HISTORY_MAX};
 use headroom_core::tally::{Day, TALLY_DAYS, Tally};
-use headroom_core::trend::{TREND_S, Trend};
 use serde_json::{Value, json};
 
 /// One unmanaged app's memory, for the "Other apps" page.
@@ -53,7 +52,6 @@ pub struct Extras<'a> {
     pub cfg: &'a Config,
     pub profiles: &'a Profiles,
     pub tally: &'a Tally,
-    pub trend: &'a Trend,
     pub others: &'a [AppUsage],
     /// Per agent: installed | not_installed | stale | absent.
     pub hooks: &'a [(&'static str, &'static str)],
@@ -141,33 +139,6 @@ fn commands(t: &Tally, wall: u64) -> Value {
                     v["key"] = json!(k);
                     v
                 }).collect::<Vec<_>>(),
-            })
-        })
-        .collect()
-}
-
-/// The graphs' windows in seconds, and the points each is drawn from.
-const GRAPHS: [(u64, usize); 2] = [(3_600, 120), (TREND_S, 288)];
-
-/// Memory, swap and CPU per window. Each point is
-/// `[seconds ago, memory used, swap used, CPU %, pressure 0|1|2]`, oldest
-/// first; `step_s` apart where the app was running, further apart where it
-/// wasn't.
-fn trend(t: &Trend, wall: u64) -> Value {
-    GRAPHS
-        .iter()
-        .map(|&(secs, max)| {
-            let (step, pts) = t.window(wall, secs, max);
-            json!({
-                "window_s": secs,
-                "step_s": step,
-                "points": pts.iter().map(|p| json!([
-                    wall.saturating_sub(p.at),
-                    p.mem_used,
-                    p.swap_used,
-                    p.cpu_pct.round(),
-                    p.pressure as u8,
-                ])).collect::<Vec<_>>(),
             })
         })
         .collect()
@@ -357,7 +328,6 @@ pub fn state(l: &Listing, x: &Extras) -> Value {
         "history": history,
         "last_day": last_day(&l.history, x.wall),
         "commands": commands(x.tally, x.wall),
-        "trend": trend(x.trend, x.wall),
         "profiles": profiles,
         "others": x.others.iter().map(|o| json!({
             "name": o.name,
@@ -502,7 +472,6 @@ mod tests {
             cfg,
             profiles: p,
             tally: Box::leak(Box::default()),
-            trend: Box::leak(Box::default()),
             others: &[],
             hooks: &[("claude", "installed"), ("codex", "absent")],
             classify: None,
@@ -645,39 +614,6 @@ mod tests {
         // Not in any window, not sent: the 90-day page stops there too.
         x.wall += 200 * 86_400;
         assert!(state(&listing(), &x)["profiles"].get("/r|old").is_none());
-    }
-
-    #[test]
-    fn trend_gives_an_hour_and_a_day_of_points_as_seconds_ago() {
-        use headroom_core::model::Snapshot;
-        let wall = 10 * 86_400;
-        let mut t = Trend::default();
-        let snap = |gb: u64, pressure| Snapshot {
-            mem_used: gb << 30,
-            swap_used: 1 << 30,
-            cpu_pct: 41.6,
-            pressure,
-            ..Snapshot::default()
-        };
-        t.record(&snap(20, Pressure::Normal), wall - 7_200);
-        t.record(&snap(30, Pressure::Critical), wall - 60);
-        let v = trend(&t, wall);
-        assert_eq!(v[0]["window_s"], 3_600);
-        assert_eq!(v[0]["step_s"], 30);
-        assert_eq!(
-            v[0]["points"],
-            json!([[60, 30u64 << 30, 1u64 << 30, 42.0, 2]])
-        );
-        assert_eq!(v[1]["window_s"], TREND_S);
-        assert_eq!(v[1]["step_s"], 300);
-        assert_eq!(
-            v[1]["points"].as_array().unwrap().len(),
-            2,
-            "two hours ago is in the day"
-        );
-        assert_eq!(v[1]["points"][0][0], 7_200);
-        // Nothing recorded yet: both windows, no points.
-        assert_eq!(trend(&Trend::default(), wall)[1]["points"], json!([]));
     }
 
     #[test]

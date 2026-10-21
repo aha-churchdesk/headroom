@@ -237,34 +237,6 @@
       ]
     }
   ],
-  "trend": [
-    {
-      "window_s": 3600,
-      "step_s": 30,
-      "points": [
-        [
-          28,
-          17179869184,
-          0,
-          0.0,
-          2
-        ]
-      ]
-    },
-    {
-      "window_s": 86400,
-      "step_s": 300,
-      "points": [
-        [
-          238,
-          17179869184,
-          0,
-          0.0,
-          2
-        ]
-      ]
-    }
-  ],
   "profiles": {
     "~/Projects/work-scheduler-mcp|headroom|echo ok": {
       "peaks": [

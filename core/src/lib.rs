@@ -20,5 +20,4 @@ pub mod scheduler;
 pub mod shell;
 pub mod store;
 pub mod tally;
-pub mod trend;
 pub mod tweaks;

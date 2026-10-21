@@ -87,7 +87,7 @@
       "exit": 0,
       "ended_ago_s": 0,
       "tuned": null,
-      "ahead_of": "browser-cd · e2e.sh",
+      "ahead_of": "browser-cd \u00b7 e2e.sh",
       "guard": null
     },
     {
@@ -282,34 +282,6 @@
           "peak": 0,
           "key": "~/Projects/work-scheduler-mcp|headroom|lint.sh"
         }
-      ]
-    }
-  ],
-  "trend": [
-    {
-      "window_s": 3600,
-      "step_s": 30,
-      "points": [
-        [
-          26,
-          17179869184,
-          0,
-          0.0,
-          0
-        ]
-      ]
-    },
-    {
-      "window_s": 86400,
-      "step_s": 300,
-      "points": [
-        [
-          266,
-          17179869184,
-          0,
-          0.0,
-          0
-        ]
       ]
     }
   ],

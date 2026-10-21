@@ -17,7 +17,6 @@ use crate::config::Config;
 use crate::model::HistoryEntry;
 use crate::profile::Profiles;
 use crate::tally::Tally;
-use crate::trend::Trend;
 
 pub const HOME_ENV: &str = "HEADROOM_HOME";
 /// `sun_path` is 104 bytes on macOS, including the terminating NUL.
@@ -157,15 +156,6 @@ impl Store {
 
     pub fn save_tally(&self, t: &Tally) -> io::Result<()> {
         self.save("stats.json", t)
-    }
-
-    /// Memory, swap and CPU over the last day. The menu bar app keeps it.
-    pub fn load_trend(&self) -> Trend {
-        self.load("trend.json")
-    }
-
-    pub fn save_trend(&self, t: &Trend) -> io::Result<()> {
-        self.save("trend.json", t)
     }
 }
 
