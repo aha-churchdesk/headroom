@@ -234,6 +234,10 @@ button:disabled{ cursor:default; opacity:.4; }
 /* Job rows */
 .job{ padding:7px 14px 8px; position:relative; }
 .job:hover{ background:var(--bg-elev); }
+/* Removed rows are visual copies, clipped to the scrolling task list. */
+#view{ position:relative; }
+.task-exits{ position:absolute; overflow:hidden; pointer-events:none; z-index:1; }
+.task-exits .job{ position:absolute; margin:0; pointer-events:none; background:var(--bg); }
 .job .l1{ display:flex; align-items:baseline; gap:6px; min-width:0; }
 .job .name{ flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer; }
 .job .name b{ font-weight:600; }
@@ -528,6 +532,72 @@ const confirming = key => UI.confirm && UI.confirm.key === key && Date.now() < U
    ═══════════════════════════════════════════════════════════ */
 const $ = id => document.getElementById(id);
 
+const taskMotion = { page:null, key:null, animations:new Set(), exits:null };
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+
+function clearTaskMotion(){
+  taskMotion.animations.forEach(animation => animation.cancel());
+  taskMotion.animations.clear();
+  taskMotion.exits?.remove();
+  taskMotion.exits = null;
+}
+reducedMotion.addEventListener?.("change", () => {
+  if (reducedMotion.matches) clearTaskMotion();
+});
+
+function animateTask(row, frames, exiting = false){
+  const animation = row.animate(frames, { duration:exiting ? 180 : 200, easing:"cubic-bezier(.2,.7,.2,1)" });
+  taskMotion.animations.add(animation);
+  animation.onfinish = () => {
+    taskMotion.animations.delete(animation);
+    if (exiting){
+      row.remove();
+      if (!taskMotion.exits?.childElementCount){
+        taskMotion.exits?.remove();
+        taskMotion.exits = null;
+      }
+    }
+  };
+}
+
+function animateTaskChanges(view, before){
+  const after = new Map([...view.querySelectorAll(".job[data-job-id]")]
+    .map(row => [row.dataset.jobId, row]));
+  after.forEach((row, id) => {
+    const old = before.get(id);
+    if (!old){
+      animateTask(row, [{ opacity:0, transform:"translateY(6px)" }, { opacity:1, transform:"none" }]);
+    } else {
+      const rect = row.getBoundingClientRect();
+      const dy = old.rect.top - rect.top;
+      if (Math.abs(dy) > .5) animateTask(row, [{ transform:`translateY(${dy}px)` }, { transform:"none" }]);
+    }
+  });
+  const removed = [...before].filter(([id]) => !after.has(id));
+  if (!removed.length) return;
+
+  const bounds = view.getBoundingClientRect();
+  const layer = document.createElement("div");
+  layer.className = "task-exits";
+  layer.setAttribute("aria-hidden", "true");
+  layer.setAttribute("inert", "");
+  layer.style.cssText = `left:0;top:${view.scrollTop}px;width:${view.clientWidth}px;height:${view.clientHeight}px`;
+  taskMotion.exits = layer;
+  view.append(layer);
+  removed.forEach(([, old]) => {
+    const row = old.row.cloneNode(true);
+    // Copies must never enter delegated actions, drag targets or focus lookup.
+    [row, ...row.querySelectorAll("*")].forEach(el => {
+      [...el.attributes].forEach(attr => {
+        if (attr.name.startsWith("data-") || ["id", "tabindex", "draggable"].includes(attr.name)) el.removeAttribute(attr.name);
+      });
+    });
+    row.style.cssText = `left:${old.rect.left - bounds.left}px;top:${old.rect.top - bounds.top}px;width:${old.rect.width}px;height:${old.rect.height}px`;
+    layer.append(row);
+    animateTask(row, [{ opacity:1, transform:"none" }, { opacity:0, transform:"translateX(-6px)" }], true);
+  });
+}
+
 // Values and toggle states change on each reply; the action itself stays put.
 function controlKey(el){
   const d = el.dataset;
@@ -556,6 +626,16 @@ function render(destination = null){
   if (UI.drag) return;
 
   const view = $("view");
+  clearTaskMotion();
+  // Task identities and section order survive the full HTML replacement.
+  // Telemetry, expansion and navigation must not replay row animations.
+  const taskKey = JSON.stringify([STATE.running.map(j => j.id), STATE.queued.map(j => j.id)]);
+  const before = !destination && UI.page === "main" && taskMotion.page === "main"
+    && taskMotion.key !== taskKey && !reducedMotion.matches && typeof view.animate === "function"
+    ? new Map([...view.querySelectorAll(".job[data-job-id]")]
+        .map(row => [row.dataset.jobId, { row, rect:row.getBoundingClientRect() }])) : null;
+  taskMotion.page = UI.page;
+  taskMotion.key = taskKey;
   const scroll = view.scrollTop;
   const focus = document.activeElement && document.activeElement.id;
   const caret = focus ? document.activeElement.selectionStart : null;
@@ -589,6 +669,7 @@ function render(destination = null){
     row?.classList.remove("restoring-focus");
     if (!destination && caret != null) target.setSelectionRange(caret, selectionEnd, selectionDirection);
   }
+  if (before) animateTaskChanges(view, before);
   if (!LIVE) renderTray(STATE);
   refreshTip();
 }
@@ -752,7 +833,7 @@ function killBtn(j){
 function renderRunning(j){
   const frozen = j.state === "frozen";
   return `
-    <div class="job ${UI.expanded.has(j.id) ? "expanded" : ""}">
+    <div class="job ${UI.expanded.has(j.id) ? "expanded" : ""}" data-job-id="${esc(j.id)}">
       <div class="l1">
         ${jobName(j)}${marks(j)}
         <span class="mem num"><b>${gb(j.footprint)}</b> / ${estLabel(j)}</span>
@@ -778,7 +859,7 @@ function renderRunning(j){
 
 function renderQueued(j, i, S){
   return `
-    <div class="job queued ${UI.expanded.has(j.id) ? "expanded" : ""}" data-qid="${j.id}"
+    <div class="job queued ${UI.expanded.has(j.id) ? "expanded" : ""}" data-job-id="${esc(j.id)}" data-qid="${j.id}"
       ${j.pinned ? "" : `draggable="true"`}>
       <div class="l1">
         ${j.pinned ? `<span class="handle" title="Pinned: runs next">📌</span>`
@@ -1262,6 +1343,7 @@ $("pop").addEventListener("mouseleave", () => { POINTER.x = null; $("tip").class
 $("pop").addEventListener("dragstart", (e) => {
   const row = e.target.closest("[data-qid]");
   if (!row) return;
+  clearTaskMotion();
   UI.drag = { id: row.dataset.qid };
   row.classList.add("dragging");
   e.dataTransfer.effectAllowed = "move";
