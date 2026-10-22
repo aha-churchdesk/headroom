@@ -214,12 +214,19 @@ fn profile_parts(p: &Profile, own: &str) -> Vec<Value> {
         .collect()
 }
 
-fn job_json(j: &Job, now: u64, cfg: &Config) -> Value {
+fn job_json(j: &Job, now: u64, cfg: &Config, profiles: &Profiles) -> Value {
     let state = match j.state {
         JobState::Queued => "queued",
         JobState::Running => "running",
         JobState::Frozen => "frozen",
     };
+    let workers = j
+        .tuned
+        .map(|t| t.workers)
+        .or_else(|| j.spec.tune.as_ref().map(|t| t.default_workers));
+    let memory_range = profiles
+        .get(&j.spec.key)
+        .and_then(|p| p.memory_range(workers));
     json!({
         "id": j.id.to_string(),
         "label": j.spec.label,
@@ -232,6 +239,7 @@ fn job_json(j: &Job, now: u64, cfg: &Config) -> Value {
         "pinned": j.pinned,
         "low": j.spec.low,
         "estimate": j.estimate,
+        "memory_range": memory_range,
         "samples": j.samples,
         "footprint": j.footprint,
         "peak": j.peak,
@@ -363,6 +371,7 @@ pub fn state(l: &Listing, x: &Extras) -> Value {
                 "peak": h.peak,
                 "estimate": h.estimate,
                 "exit": h.exit,
+                "ended_at": h.ended_at,
                 "ended_ago_s": x.wall.saturating_sub(h.ended_at),
                 "tuned": h.tuned,
                 "ahead_of": h.ahead_of,
@@ -387,8 +396,8 @@ pub fn state(l: &Listing, x: &Extras) -> Value {
         "held": l.held,
         "hooks": hooks,
         "queue_reason": l.blocked,
-        "running": l.running.iter().map(|j| job_json(j, l.now, cfg)).collect::<Vec<_>>(),
-        "queued": l.queued.iter().map(|j| job_json(j, l.now, cfg)).collect::<Vec<_>>(),
+        "running": l.running.iter().map(|j| job_json(j, l.now, cfg, x.profiles)).collect::<Vec<_>>(),
+        "queued": l.queued.iter().map(|j| job_json(j, l.now, cfg, x.profiles)).collect::<Vec<_>>(),
         "banners": banners(l, x),
         "history": history,
         "last_day": last_day(&l.history, x.wall),
@@ -692,6 +701,72 @@ mod tests {
     }
 
     #[test]
+    fn memory_ranges_use_the_exact_profile_and_actual_worker_count() {
+        use headroom_core::model::Tuned;
+        use headroom_core::profile::Run;
+        use headroom_core::tweaks::{Tool, Tunable};
+
+        let (cfg, mut p, d) = (Config::default(), Profiles::default(), HashSet::new());
+        let mut l = listing();
+        let key = l.running[0].spec.key.clone();
+        let fallback = "/r|vitest";
+        l.running[0].spec.fallback_key = fallback.into();
+        let run = |peak, workers| Run {
+            peak,
+            workers,
+            flagged: false,
+            exit: Some(0),
+            duration_ms: 1000,
+            at: 1,
+            parts: vec![],
+        };
+        // A populated fallback must not provide a range for an unseen key.
+        for peak in [20, 30, 40] {
+            p.record("other command", fallback, run(peak * GIB, None));
+        }
+        let v = state(&l, &extras(&cfg, &p, &d));
+        assert!(v["running"][0]["memory_range"].is_null());
+        for (workers, peaks) in [
+            (None, [1, 2, 3]),
+            (Some(8), [8, 9, 10]),
+            (Some(2), [2, 3, 4]),
+        ] {
+            for peak in peaks {
+                p.record(&key, fallback, run(peak * GIB, workers));
+            }
+        }
+        let range = |lower: u64, upper: u64, workers: Option<u32>| {
+            json!({
+                "lower": lower * GIB, "upper": upper * GIB, "samples": 3, "workers": workers,
+            })
+        };
+        let v = state(&l, &extras(&cfg, &p, &d));
+        assert_eq!(v["running"][0]["memory_range"], range(1, 3, None));
+        assert_eq!(v["queued"][0]["memory_range"], range(1, 3, None));
+        l.running[0].spec.tune = Some(Tunable {
+            tool: Tool::Vitest,
+            default_workers: 8,
+            npm: false,
+        });
+        let v = state(&l, &extras(&cfg, &p, &d));
+        assert_eq!(v["running"][0]["memory_range"], range(8, 10, Some(8)));
+        l.running[0].tuned = Some(Tuned {
+            workers: 2,
+            default: 8,
+        });
+        let v = state(&l, &extras(&cfg, &p, &d));
+        assert_eq!(v["running"][0]["memory_range"], range(2, 4, Some(2)));
+        assert_eq!(v["running"][0]["estimate"], 4 * GIB);
+        assert_eq!(v["running"][0]["samples"], 3);
+        l.running[0].tuned = Some(Tuned {
+            workers: 4,
+            default: 8,
+        });
+        let v = state(&l, &extras(&cfg, &p, &d));
+        assert!(v["running"][0]["memory_range"].is_null());
+    }
+
+    #[test]
     fn state_matches_the_prototype_contract() {
         let (cfg, p, d) = (Config::default(), Profiles::default(), HashSet::new());
         let v = state(&listing(), &extras(&cfg, &p, &d));
@@ -714,6 +789,7 @@ mod tests {
         assert_eq!(v["settings"]["kill_mode"], "freeze_kill");
         assert_eq!(v["settings"]["login_managed_by_brew"], true);
         assert_eq!(v["history"][0]["guard"]["action"], "requeued");
+        assert_eq!(v["history"][0]["ended_at"], 1000);
         assert_eq!(v["history"][0]["ended_ago_s"], 100);
         assert!(v["history"][1]["guard"].is_null());
         assert_eq!(v["last_day"]["runs"], 2);
@@ -722,14 +798,15 @@ mod tests {
     #[test]
     fn queue_wait_stops_growing_when_a_job_is_granted() {
         let cfg = Config::default();
+        let profiles = Profiles::default();
         let mut job = Job::queued(1, JobSpec::default(), 0, 0, 1_000);
-        assert_eq!(job_json(&job, 6_000, &cfg)["waited_s"], 5);
+        assert_eq!(job_json(&job, 6_000, &cfg, &profiles)["waited_s"], 5);
         job.started_at = Some(6_000);
         job.state = JobState::Running;
-        assert_eq!(job_json(&job, 16_000, &cfg)["waited_s"], 5);
+        assert_eq!(job_json(&job, 16_000, &cfg, &profiles)["waited_s"], 5);
         job.state = JobState::Frozen;
         job.frozen_at = Some(16_000);
-        assert_eq!(job_json(&job, 26_000, &cfg)["waited_s"], 5);
+        assert_eq!(job_json(&job, 26_000, &cfg, &profiles)["waited_s"], 5);
     }
 
     fn ended(at: u64, outcome: Outcome, exit: Option<i32>, waited_ms: u64) -> HistoryEntry {

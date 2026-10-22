@@ -63,6 +63,16 @@ pub struct Estimate {
     pub samples: u32,
 }
 
+/// Observed p10 and p90 peaks at one worker count. This describes history;
+/// it is neither a prediction interval nor the scheduler's reservation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct MemoryRange {
+    pub lower: Bytes,
+    pub upper: Bytes,
+    pub samples: u32,
+    pub workers: Option<u32>,
+}
+
 /// Nearest-rank p90. `None` for no values.
 fn p90(values: &mut [Bytes]) -> Option<Bytes> {
     if values.is_empty() {
@@ -107,6 +117,28 @@ impl Profile {
 
     pub fn p90(&self) -> Option<Bytes> {
         p90(&mut self.clean_peaks())
+    }
+
+    /// Nearest-rank p10/p90 of at least three clean, measured runs with
+    /// exactly these workers. Unknown counts match only unknown counts;
+    /// worker scaling and interrupted runs cannot supply observed bounds.
+    pub fn memory_range(&self, workers: Option<u32>) -> Option<MemoryRange> {
+        let mut peaks: Vec<Bytes> = self
+            .runs
+            .iter()
+            .filter(|r| !r.flagged && r.peak > 0 && r.workers == workers)
+            .map(|r| r.peak)
+            .collect();
+        if peaks.len() < TRUSTED {
+            return None;
+        }
+        peaks.sort_unstable();
+        Some(MemoryRange {
+            lower: peaks[peaks.len().div_ceil(10) - 1],
+            upper: peaks[(peaks.len() * 9).div_ceil(10) - 1],
+            samples: peaks.len() as u32,
+            workers,
+        })
     }
 
     pub fn median_ms(&self) -> Option<u64> {
@@ -310,6 +342,88 @@ mod tests {
 
     fn profile(runs: Vec<Run>) -> Profile {
         Profile { runs: runs.into() }
+    }
+
+    #[test]
+    fn memory_range_uses_nearest_ranks_including_small_sample_edges() {
+        for (count, lower, upper) in [(3, 1, 3), (9, 1, 9), (10, 1, 9), (11, 2, 10), (20, 2, 18)] {
+            let p = profile(
+                (1..=count)
+                    .rev()
+                    .map(|peak| Run { peak, ..run(1.0) })
+                    .collect(),
+            );
+            assert_eq!(
+                p.memory_range(None),
+                Some(MemoryRange {
+                    lower,
+                    upper,
+                    samples: count as u32,
+                    workers: None,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn memory_range_requires_three_comparable_measured_complete_runs() {
+        let mut p = profile(vec![]);
+        assert_eq!(p.memory_range(None), None);
+        p.runs.extend([run(2.0), run(3.0), run(0.0), flagged(90.0)]);
+        assert_eq!(p.memory_range(None), None);
+        p.runs.extend([at(8.0, 8), at(9.0, 8), at(10.0, 8)]);
+        assert_eq!(
+            p.memory_range(None),
+            None,
+            "known counts cannot fill unknown history"
+        );
+        assert_eq!(p.memory_range(Some(4)), None, "no scaled bounds");
+        assert_eq!(
+            p.memory_range(Some(8)),
+            Some(MemoryRange {
+                lower: 8 * GIB,
+                upper: 10 * GIB,
+                samples: 3,
+                workers: Some(8),
+            })
+        );
+        p.runs.push_back(run(4.0));
+        assert_eq!(
+            p.memory_range(None),
+            Some(MemoryRange {
+                lower: 2 * GIB,
+                upper: 4 * GIB,
+                samples: 3,
+                workers: None,
+            })
+        );
+        p.runs.extend([
+            at(1.0, 4),
+            at(2.0, 4),
+            at(0.0, 4),
+            Run {
+                flagged: true,
+                ..at(9.0, 4)
+            },
+        ]);
+        assert_eq!(p.memory_range(Some(4)), None);
+        assert_eq!(p.memory_range(Some(8)).unwrap().samples, 3);
+    }
+
+    #[test]
+    fn memory_range_trims_outliers_and_allows_equal_bounds() {
+        let mut runs = vec![at(2.0, 4); KEEP - 2];
+        runs.extend([at(0.1, 4), at(99.0, 4)]);
+        let p = profile(runs);
+        assert_eq!(
+            p.memory_range(Some(4)),
+            Some(MemoryRange {
+                lower: 2 * GIB,
+                upper: 2 * GIB,
+                samples: KEEP as u32,
+                workers: Some(4),
+            })
+        );
     }
 
     #[test]
