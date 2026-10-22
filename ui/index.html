@@ -606,8 +606,8 @@ function renderHead(S){
   const color = { normal:"var(--accent)", warn:"var(--warn)", critical:"var(--bad)" }[m.pressure];
   const gaps = AGENTS.filter(([k]) => S.hooks[k] && S.hooks[k] !== "installed" && S.hooks[k] !== "absent");
   const alert = gaps.length
-    ? `<div class="alert"><span>⚠︎ ${gaps.map(([, n]) => n).join(" and ")}: heavy commands aren't gated yet.</span>
-         <button data-act="goto" data-page="settings">Set up</button></div>`
+    ? `<div class="alert"><span>⚠︎ ${gaps.map(([k, n]) => `${n}: ${HOOK_STATUS[S.hooks[k]][3]}`).join(". ")}.</span>
+         <button data-act="goto" data-page="settings">Hook settings</button></div>`
     : "";
   return `
     <div class="row1">
@@ -997,7 +997,8 @@ function stepper(key, label, value, step, fmt, min, max){
 
 function renderSettings(S){
   const c = S.settings;
-  const gaps = AGENTS.filter(([k]) => S.hooks[k] && S.hooks[k] !== "installed" && S.hooks[k] !== "absent");
+  const installs = AGENTS.filter(([k]) => ["not_installed", "stale"].includes(S.hooks[k]));
+  const codexCheck = ["needs_review", "review_unknown", "disabled"].includes(S.hooks.codex);
   const mode = KILL_MODES.find(m => m[0] === c.kill_mode);
   const v = S.classify && S.classify.text === UI.drafts.test ? S.classify : null;
   const verdict = !UI.drafts.test ? ""
@@ -1077,9 +1078,10 @@ function renderSettings(S){
           <div class="h">${st === "absent" ? "Not found on this Mac." : hint.replace("{where}", `<span class="mono">${where}</span>`)}</div>
         </div>`;
       }).join("")}
-      ${gaps.length ? `<pre class="snip">headroom hook install</pre>` : ""}
+      ${installs.length ? `<pre class="snip">headroom hook install</pre>` : ""}
       <div class="ctl">
-        ${gaps.length ? `<button class="chip-btn" data-act="copy" data-text="headroom hook install">Copy command</button>` : ""}
+        ${installs.length ? `<button class="chip-btn" data-act="copy" data-text="headroom hook install">Copy command</button>` : ""}
+        ${codexCheck ? `<button class="chip-btn" data-act="copy" data-text="/hooks" title="Paste into Codex to review its hooks">Copy /hooks</button>` : ""}
         <button class="chip-btn" data-act="snippet">${UI.snippet ? "Hide JSON" : "Show JSON (manual setup)"}</button>
         ${UI.snippet ? `<button class="chip-btn" data-act="copy" data-text="${esc(HOOK_SNIPPET)}">Copy</button>` : ""}
       </div>
@@ -1098,12 +1100,14 @@ const AGENTS = [
   ["codex", "Codex", "~/.codex/hooks.json"],
   ["pi", "pi", "~/.pi/agent/extensions/headroom.ts"],
 ];
-// [tag class, tag label, hint]. Rust decides the status; this only words it.
+// [tag class, tag label, hint, header notice]. Rust decides the status.
 const HOOK_STATUS = {
   installed:     ["ok",   "installed",     "Gated through {where}."],
-  not_installed: ["fail", "not installed", "Run <span class=\"mono\">headroom hook install</span>; it adds only its own entry to {where}."],
-  needs_review:  ["guard","needs review",  "Installed in {where}. Approve it in Codex before it runs."],
-  stale:         ["guard","stale path",    "{where} points at a headroom binary that is gone. Re-run <span class=\"mono\">headroom hook install</span>."],
+  not_installed: ["fail", "not installed", "Run <span class=\"mono\">headroom hook install</span>; it adds only its own entry to {where}.", "hook not installed"],
+  needs_review:  ["guard","needs review",  "Installed in {where}. Open <span class=\"mono\">/hooks</span> in Codex to approve the Headroom hook before it runs.", "hook needs approval in /hooks"],
+  review_unknown:["guard","check in Codex", "A trust record exists. Open <span class=\"mono\">/hooks</span> in Codex to confirm it matches the current Headroom hook.", "check hook approval in /hooks"],
+  disabled:      ["guard","disabled", "Disabled in Codex. Check <span class=\"mono\">/hooks</span> and the hook settings under <span class=\"mono\">[features]</span> in <span class=\"mono\">~/.codex/config.toml</span>.", "hook disabled"],
+  stale:         ["guard","stale path",    "{where} points at a headroom binary that is gone. Re-run <span class=\"mono\">headroom hook install</span>.", "hook path is stale"],
   absent:        ["user", "not found",     ""],
 };
 

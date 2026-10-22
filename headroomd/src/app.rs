@@ -77,7 +77,14 @@ pub fn hook_states(home: &Path, cli: &str) -> Vec<(&'static str, &'static str)> 
                 let path = hooksettings::settings_path(agent, Scope::User, home, home);
                 match path.map(|p| hooksettings::status(agent, &p, cli)) {
                     Some(Ok(Status::Installed)) => "installed",
-                    Some(Ok(Status::Stale { exe })) if Path::new(&exe).exists() => "installed",
+                    Some(Ok(Status::NeedsReview)) => "needs_review",
+                    Some(Ok(Status::Disabled)) => "disabled",
+                    Some(Ok(Status::ReviewStatusUnknown)) => "review_unknown",
+                    Some(Ok(Status::Stale { exe }))
+                        if agent != Agent::Codex && Path::new(&exe).exists() =>
+                    {
+                        "installed"
+                    }
                     Some(Ok(Status::Stale { .. })) => "stale",
                     // An unreadable or broken file is shown as missing:
                     // `headroom hook install` explains what is wrong with it.
@@ -480,6 +487,44 @@ mod tests {
         let s = app.state().unwrap();
         assert_eq!(s["settings"]["login_managed_by_brew"], true);
         assert_eq!(s["settings"]["start_at_login"], true);
+    }
+
+    #[test]
+    fn codex_hook_states_do_not_claim_unverified_capture_is_installed() {
+        let home = dir("codex-review");
+        let cli = "/nonexistent/bin/headroom";
+        let path = home.join(".codex/hooks.json");
+        hooksettings::install(Agent::Codex, &path, cli, false).unwrap();
+        assert_eq!(hook_states(&home, cli)[1], ("codex", "needs_review"));
+        let config = home.join(".codex/config.toml");
+        fs::write(
+            &config,
+            format!(
+                "[hooks.state.\"{}:pre_tool_use:0:0\"]\ntrusted_hash = \"sha256:old\"\n",
+                path.display()
+            ),
+        )
+        .unwrap();
+        assert_eq!(hook_states(&home, cli)[1], ("codex", "review_unknown"));
+        fs::write(&config, "[features]\nhooks = false\n").unwrap();
+        assert_eq!(hook_states(&home, cli)[1], ("codex", "disabled"));
+
+        let alternate = home.join("bin/headroom");
+        fs::create_dir_all(alternate.parent().unwrap()).unwrap();
+        fs::write(&alternate, "").unwrap();
+        hooksettings::install(Agent::Codex, &path, alternate.to_str().unwrap(), false).unwrap();
+        fs::write(
+            &config,
+            format!(
+                "[hooks.state.\"{}:pre_tool_use:0:0\"]\ntrusted_hash = \"sha256:old\"\n",
+                path.display()
+            ),
+        )
+        .unwrap();
+        // An existing alternate binary does not prove the stored approval matches.
+        assert_eq!(hook_states(&home, cli)[1], ("codex", "review_unknown"));
+        fs::remove_file(alternate).unwrap();
+        assert_eq!(hook_states(&home, cli)[1], ("codex", "stale"));
     }
 
     #[test]

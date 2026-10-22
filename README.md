@@ -62,10 +62,14 @@ This adds one `PreToolUse` entry to each agent's config and touches nothing else
 | Agent | Where | After installing |
 |---|---|---|
 | Claude Code | `~/.claude/settings.json` | New sessions pick it up. |
-| Codex | `~/.codex/hooks.json` | Codex asks you to review new hooks; approve it there. |
+| Codex | `~/.codex/hooks.json` | Open `/hooks` in Codex and review Headroom before it runs. |
 | pi | `~/.pi/agent/extensions/headroom.ts` | Run `/reload` in pi. |
 
 `headroom hook uninstall` removes exactly that entry.
+
+For Codex, `headroom hook status` reports **needs review** when the hook has no recorded approval, or **disabled** when its user configuration explicitly turns it off. If an approval exists, **check in Codex** means Headroom has not verified that its fingerprint still matches the current hook. Open `/hooks` for the authoritative status and review new or changed hooks there. Headroom only reads approval records; installing a hook does not approve it. These checks read `~/.codex/config.toml`; profile, project, managed-policy and per-invocation overrides can change the effective status. See the [Codex hook documentation](https://learn.chatgpt.com/docs/hooks).
+
+Codex capture handles only canonical `Bash` calls, including unified exec. Heavy commands receive the `permissionDecision: "allow"` required by Codex's input-rewrite protocol, together with the wrapped command.
 
 ### Terminals and everything else: PATH shims
 
@@ -105,7 +109,11 @@ Patterns are editable in the menu bar's Settings page.
 
 The icon is a four-bar memory gauge. It turns amber or red under memory pressure, and the title shows running·queued jobs, with ❄︎ while something is frozen and ⏸︎ while the queue is held.
 
-The popover lists running and queued jobs and why the queue is waiting (`next needs 4.2 GB, 2.9 GB free`). A running job shows its memory and CPU, and the largest process inside it when that isn't the command itself: `git commit`, then `↳ tsc --noEmit` while the hook runs. From it you can:
+The popover lists running and queued jobs and why the queue is waiting (`next needs 4.2 GB, 2.9 GB free`). A running job shows its memory and CPU, and the largest process inside it when that isn't the command itself: `git commit`, then `↳ tsc --noEmit` while the hook runs.
+
+After at least three comparable clean measured runs at the same worker count, the popover also shows the historical p10–p90 band of peak memory. The conservative scheduling estimate stays separate. This band describes past runs; it is not a guarantee for the current run.
+
+From it you can:
 
 - drag queued jobs to reorder them, move one to the top, or cancel it;
 - **pin** a job, so it runs next, skips the memory check and is never frozen or killed;

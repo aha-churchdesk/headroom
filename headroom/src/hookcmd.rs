@@ -55,7 +55,7 @@ fn tilde(p: &Path, home: &Path) -> String {
 fn next_step(agent: Agent) -> &'static str {
     match agent {
         Agent::Claude => "new and running sessions pick it up (restart one if it doesn't)",
-        Agent::Codex => "Codex asks you to review new hooks: approve it there before it runs",
+        Agent::Codex => "open /hooks in Codex and review Headroom before it runs",
         Agent::Pi => "run /reload in pi, or restart it",
     }
 }
@@ -82,6 +82,15 @@ pub fn manage(action: &str, t: &Target) -> i32 {
             _ => {
                 match hooksettings::status(agent, &path, &exe) {
                     Ok(Status::Installed) => println!("{name:<7}installed      {shown}"),
+                    Ok(Status::NeedsReview) => {
+                        println!("{name:<7}needs review   {shown}; open /hooks in Codex")
+                    }
+                    Ok(Status::Disabled) => println!(
+                        "{name:<7}disabled       {shown}; check /hooks and ~/.codex/config.toml"
+                    ),
+                    Ok(Status::ReviewStatusUnknown) => println!(
+                        "{name:<7}check in Codex {shown}; approval recorded, confirm current hook in /hooks"
+                    ),
                     Ok(Status::NotInstalled) => println!("{name:<7}not installed  {shown}"),
                     Ok(Status::Stale { exe: old }) => {
                         println!(

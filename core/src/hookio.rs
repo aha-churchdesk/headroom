@@ -12,9 +12,9 @@
 //! Silence (no output) means "run it as it is". Every failure falls back to
 //! silence: a broken hook must never stop an agent from working.
 //!
-//! The rewrite returns no permission decision. The agent's own permission
-//! rules then judge the wrapped command, so Headroom can't widen what an
-//! agent is allowed to run.
+//! Claude rewrites leave permission decisions to the agent. Codex requires
+//! `permissionDecision: "allow"` for an input rewrite, so Codex capture is
+//! restricted to its canonical Bash tool. See https://learn.chatgpt.com/docs/hooks.
 
 use serde_json::{Map, Value, json};
 
@@ -80,8 +80,7 @@ pub fn parse(agent: Agent, payload: &str) -> Option<Call> {
     let v: Value = serde_json::from_str(payload).ok()?;
     match agent {
         Agent::Claude | Agent::Codex => {
-            if agent == Agent::Claude && v.get("tool_name").and_then(Value::as_str) != Some("Bash")
-            {
+            if v.get("tool_name").and_then(Value::as_str) != Some("Bash") {
                 return None;
             }
             let input = v.get("tool_input")?.as_object()?.clone();
@@ -197,7 +196,11 @@ pub fn respond(agent: Agent, call: &Call, w: &Wrap) -> String {
                 };
                 input.insert(key.into(), json!(t));
             }
-            json!({ "hookSpecificOutput": { "hookEventName": "PreToolUse", "updatedInput": input } }).to_string()
+            let mut out = json!({ "hookSpecificOutput": { "hookEventName": "PreToolUse", "updatedInput": input } });
+            if agent == Agent::Codex {
+                out["hookSpecificOutput"]["permissionDecision"] = json!("allow");
+            }
+            out.to_string()
         }
         Agent::Pi => {
             let mut out = json!({ "command": w.command });
@@ -375,7 +378,7 @@ mod tests {
 
     #[test]
     fn codex_wraps_a_string_or_argv_command_and_leaves_its_timeout() {
-        let p = json!({ "session_id": "s1", "tool_name": "shell", "tool_input": { "command": "cargo test", "timeout_ms": 1000 } });
+        let p = json!({ "session_id": "s1", "tool_name": "Bash", "tool_input": { "command": "cargo test", "timeout_ms": 1000 } });
         let o = out(Agent::Codex, &p.to_string());
         let input = &o["hookSpecificOutput"]["updatedInput"];
         assert!(
@@ -385,8 +388,10 @@ mod tests {
                 .contains("--agent codex --session s1 --wait-cap 480 --sh 'cargo test'")
         );
         assert_eq!(input["timeout_ms"], 1000);
+        assert_eq!(o["hookSpecificOutput"]["permissionDecision"], "allow");
 
-        let p = json!({ "tool_input": { "command": ["pnpm", "vitest", "run"] } });
+        let p =
+            json!({ "tool_name": "Bash", "tool_input": { "command": ["pnpm", "vitest", "run"] } });
         let o = out(Agent::Codex, &p.to_string());
         assert!(
             o["hookSpecificOutput"]["updatedInput"]["command"]
@@ -394,6 +399,53 @@ mod tests {
                 .unwrap()
                 .ends_with("--sh 'pnpm vitest run'")
         );
+    }
+
+    #[test]
+    fn codex_never_approves_other_tools_or_light_commands() {
+        for tool in [
+            "apply_patch",
+            "mcp__server__tool",
+            "exec_command",
+            "shell",
+            "",
+        ] {
+            let payload = json!({ "tool_name": tool, "tool_input": { "command": "cargo test" } });
+            assert_eq!(
+                out(Agent::Codex, &payload.to_string()),
+                Value::Null,
+                "{tool}"
+            );
+        }
+        for command in ["git status", "pnpm dev", "headroom run --sh 'cargo test'"] {
+            let payload = json!({ "tool_name": "Bash", "tool_input": { "command": command } });
+            assert_eq!(
+                out(Agent::Codex, &payload.to_string()),
+                Value::Null,
+                "{command}"
+            );
+        }
+        assert_eq!(
+            out(Agent::Codex, r#"{"tool_input":{"command":"cargo test"}}"#),
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn codex_unified_exec_bash_payload_preserves_other_fields() {
+        let payload = json!({
+            "hook_event_name": "PreToolUse", "tool_name": "Bash",
+            "tool_input": { "command": "cargo test", "workdir": "/repo", "yield_time_ms": 1000,
+                "max_output_tokens": 2000, "sandbox_permissions": "use_default" }
+        });
+        let output = out(Agent::Codex, &payload.to_string());
+        let specific = &output["hookSpecificOutput"];
+        assert_eq!(specific["permissionDecision"], "allow");
+        assert_eq!(specific["hookEventName"], "PreToolUse");
+        let mut expected = payload["tool_input"].clone();
+        expected["command"] =
+            json!("/opt/homebrew/bin/headroom run --agent codex --wait-cap 480 --sh 'cargo test'");
+        assert_eq!(specific["updatedInput"], expected);
     }
 
     #[test]

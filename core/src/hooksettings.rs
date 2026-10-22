@@ -85,6 +85,12 @@ fn ours(cmd: &str, agent: Agent) -> Option<String> {
 pub enum Status {
     NotInstalled,
     Installed,
+    /// Configured in Codex, but no persisted approval exists for this hook.
+    NeedsReview,
+    /// Disabled in the user Codex configuration.
+    Disabled,
+    /// A Codex approval exists, but its fingerprint has not been verified.
+    ReviewStatusUnknown,
     /// Installed, but pointing at a binary other than this one.
     Stale {
         exe: String,
@@ -161,9 +167,8 @@ pub fn json_install(root: &mut Value, agent: Agent, exe: &str) -> Result<Change,
         return Ok(Change::Updated);
     }
     let mut entry = json!({ "hooks": [{ "type": "command", "command": command, "timeout": 10 }] });
-    // Claude can filter by tool name. Codex's shell tool name isn't
-    // pinned down, so its hook sees every tool and ignores the rest.
-    if agent == Agent::Claude {
+    // Both agents report shell calls as Bash, including Codex unified exec.
+    if matches!(agent, Agent::Claude | Agent::Codex) {
         entry = json!({ "matcher": "Bash", "hooks": entry["hooks"].clone() });
     }
     pre.push(entry);
@@ -317,8 +322,93 @@ pub fn status(agent: Agent, path: &Path, exe: &str) -> Result<Status, String> {
     let text = read_opt(path).map_err(|e| format!("{}: {e}", path.display()))?;
     match agent {
         Agent::Pi => Ok(text.map_or(Status::NotInstalled, |t| pi_status(&t, exe))),
-        _ => Ok(json_status(&parse_json(path, text.as_deref())?, agent, exe)),
+        Agent::Claude => Ok(json_status(&parse_json(path, text.as_deref())?, agent, exe)),
+        Agent::Codex => codex_status(&parse_json(path, text.as_deref())?, path, exe),
     }
+}
+
+/// Read only the user configuration next to hooks.json. Codex's /hooks view
+/// remains authoritative: profiles, project/managed overrides and invocation
+/// flags may change the effective state. The fingerprint format is not a
+/// documented interface, so a stored hash alone never means Installed here.
+fn codex_status(root: &Value, path: &Path, exe: &str) -> Result<Status, String> {
+    let Some(pre) = pre_tool_use(root) else {
+        return Ok(Status::NotInstalled);
+    };
+    let found = our_hooks(pre, Agent::Codex);
+    if found.is_empty() {
+        return Ok(Status::NotInstalled);
+    }
+    if let Some((_, _, installed_exe)) = found.first()
+        && installed_exe != exe
+        && !Path::new(installed_exe).exists()
+    {
+        return Ok(Status::Stale {
+            exe: installed_exe.clone(),
+        });
+    }
+    let config_path = path.with_file_name("config.toml");
+    let config_text =
+        read_opt(&config_path).map_err(|e| format!("{}: {e}", config_path.display()))?;
+    let config: toml_edit::DocumentMut = config_text
+        .as_deref()
+        .unwrap_or("")
+        .parse()
+        // TOML diagnostics may quote secret config values. Do not echo them.
+        .map_err(|_| {
+            format!(
+                "{} is not valid TOML; check hook status in Codex /hooks",
+                config_path.display()
+            )
+        })?;
+    let features = config.get("features");
+    let hooks_enabled = features
+        .and_then(|f| f.get("hooks").or_else(|| f.get("codex_hooks")))
+        .and_then(toml_edit::Item::as_bool);
+    if hooks_enabled == Some(false)
+        || config
+            .get("allow_managed_hooks_only")
+            .and_then(toml_edit::Item::as_bool)
+            == Some(true)
+    {
+        return Ok(Status::Disabled);
+    }
+    let states = config.get("hooks").and_then(|h| h.get("state"));
+    // Codex uses the absolute source path and zero-based matcher/handler
+    // positions in persisted state keys. Preserve symlink spelling; its schema
+    // promises an absolute normalized path, not filesystem canonicalization.
+    let source = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| e.to_string())?
+            .join(path)
+    };
+    let mut enabled = false;
+    for (group, handler, _) in found {
+        let key = format!("{}:pre_tool_use:{group}:{handler}", source.display());
+        let state = states.and_then(|s| s.get(&key));
+        if state
+            .and_then(|s| s.get("enabled"))
+            .and_then(toml_edit::Item::as_bool)
+            == Some(false)
+        {
+            continue;
+        }
+        enabled = true;
+        if state
+            .and_then(|s| s.get("trusted_hash"))
+            .and_then(toml_edit::Item::as_str)
+            .is_some_and(|hash| !hash.is_empty())
+        {
+            return Ok(Status::ReviewStatusUnknown);
+        }
+    }
+    Ok(if enabled {
+        Status::NeedsReview
+    } else {
+        Status::Disabled
+    })
 }
 
 pub fn install(agent: Agent, path: &Path, exe: &str, dry_run: bool) -> Result<Report, String> {
@@ -439,6 +529,69 @@ mod tests {
     }
 
     #[test]
+    fn codex_status_requires_the_exact_hook_approval_and_never_changes_config() {
+        let d = tmpdir("codex-review");
+        let path = d.join("hooks.json");
+        let config_path = d.join("config.toml");
+        fs::write(&path, pretty(&codex_file())).unwrap();
+        install(Agent::Codex, &path, EXE, false).unwrap();
+        assert_eq!(status(Agent::Codex, &path, EXE), Ok(Status::NeedsReview));
+        // Approval for the unrelated first matcher must not approve Headroom.
+        let config = format!(
+            "[features]\nhooks = true\n[hooks.state.\"{}:pre_tool_use:0:0\"]\ntrusted_hash = \"sha256:unrelated\"\n",
+            path.display()
+        );
+        fs::write(&config_path, &config).unwrap();
+        assert_eq!(status(Agent::Codex, &path, EXE), Ok(Status::NeedsReview));
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), config);
+        let ours = format!(
+            "[hooks.state.\"{}:pre_tool_use:1:0\"]\ntrusted_hash = \"sha256:previous-definition\"\n",
+            path.display()
+        );
+        fs::write(&config_path, &ours).unwrap();
+        // Existence alone cannot prove the hook's current fingerprint matches.
+        assert_eq!(
+            status(Agent::Codex, &path, EXE),
+            Ok(Status::ReviewStatusUnknown)
+        );
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), ours);
+        let disabled = format!("{ours}enabled = false\n");
+        fs::write(&config_path, &disabled).unwrap();
+        assert_eq!(status(Agent::Codex, &path, EXE), Ok(Status::Disabled));
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), disabled);
+        assert!(!d.join("config.toml.headroom-bak").exists());
+    }
+
+    #[test]
+    fn codex_status_reports_global_disabling_and_redacts_parse_errors() {
+        let d = tmpdir("codex-disabled");
+        let path = d.join("hooks.json");
+        let config_path = d.join("config.toml");
+        install(Agent::Codex, &path, EXE, false).unwrap();
+        for config in [
+            "[features]\nhooks = false\n",
+            "[features]\ncodex_hooks = false\n",
+            "allow_managed_hooks_only = true\n",
+        ] {
+            fs::write(&config_path, config).unwrap();
+            assert_eq!(status(Agent::Codex, &path, EXE), Ok(Status::Disabled));
+        }
+        fs::write(
+            &config_path,
+            "[features]\nhooks = true\ncodex_hooks = false\n",
+        )
+        .unwrap();
+        assert_eq!(status(Agent::Codex, &path, EXE), Ok(Status::NeedsReview));
+        fs::write(&config_path, "token = secret-value-with-invalid-toml").unwrap();
+        let error = status(Agent::Codex, &path, EXE).unwrap_err();
+        assert!(error.contains("config.toml") && error.contains("/hooks"));
+        assert!(!error.contains("secret-value"));
+        // A malformed config does not turn an absent hook into an installed one.
+        fs::write(&path, "{}").unwrap();
+        assert_eq!(status(Agent::Codex, &path, EXE), Ok(Status::NotInstalled));
+    }
+
+    #[test]
     fn install_into_nothing_creates_just_our_entry() {
         let mut v = Value::Null;
         assert_eq!(json_install(&mut v, Agent::Claude, EXE), Ok(Change::Added));
@@ -457,7 +610,7 @@ mod tests {
         let pre = v["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!(pre.len(), 2);
         assert_eq!(pre[0], codex_file()["hooks"]["PreToolUse"][0]);
-        assert!(pre[1].get("matcher").is_none());
+        assert_eq!(pre[1]["matcher"], "Bash");
         // Key order survives, so the diff is only our entry.
         let keys: Vec<&String> = v["hooks"].as_object().unwrap().keys().collect();
         assert_eq!(keys, ["SessionStart", "PreToolUse", "Stop"]);

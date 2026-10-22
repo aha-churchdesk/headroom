@@ -976,6 +976,46 @@ fn the_claude_hook_wraps_heavy_commands_and_ignores_the_rest() {
 }
 
 #[test]
+fn codex_hook_capture_and_review_status_use_a_scratch_home() {
+    let home = tmp("codex-capture");
+    let payload = r#"{"tool_name":"Bash","tool_input":{"command":"cargo test","workdir":"/repo"}}"#;
+    let output = hook("codex", payload, &home);
+    assert!(output.status.success());
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let specific = &response["hookSpecificOutput"];
+    assert_eq!(specific["permissionDecision"], "allow");
+    assert!(
+        specific["updatedInput"]["command"]
+            .as_str()
+            .unwrap()
+            .contains(" run --agent codex ")
+    );
+    assert_eq!(specific["updatedInput"]["workdir"], "/repo");
+    let output = hook("codex", &payload.replace("Bash", "apply_patch"), &home);
+    assert!(output.status.success() && output.stdout.is_empty());
+
+    std::fs::create_dir_all(home.join(".codex")).unwrap();
+    let run = |action: &str| {
+        Command::new(BIN)
+            .args(["hook", action, "--agent", "codex"])
+            .env("HOME", &home)
+            .env("HEADROOM_HOME", &home)
+            .output()
+            .unwrap()
+    };
+    assert!(run("install").status.success());
+    let output = run("status");
+    assert!(output.status.success());
+    assert!(text(&output.stdout).contains("needs review"));
+    assert!(text(&output.stdout).contains("/hooks"));
+    let config = home.join(".codex/config.toml");
+    let disabled = "[features]\nhooks = false\n";
+    std::fs::write(&config, disabled).unwrap();
+    assert!(text(&run("status").stdout).contains("disabled"));
+    assert_eq!(std::fs::read_to_string(config).unwrap(), disabled);
+}
+
+#[test]
 fn hook_install_status_and_uninstall_against_a_scratch_home() {
     let home = tmp("install");
     std::fs::create_dir_all(home.join(".claude")).unwrap();

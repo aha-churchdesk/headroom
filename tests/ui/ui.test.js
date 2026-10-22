@@ -449,7 +449,7 @@ test('a running job shows the largest process inside it, when there is one', () 
 
 test('a missing hook is called out in the header', () => {
   ui.setState(busy);
-  has(ui.head(), "Codex: heavy commands aren't gated yet");
+  has(ui.head(), 'Codex: hook not installed');
 });
 
 test('a job started with fewer workers says so in its row, detail and history', () => {
@@ -879,6 +879,52 @@ test('hook status per agent, with the install command to copy', () => {
   ui.click({ act: 'copy', text: 'headroom hook install' });
   eq(ui.sent, [{ cmd: 'copy', text: 'headroom hook install' }]);
   lacks(ui.page(), 'wsq');
+});
+
+test('Codex hook notices distinguish approval, unknown trust, and disabled hooks', () => {
+  const states = [
+    ['needs_review', 'hook needs approval in /hooks', 'Codex needs review',
+      'Open /hooks in Codex to approve the Headroom hook before it runs.'],
+    ['review_unknown', 'check hook approval in /hooks', 'Codex check in Codex',
+      'A trust record exists. Open /hooks in Codex to confirm it matches the current Headroom hook.'],
+    ['disabled', 'hook disabled', 'Codex disabled',
+      'Disabled in Codex. Check /hooks and the hook settings under [features] in ~/.codex/config.toml'],
+  ];
+  for (const [status, notice, label, hint] of states) {
+    ui.setState({ ...busy, hooks: { claude: 'installed', codex: status, pi: 'absent' } });
+    has(ui.head(), `Codex: ${notice}`);
+    lacks(ui.head(), "aren't gated");
+    has(ui.head(), 'Hook settings');
+    ui.click({ act: 'goto', page: 'settings' }, 0);
+    eq(ui.UI.page, 'settings');
+    has(ui.view(), label);
+    has(ui.view(), hint);
+    eq(ui.find({ act: 'copy', text: 'headroom hook install' }).length, 0,
+      'reinstalling cannot fix disabled hooks or establish approval');
+    ui.click({ act: 'copy', text: '/hooks' });
+  }
+  eq(ui.sent, Array(3).fill({ cmd: 'copy', text: '/hooks' }));
+});
+
+test('mixed hook issues keep installation and Codex review actions available', () => {
+  ui.setState({ ...busy, hooks: { claude: 'stale', codex: 'review_unknown', pi: 'not_installed' } });
+  has(ui.head(), 'Claude Code: hook path is stale. Codex: check hook approval in /hooks. pi: hook not installed.');
+  ui.click({ act: 'goto', page: 'settings' }, 0);
+  ui.click({ act: 'copy', text: 'headroom hook install' });
+  ui.click({ act: 'copy', text: '/hooks' });
+  eq(ui.sent, [{ cmd: 'copy', text: 'headroom hook install' }, { cmd: 'copy', text: '/hooks' }]);
+});
+
+test('hook status updates remove obsolete notices and suggested actions', () => {
+  ui.setState({ ...busy, hooks: { claude: 'installed', codex: 'disabled', pi: 'absent' } });
+  ui.click({ act: 'goto', page: 'settings' }, 0);
+  eq(ui.find({ act: 'copy', text: '/hooks' }).length, 1);
+  ui.setState({ ...busy, hooks: { claude: 'installed', codex: 'installed', pi: 'absent' } });
+  lacks(ui.head(), 'Hook settings');
+  has(ui.view(), 'Codex installed');
+  lacks(ui.view(), 'Codex disabled');
+  eq(ui.find({ act: 'copy', text: '/hooks' }).length, 0);
+  eq(ui.find({ act: 'copy', text: 'headroom hook install' }).length, 0);
 });
 
 test('shrinking jobs to fit can be switched off and on', () => {
