@@ -15,10 +15,10 @@ use std::time::{Duration, Instant};
 use headroom_core::store::Store;
 use headroomd::app::{App, Next};
 use headroomd::{daemon, sample::Sampler, shell, single, view};
-use tao::dpi::{LogicalSize, PhysicalPosition};
+use tao::dpi::LogicalSize;
 use tao::event::{Event, StartCause, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
-use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
+use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS, WindowExtMacOS};
 use tao::window::WindowBuilder;
 use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use wry::WebViewBuilder;
@@ -106,6 +106,62 @@ fn activate_app() {
         #[allow(deprecated)]
         NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
     }
+}
+
+/// AppKit screen rectangles share one desktop coordinate system in points.
+/// Do not use tray-icon's or Tao's physical rectangles here: they scale
+/// each screen separately, and Tao converts positions with the old screen's
+/// scale. Native placement also avoids their pixel-based desktop Y flip.
+fn position_popover(window: &tao::window::Window, tray: &tray_icon::TrayIcon) -> Option<()> {
+    let mtm = objc2::MainThreadMarker::new()?;
+    let item = tray.ns_status_item()?;
+    let button = item.button(mtm)?;
+    let tray_window = button.window()?;
+    let screen = tray_window.screen()?;
+    let tray_rect =
+        tray_window.convertRectToScreen(button.convertRect_toView(button.bounds(), None));
+    let visible = screen.visibleFrame();
+    let tray_bounds = shell::Screen::from_cocoa(
+        tray_rect.origin.x,
+        tray_rect.origin.y,
+        tray_rect.size.width,
+        tray_rect.size.height,
+    );
+    let bounds = shell::Screen::from_cocoa(
+        visible.origin.x,
+        visible.origin.y,
+        visible.size.width,
+        visible.size.height,
+    );
+    let (x, y) = shell::popover_origin(
+        tray_bounds.x,
+        tray_bounds.y,
+        tray_bounds.w,
+        tray_bounds.h,
+        POPOVER_W,
+        POPOVER_H,
+        bounds.x,
+        bounds.y,
+        bounds.w,
+        bounds.h,
+    );
+    // SAFETY: Tao owns this NSWindow for the lifetime of `window`; this
+    // function is called on the main thread, checked by the marker above.
+    let native = unsafe {
+        window
+            .ns_window()
+            .cast::<objc2_app_kit::NSWindow>()
+            .as_ref()?
+    };
+    let mut size = native.frame().size;
+    size.width = POPOVER_W;
+    size.height = POPOVER_H;
+    native.setContentSize(size);
+    let mut top_left = tray_rect.origin;
+    top_left.x = x;
+    top_left.y = -y;
+    native.setFrameTopLeftPoint(top_left);
+    Some(())
 }
 
 fn glyph(filled: u32, ink: Option<[u8; 3]>) -> tray_icon::Icon {
@@ -217,6 +273,7 @@ fn main() -> wry::Result<()> {
     let mut last_icon: Option<(u32, Option<[u8; 3]>)> = None;
     let mut update_tray = {
         let app = app.clone();
+        let tray = tray.clone();
         move || {
             let a = app.borrow();
             let Some(l) = a.listing() else { return };
@@ -236,9 +293,7 @@ fn main() -> wry::Result<()> {
     };
 
     let mut visible = false;
-    let mut last_scale: Option<f64> = None;
-    // Showing a window causes focus churn; ignore focus loss for a moment.
-    let mut shown_at = Instant::now();
+    let mut focus = shell::FocusDismissal::default();
     let mut clicks = shell::TrayClicks::default();
     let mut next_list = Instant::now();
     let mut next_settings = Instant::now();
@@ -246,8 +301,6 @@ fn main() -> wry::Result<()> {
     let mut daemon_thread = Some(daemon_thread);
 
     event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::WaitUntil(next_list.min(Instant::now() + LIST_EVERY));
-
         let mut quit = STOP.load(Ordering::Relaxed);
         match event {
             Event::NewEvents(StartCause::Init) => {
@@ -255,14 +308,10 @@ fn main() -> wry::Result<()> {
                 update_tray();
             }
             Event::WindowEvent {
-                event: WindowEvent::Focused(false),
+                event: WindowEvent::Focused(focused),
                 ..
             } => {
-                if shell::should_dismiss(visible, shown_at.elapsed()) {
-                    window.set_visible(false);
-                    visible = false;
-                    clicks.dismissed(Instant::now());
-                }
+                focus.changed(focused, Instant::now());
             }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
@@ -270,6 +319,7 @@ fn main() -> wry::Result<()> {
             } => {
                 window.set_visible(false);
                 visible = false;
+                focus.hidden();
             }
             Event::UserEvent(UserEvent::Ipc(body)) => {
                 let mut a = app.borrow_mut();
@@ -286,7 +336,6 @@ fn main() -> wry::Result<()> {
             // tray-icon reports a click on press and on release; acting on
             // both would open and close the popover in one click.
             Event::UserEvent(UserEvent::Tray(TrayIconEvent::Click {
-                rect,
                 button,
                 button_state,
                 ..
@@ -303,39 +352,8 @@ fn main() -> wry::Result<()> {
                 if let Some(toggle) = clicks.click(btn, st, visible, Instant::now()) {
                     visible = toggle == shell::Toggle::Show;
                     if visible {
-                        // Clamp to the screen the icon is on (not the one
-                        // the window was last on), in physical pixels.
-                        let screens: Vec<shell::Screen> = window
-                            .available_monitors()
-                            .map(|m| {
-                                let (p, sz) = (m.position(), m.size());
-                                shell::Screen {
-                                    x: p.x as f64,
-                                    y: p.y as f64,
-                                    w: sz.width as f64,
-                                    h: sz.height as f64,
-                                    scale: m.scale_factor(),
-                                }
-                            })
-                            .collect();
-                        let (tx, ty) = (rect.position.x, rect.position.y);
-                        let (tw, th) = (rect.size.width as f64, rect.size.height as f64);
-                        let screen =
-                            shell::screen_for(&screens, tx, ty, tw, th).unwrap_or(shell::Screen {
-                                x: 0.0,
-                                y: 0.0,
-                                w: 0.0,
-                                h: 0.0,
-                                scale: 1.0,
-                            });
-                        let (pw, ph) = (POPOVER_W * screen.scale, POPOVER_H * screen.scale);
-                        let (x, y) = shell::popover_origin(
-                            tx, ty, tw, th, pw, ph, screen.x, screen.y, screen.w, screen.h,
-                        );
-                        window.set_outer_position(PhysicalPosition::new(x, y));
-                        if last_scale != Some(screen.scale) {
-                            window.set_inner_size(LogicalSize::new(POPOVER_W, POPOVER_H));
-                            last_scale = Some(screen.scale);
+                        if position_popover(&window, &tray).is_none() {
+                            eprintln!("headroomd: couldn't locate the menu bar item");
                         }
                         {
                             let mut a = app.borrow_mut();
@@ -345,11 +363,12 @@ fn main() -> wry::Result<()> {
                             a.refresh_hooks();
                         }
                         push(&webview);
+                        focus.shown(Instant::now());
                         window.set_visible(true);
                         activate_app();
                         window.set_focus();
-                        shown_at = Instant::now();
                     } else {
+                        focus.hidden();
                         window.set_visible(false);
                     }
                 }
@@ -358,6 +377,11 @@ fn main() -> wry::Result<()> {
         }
 
         let now = Instant::now();
+        if focus.dismiss_if_due(now, window.is_focused()) {
+            window.set_visible(false);
+            visible = false;
+            clicks.dismissed(now);
+        }
         if now >= next_list {
             next_list = now + LIST_EVERY;
             app.borrow_mut()
@@ -386,6 +410,8 @@ fn main() -> wry::Result<()> {
             }
         }
 
+        let wake = next_list.min(Instant::now() + LIST_EVERY);
+        *control_flow = ControlFlow::WaitUntil(focus.deadline().map_or(wake, |due| wake.min(due)));
         if quit {
             // Stop our daemon (if we run one) so it removes its socket.
             stop.store(true, Ordering::Relaxed);

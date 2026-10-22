@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 pub const AWAKE_POLL: Duration = Duration::from_millis(120);
 /// …and while it is closed, where only the sampling tick matters.
 pub const IDLE_POLL: Duration = Duration::from_secs(5);
-/// Focus loss within this window of opening is opening churn, not dismissal.
+/// Defer focus-loss dismissal while the window is opening.
 pub const FOCUS_GRACE: Duration = Duration::from_millis(400);
 /// A press on the icon this soon after focus loss hid the popover is the
 /// press that took the focus: a click meant to close it.
@@ -93,73 +93,72 @@ impl TrayClicks {
     }
 }
 
-/// Should focus loss dismiss the popover?
-///
-/// Showing a window generates transient focus churn, and an `Accessory` app's
-/// window is not key until the app itself is activated. Dismissing during that
-/// window is what made the popover flash and disappear.
-pub fn should_dismiss(visible: bool, since_shown: Duration) -> bool {
-    visible && since_shown > FOCUS_GRACE
+/// Keep early focus loss pending until opening churn has settled. Regaining
+/// focus or explicitly hiding the window cancels any pending dismissal.
+#[derive(Debug, Default)]
+pub struct FocusDismissal {
+    shown_at: Option<Instant>,
+    deadline: Option<Instant>,
+}
+
+impl FocusDismissal {
+    pub fn shown(&mut self, now: Instant) {
+        self.shown_at = Some(now);
+        self.deadline = None;
+    }
+
+    pub fn hidden(&mut self) {
+        self.shown_at = None;
+        self.deadline = None;
+    }
+
+    pub fn changed(&mut self, focused: bool, now: Instant) {
+        self.deadline = if focused {
+            None
+        } else {
+            self.shown_at.map(|shown| (shown + FOCUS_GRACE).max(now))
+        };
+    }
+
+    pub fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+
+    /// Check the native window's current focus before acting on the timer.
+    pub fn dismiss_if_due(&mut self, now: Instant, focused: bool) -> bool {
+        if !self.deadline.is_some_and(|deadline| now >= deadline) {
+            return false;
+        }
+        self.deadline = None;
+        if focused {
+            return false;
+        }
+        self.hidden();
+        true
+    }
 }
 
 pub fn poll_interval(visible: bool) -> Duration {
     if visible { AWAKE_POLL } else { IDLE_POLL }
 }
 
-/// A display, in the physical pixel coordinates the tray icon reports in.
-///
-/// Mirrored from `tao::monitor::MonitorHandle` so this module — and its
-/// tests — do not need a window system.
+/// A rectangle in desktop logical points, with Y increasing downward.
+/// AppKit rectangles are reflected around Y=0; no screen scale is involved.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Screen {
     pub x: f64,
     pub y: f64,
     pub w: f64,
     pub h: f64,
-    /// Backing-scale factor. The popover's size is configured in logical
-    /// points, but every coordinate here is physical, so the two only agree
-    /// once multiplied by this.
-    pub scale: f64,
 }
 
-/// Which display the tray icon is on.
-///
-/// The click can land on any screen, so the popover has to be clamped to the
-/// screen the ICON is on — not the one the window happens to be sitting on
-/// from last time. `current_monitor()` reports the latter, which is why
-/// opening from the external display could place the popover half onto the
-/// laptop: the clamp was being applied against the wrong rectangle.
-///
-/// Matching is on the icon's centre point rather than its origin, so an icon
-/// straddling a seam still resolves to the screen it is mostly on. If nothing
-/// contains it — screens can be arranged with gaps — the nearest by centre
-/// distance wins, which is always better than defaulting to the primary.
-pub fn screen_for(
-    screens: &[Screen],
-    tray_x: f64,
-    tray_y: f64,
-    tray_w: f64,
-    tray_h: f64,
-) -> Option<Screen> {
-    let (cx, cy) = (tray_x + tray_w / 2.0, tray_y + tray_h / 2.0);
-    let contains = |s: &Screen| cx >= s.x && cx < s.x + s.w && cy >= s.y && cy < s.y + s.h;
-    screens
-        .iter()
-        .find(|s| contains(s))
-        .or_else(|| {
-            // Distance to the nearest EDGE, not to the centre: a point just
-            // below a wide screen is nearest to that screen, however far its
-            // middle happens to be.
-            screens.iter().min_by(|a, b| {
-                let d = |s: &Screen| {
-                    let dx = (s.x - cx).max(cx - (s.x + s.w)).max(0.0);
-                    let dy = (s.y - cy).max(cy - (s.y + s.h)).max(0.0);
-                    dx * dx + dy * dy
-                };
-                d(a).total_cmp(&d(b))
-            })
-        })
-        .copied()
+impl Screen {
+    /// Convert a native bottom-left rectangle to our top-left coordinates.
+    /// The reflection is shared by every display, including those above or
+    /// to the left of the primary. Convert the final top-left Y back with -Y.
+    pub fn from_cocoa(x: f64, y: f64, w: f64, h: f64) -> Self {
+        Self { x, y: -y - h, w, h }
+    }
 }
 
 /// Where to put the popover's top-left corner, given the tray icon's rect.
@@ -302,18 +301,70 @@ mod tests {
         );
     }
 
-    /// Regression: the popover dismissed itself during the focus churn of
-    /// opening, because an accessory app's window is not key straight away.
     #[test]
-    fn focus_loss_while_opening_is_ignored() {
-        assert!(!should_dismiss(true, Duration::from_millis(0)));
-        assert!(!should_dismiss(true, Duration::from_millis(399)));
-        assert!(should_dismiss(true, Duration::from_millis(401)));
+    fn early_focus_loss_is_deferred_and_then_dismissed() {
+        let t = Instant::now();
+        let mut focus = FocusDismissal::default();
+        focus.shown(t);
+        focus.changed(false, t + MS(50));
+        assert_eq!(focus.deadline(), Some(t + FOCUS_GRACE));
+        assert!(!focus.dismiss_if_due(t + FOCUS_GRACE - MS(1), false));
+        assert!(focus.dismiss_if_due(t + FOCUS_GRACE, false));
+        assert_eq!(focus.deadline(), None);
+        assert!(!focus.dismiss_if_due(t + MS(1000), false));
     }
 
     #[test]
-    fn a_hidden_popover_is_never_dismissed_again() {
-        assert!(!should_dismiss(false, Duration::from_secs(10)));
+    fn regaining_focus_cancels_the_pending_dismissal() {
+        let t = Instant::now();
+        let mut focus = FocusDismissal::default();
+        focus.shown(t);
+        focus.changed(false, t + MS(50));
+        focus.changed(true, t + MS(100));
+        assert_eq!(focus.deadline(), None);
+        assert!(!focus.dismiss_if_due(t + FOCUS_GRACE, false));
+        // Even if its notification is still queued, native focus wins.
+        focus.changed(false, t + MS(200));
+        assert!(!focus.dismiss_if_due(t + FOCUS_GRACE, true));
+        assert_eq!(focus.deadline(), None);
+    }
+
+    #[test]
+    fn hiding_cancels_the_timer_and_reopening_gets_a_new_grace_period() {
+        let t = Instant::now();
+        let mut focus = FocusDismissal::default();
+        focus.shown(t);
+        focus.changed(false, t + MS(50));
+        focus.hidden();
+        focus.changed(false, t + MS(150));
+        assert_eq!(focus.deadline(), None);
+        assert!(!focus.dismiss_if_due(t + FOCUS_GRACE, false));
+        focus.shown(t + MS(1000));
+        focus.changed(false, t + MS(1050));
+        assert_eq!(focus.deadline(), Some(t + MS(1000) + FOCUS_GRACE));
+    }
+
+    #[test]
+    fn focus_loss_after_opening_dismisses_immediately() {
+        let t = Instant::now();
+        let mut focus = FocusDismissal::default();
+        focus.shown(t);
+        focus.changed(false, t + MS(1000));
+        assert_eq!(focus.deadline(), Some(t + MS(1000)));
+        assert!(focus.dismiss_if_due(t + MS(1000), false));
+    }
+
+    #[test]
+    fn a_tray_close_during_grace_does_not_reopen_after_deferred_dismissal() {
+        let t = Instant::now();
+        let mut focus = FocusDismissal::default();
+        let mut clicks = TrayClicks::default();
+        focus.shown(t);
+        focus.changed(false, t + MS(350));
+        clicks.click(L, DOWN, true, t + MS(360));
+        assert!(focus.dismiss_if_due(t + FOCUS_GRACE, false));
+        clicks.dismissed(t + FOCUS_GRACE);
+        assert_eq!(clicks.click(L, UP, false, t + MS(450)), Some(Toggle::Hide));
     }
 
     #[test]
@@ -367,106 +418,52 @@ mod tests {
         assert!(y >= -200.0, "y was {y}");
     }
 
-    // ── which display ─────────────────────────────────────────────────────
-    //
-    // A laptop with an external display above it, both 2×. The external is
-    // the primary at (0,0); the laptop sits below and to the right, which is
-    // a common arrangement and the one that exposed the bug.
-    const EXTERNAL: Screen = Screen {
-        x: 0.0,
-        y: 0.0,
-        w: 5120.0,
-        h: 2160.0,
-        scale: 2.0,
-    };
-    const LAPTOP: Screen = Screen {
-        x: 1800.0,
-        y: 2160.0,
-        w: 3024.0,
-        h: 1964.0,
-        scale: 2.0,
-    };
-
-    /// The popover must be clamped to the screen the ICON is on. Reading the
-    /// window's own monitor instead gave whichever display it was last opened
-    /// on, which is what put half the popover on the laptop.
-    #[test]
-    fn the_icon_decides_which_screen_the_popover_belongs_to() {
-        let screens = [EXTERNAL, LAPTOP];
-        assert_eq!(
-            screen_for(&screens, 4000.0, 0.0, 24.0, 24.0),
-            Some(EXTERNAL)
+    // Native rectangles are points on every display, irrespective of 1x/2x
+    // backing. A 1512x982 Retina laptop and 1920x1080 external display use
+    // these same dimensions in both directions of a window move.
+    fn native_origin(tray: Screen, visible: Screen) -> (f64, f64) {
+        let (x, y) = popover_origin(
+            tray.x, tray.y, tray.w, tray.h, 400.0, 600.0, visible.x, visible.y, visible.w,
+            visible.h,
         );
-        assert_eq!(
-            screen_for(&screens, 4000.0, 2160.0, 24.0, 24.0),
-            Some(LAPTOP)
-        );
-    }
-
-    /// Matched on the icon's centre, so an icon straddling the seam resolves
-    /// to the screen it is mostly on rather than to neither.
-    #[test]
-    fn an_icon_on_the_seam_lands_on_one_screen() {
-        let screens = [EXTERNAL, LAPTOP];
-        // Its left edge is on the external, its centre on the laptop.
-        let s = screen_for(&screens, 1790.0, 2160.0, 24.0, 24.0);
-        assert_eq!(s, Some(LAPTOP));
-    }
-
-    /// Screens can be arranged with gaps between them. Falling back to the
-    /// primary would send the popover to the wrong display entirely; the
-    /// nearest screen is always the better guess.
-    #[test]
-    fn an_icon_in_a_gap_falls_back_to_the_nearest_screen() {
-        let screens = [EXTERNAL, LAPTOP];
-        // Off the bottom-right of the external, just past the laptop's right
-        // edge — nearest the laptop by a long way.
-        let s = screen_for(&screens, 4900.0, 3000.0, 24.0, 24.0);
-        assert_eq!(s, Some(LAPTOP));
-        // And a point below the external but far to its left belongs to it,
-        // not to the laptop off to the right.
-        assert_eq!(
-            screen_for(&screens, 200.0, 3000.0, 24.0, 24.0),
-            Some(EXTERNAL)
-        );
+        (x, -y)
     }
 
     #[test]
-    fn no_screens_at_all_yields_nothing_rather_than_a_guess() {
-        assert_eq!(screen_for(&[], 0.0, 0.0, 24.0, 24.0), None);
+    fn mixed_scale_displays_share_logical_desktop_coordinates() {
+        let laptop = Screen::from_cocoa(0.0, 0.0, 1512.0, 958.0);
+        let external = Screen::from_cocoa(1512.0, 0.0, 1920.0, 1056.0);
+        let laptop_tray = Screen::from_cocoa(1472.0, 958.0, 24.0, 24.0);
+        let external_tray = Screen::from_cocoa(3392.0, 1056.0, 24.0, 24.0);
+        // Clamp at the real logical width, independent of the old display.
+        for (tray, visible, expected) in [
+            (laptop_tray, laptop, (1104.0, 950.0)),
+            (external_tray, external, (3024.0, 1048.0)),
+            (laptop_tray, laptop, (1104.0, 950.0)),
+        ] {
+            assert_eq!(native_origin(tray, visible), expected);
+        }
     }
 
-    /// The tray rect and the screen bounds are physical pixels; the popover's
-    /// size is configured in logical points. On a 2× display the clamp saw a
-    /// popover half the real width, so an icon near the right edge was
-    /// "corrected" to a position that still overran by ~380px — onto whatever
-    /// display was next along.
     #[test]
-    fn the_popover_is_clamped_at_its_physical_width() {
-        let s = EXTERNAL;
-        let icon_x = s.x + s.w - 40.0; // hard against the right edge
-        let logical = popover_origin(icon_x, 0.0, 24.0, 24.0, W, H, s.x, s.y, s.w, s.h);
-        let physical = popover_origin(
-            icon_x,
-            0.0,
-            24.0,
-            24.0,
-            W * s.scale,
-            H * s.scale,
-            s.x,
-            s.y,
-            s.w,
-            s.h,
-        );
-        assert!(
-            logical.0 + W * s.scale > s.x + s.w,
-            "the logical width overruns the screen — this was the bug"
-        );
-        assert!(
-            physical.0 + W * s.scale <= s.x + s.w - SCREEN_MARGIN + 0.001,
-            "x was {}",
-            physical.0
-        );
+    fn displays_above_and_left_keep_their_native_origins() {
+        let above = Screen::from_cocoa(-300.0, 982.0, 1920.0, 1056.0);
+        let above_tray = Screen::from_cocoa(-290.0, 2038.0, 24.0, 24.0);
+        assert_eq!(native_origin(above_tray, above), (-292.0, 2030.0));
+        let left = Screen::from_cocoa(-1920.0, -200.0, 1920.0, 1056.0);
+        let left_tray = Screen::from_cocoa(-40.0, 856.0, 24.0, 24.0);
+        assert_eq!(native_origin(left_tray, left), (-408.0, 848.0));
+    }
+
+    #[test]
+    fn visible_screen_bounds_keep_the_popover_clear_of_the_dock() {
+        // A dock on the right takes 80 points; bottom dock takes 70 points.
+        let visible = Screen::from_cocoa(0.0, 70.0, 1432.0, 700.0);
+        let tray = Screen::from_cocoa(1480.0, 770.0, 24.0, 24.0);
+        let (x, top) = native_origin(tray, visible);
+        assert_eq!((x, top), (1024.0, 762.0));
+        assert!(top - 600.0 >= 70.0 + SCREEN_MARGIN);
+        assert!(x + 400.0 <= 1432.0 - SCREEN_MARGIN);
     }
 
     /// A screen too small for the popover must still yield a usable origin
