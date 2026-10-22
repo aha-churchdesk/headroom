@@ -317,7 +317,7 @@ function near(got, want, what) {
 test('past peaks have measured bounds and a distinct live fill and scheduling estimate', () => {
   showMemoryJob(memoryJob());
   has(ui.view(), 'Past peaks 2–4 GB · 8 runs');
-  has(ui.view(), 'RAM 3 GB');
+  has(ui.view(), '3 / new est 6 GB');
   const { lower, upper, live, estimate } = memoryGeometry();
   near(lower / estimate, 2 / 6, 'lower bound on the same scale');
   near(upper / estimate, 4 / 6, 'upper bound on the same scale');
@@ -345,7 +345,7 @@ test('live usage can exceed past peaks without clipping or moving their values',
   near(upper, live * .4, 'upper peak');
   near(estimate, live * .6, 'estimate');
   has(ui.view(), 'Past peaks 2–4 GB · 8 runs');
-  has(ui.view(), 'RAM 10 GB');
+  has(ui.view(), '10 / new est 6 GB');
 });
 
 test('identical past peaks remain a single marked value without inventing a range', () => {
@@ -364,7 +364,7 @@ test('absent history never borrows a band from the estimate or profile', () => {
     eq(memoryGeometry().lower, null);
     lacks(ui.view(), 'Past peaks');
     lacks(ui.html(), 'clean runs of this command');
-    has(ui.view(), 'RAM 3 GB');
+    has(ui.view(), '3 / new est 6 GB');
     has(ui.html(), 'Conservative estimate 6 GB');
   }
 });
@@ -385,7 +385,7 @@ test('state updates refresh live usage, range, estimate, and explanation for the
   eq(after.live > before.live, true);
   near(after.upper / after.estimate, .7, 'updated range geometry');
   has(ui.view(), 'Past peaks 3–7 GB · 12 runs');
-  has(ui.view(), 'RAM 9 GB');
+  has(ui.view(), '9 / new est 10 GB');
   has(ui.html(), 'Conservative estimate 10 GB');
   has(ui.html(), '12 clean runs of this command with 2 workers, like this job.');
   lacks(ui.html(), 'Past peaks 2–4 GB');
@@ -399,17 +399,65 @@ test('running and queued jobs are listed with why the queue waits', () => {
   const v = ui.view();
   has(v, 'Running 2');
   // Where each runs, with the command on the line below.
-  has(ui.html(), '<b>sc-49123</b><span class="cmd">headroom-hog</span>');
+  has(ui.html(), '<b>sc-49123</b></span><span class="cmd">headroom-hog</span>');
   has(v, 'browser-cd sleep 31');
   const hog = busy.running.find(j => j.label === 'sc-49123');
-  has(v, `RAM ${(hog.footprint / 2 ** 30).toFixed(1).replace(/\.0$/, '')} GB CPU ${Math.round(hog.cpu_pct)}%`);
+  has(ui.html(), `Live memory ${(hog.footprint / 2 ** 30).toFixed(1).replace(/\.0$/, '')} GB`);
+  has(v, `CPU ${Math.round(hog.cpu_pct)}%`);
   has(v, 'Queued 2');
   has(v, 'next needs 1.5 GB, 0 GB free');
-  has(ui.html(), '<b>fix-main</b><span class="cmd">sleep 30</span>');
+  has(ui.html(), '<b>fix-main</b></span><span class="cmd">sleep 30</span>');
   has(v, 'form-service sleep 32');
   has(v, 'new est 1.5 GB');
   // The estimate, and how long it has waited on the line below.
   has(ui.html(), 'est 1.5 GB</span><span title="Time in the queue so far">waiting ');
+});
+
+test('reported agents appear on running, frozen and queued jobs and in their details', () => {
+  for (const [agent, label] of [['codex', 'Codex'], ['claude', 'Claude Code'], ['pi', 'pi']]) {
+    for (const state of ['running', 'frozen', 'queued']) {
+      const job = { ...busy.running[0], agent, state };
+      ui.setState({ ...busy, running: state === 'queued' ? [] : [job], queued: state === 'queued' ? [job] : [] });
+      has(ui.html(), `<span class="job-origin" title="Started by ${label}">${label}</span>`);
+      ui.click({ act: 'expand', id: job.id });
+      has(ui.html(), `<span class="k">agent</span><span class="v">${label}</span>`);
+      ui.UI.expanded.clear();
+    }
+  }
+});
+
+test('missing origins stay unlabeled regardless of the session or command', () => {
+  for (const agent of [undefined, null, '', '  ']) {
+    const job = { ...busy.running[0], agent, session: 'codex-session', cmd: 'claude test' };
+    ui.setState({ ...busy, running: [job], queued: [{ ...job, id: 'unknown-queued', state: 'queued' }] });
+    ui.UI.expanded.add(job.id);
+    ui.setState({ ...busy, running: [job], queued: [] });
+    lacks(ui.html(), 'class="job-origin"');
+    lacks(ui.html(), '<span class="k">agent</span>');
+    lacks(ui.view(), 'Terminal');
+  }
+});
+
+test('custom origins are escaped in the badge, tooltip and expanded details', () => {
+  const agent = '<img src=x onerror="alert(1)"> & \'custom\'';
+  const escaped = '&lt;img src=x onerror=&quot;alert(1)&quot;&gt; &amp; &#39;custom&#39;';
+  const job = { ...busy.running[0], agent };
+  ui.setState({ ...busy, running: [job], queued: [{ ...job, id: 'custom-queued', state: 'queued' }] });
+  eq(ui.html().split(`class="job-origin" title="Started by ${escaped}">${escaped}</span>`).length - 1, 2);
+  ui.click({ act: 'expand', id: job.id });
+  has(ui.html(), `<span class="k">agent</span><span class="v">${escaped}</span>`);
+  lacks(ui.html(), '<img');
+});
+
+test('origin badges share the shrinking name column and truncate long custom labels', () => {
+  const job = { ...busy.running[0], agent: 'custom agent '.repeat(30) };
+  ui.setState({ ...busy, running: [job], queued: [] });
+  has(ui.html(), `<span class="job-title"><b>${job.label}</b><span class="job-origin"`);
+  has(ui.source(), '.job .name .job-title{ display:flex; align-items:center; gap:5px; min-width:0; }');
+  has(ui.source(), '.job-title b{ flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; }');
+  has(ui.source(), '.job-origin{ flex:0 1 auto; max-width:50%; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;');
+  ui.click({ act: 'expand', id: job.id });
+  has(ui.html(), `<span class="k">agent</span><span class="v">${job.agent.trim()}</span>`);
 });
 
 test('a hold shows in the header button and as the queue reason', () => {
@@ -418,12 +466,111 @@ test('a hold shows in the header button and as the queue reason', () => {
   has(ui.view(), 'held by you');
 });
 
+test('running timing retains elapsed wall time during pauses and after resume', () => {
+  const s = JSON.parse(JSON.stringify(busy));
+  const j = s.running[0];
+  s.running = [j];
+  j.elapsed_s = 134;
+  j.frozen_s = 12;
+  j.waited_s = 9;
+  j.state = 'frozen';
+  j.runtime_estimate_s = 142;
+  ui.setState(s);
+  has(ui.view(), 'Elapsed 2m14');
+  has(ui.view(), 'Paused 12s');
+  has(ui.view(), 'Usual 2m22');
+  lacks(ui.view(), 'RAM ');
+  has(ui.html(), 'including pauses');
+  ui.click({ act: 'expand', id: j.id });
+  has(ui.view(), 'queue wait 9s before this attempt');
+  has(ui.view(), 'usual runtime 2m22');
+  has(ui.view(), '2m14 including pauses');
+  has(ui.html(), 'It helps plan when queued jobs might fit.');
+  j.state = 'running';
+  j.frozen_s = 0;
+  j.elapsed_s = 140;
+  ui.setState(s);
+  has(ui.view(), 'Elapsed 2m20');
+  lacks(ui.view(), 'Paused ');
+});
+
+test('runtime display preserves missing and subsecond scheduler estimates', () => {
+  const s = JSON.parse(JSON.stringify(busy));
+  const j = s.running[0];
+  s.running = [j];
+  for (const estimate of [null, undefined, 0, 900]) {
+    j.runtime_estimate_s = estimate;
+    ui.UI.expanded.add(j.id);
+    ui.setState(s);
+    if (estimate == null) {
+      lacks(ui.view(), 'Usual ');
+      has(ui.view(), 'usual runtime Unknown for this worker count');
+    } else {
+      has(ui.view(), estimate === 0 ? 'Usual 0s' : 'Usual 15m');
+    }
+  }
+});
+
+test('expanded scheduling explains growth, overruns, pauses and pinned admission', () => {
+  const s = JSON.parse(JSON.stringify(busy));
+  const j = s.running[0];
+  s.running = [j];
+  j.runtime_estimate_s = 120;
+  j.elapsed_s = 60;
+  j.growth_reserved = 2 * GiB;
+  ui.UI.expanded.add(j.id);
+  ui.setState(s);
+  has(ui.view(), 'Allows another 2 GB for growth');
+  has(ui.view(), 'fitting shorter jobs can go ahead');
+  j.elapsed_s = 121;
+  ui.setState(s);
+  has(ui.view(), 'Past its usual runtime. Queue planning allows as much time again as has elapsed');
+  j.state = 'frozen';
+  ui.setState(s);
+  has(ui.view(), 'no extra growth allowance');
+  has(ui.view(), 'No predicted memory release while paused');
+  lacks(ui.view(), 'Past its usual runtime');
+  j.state = 'queued';
+  j.pinned = true;
+  s.running = [];
+  s.queued = [j];
+  s.queue_reason = { kind: 'held' };
+  ui.setState(s);
+  has(ui.view(), 'Prioritized; skips memory checks');
+  has(ui.view(), 'Still waits for queue hold, memory pressure and CPU limits');
+  has(ui.view(), 'queue held by you');
+  s.queued.unshift({ ...j, id: 'earlier-job' });
+  ui.setState(s);
+  has(ui.view(), 'queue Position 2');
+  lacks(ui.view(), 'queue held by you');
+});
+
+test('disabled backfilling keeps runtime historical below and above the estimate', () => {
+  const s = JSON.parse(JSON.stringify(busy));
+  const j = s.running[0];
+  s.running = [j];
+  s.settings.backfill = false;
+  j.runtime_estimate_s = 120;
+  ui.UI.expanded.add(j.id);
+  for (const elapsed of [60, 121]) {
+    j.elapsed_s = elapsed;
+    ui.setState(s);
+    has(ui.view(), 'Usual 2m00');
+    has(ui.view(), 'Usual runtime is historical context.');
+    has(ui.view(), 'Short jobs going first is turned off; jobs follow queue order.');
+    lacks(ui.html(), 'It helps plan when queued jobs might fit.');
+    lacks(ui.view(), 'fitting shorter jobs can go ahead');
+    lacks(ui.view(), 'Queue planning allows as much time again');
+    lacks(ui.view(), 'helps predict memory releases');
+  }
+});
+
 test('a guard freeze is a banner with resume and kill', () => {
   ui.setState(frozen);
   const v = ui.view();
   has(v, 'Froze “headroom-hog” (sc-49201)');
   if (!/memory critical for \d+ s/.test(v)) throw new Error('freeze reason missing: ' + v);
-  has(v, '❄︎ frozen');
+  has(v, '❄︎ Paused');
   eq(ui.find({ act: 'resume', id: '4' }).length, 2, 'banner and row both offer resume');
   has(ui.head(), 'CRITICAL');
 });

@@ -243,6 +243,9 @@ button:disabled{ cursor:default; opacity:.4; }
 .job .name b{ font-weight:600; }
 .job .name.two{ display:flex; flex-direction:column; gap:1px; }
 .job .name.two > *{ overflow:hidden; text-overflow:ellipsis; }
+.job .name .job-title{ display:flex; align-items:center; gap:5px; min-width:0; }
+.job-title b{ flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; }
+.job-origin{ flex:0 1 auto; max-width:50%; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:9.5px; font-weight:500; color:var(--text-dim); background:var(--bg-sunk); border-radius:4px; padding:0 4px; }
 .job .name.two .cmd{ font-size:11.5px; }
 .job .name.two .now{ font-size:11px; color:var(--text-faint); font-family:ui-monospace, "SF Mono", Menlo, monospace; }
 /* Queued rows: the estimate, then how long it has waited, beside the two-line name. */
@@ -254,8 +257,9 @@ button:disabled{ cursor:default; opacity:.4; }
   font-size:9.5px; font-weight:700; letter-spacing:.05em; text-transform:uppercase;
   padding:0 5px; border-radius:4px; background:var(--bg-sunk); color:var(--text-dim); margin-right:3px;
 }
-.job .l2{ display:flex; align-items:center; gap:9px; margin-top:5px; font-size:11px; color:var(--text-dim); }
+.job .l2{ display:flex; flex-wrap:wrap; align-items:center; gap:5px 9px; margin-top:5px; font-size:11px; color:var(--text-dim); }
 .job .l2 .meta{ white-space:nowrap; }
+.job .l2 .acts-i{ margin-left:auto; }
 .tag{ font-size:12px; }
 
 .memory{ margin-top:8px; }
@@ -302,7 +306,7 @@ button:disabled{ cursor:default; opacity:.4; }
   display:grid; grid-template-columns:auto 1fr; gap:3px 10px; font-size:11px;
 }
 .detail .k{ color:var(--text-dim); }
-.detail .v{ word-break:break-all; }
+.detail .v{ overflow-wrap:anywhere; }
 .detail .full{ grid-column:1 / -1; display:flex; gap:6px; margin-top:4px; }
 
 /* Footer nav */
@@ -809,10 +813,22 @@ function estLabel(j){
     : `est ${gb(j.estimate)} GB`;
 }
 
-/** Where it runs, then the command beneath. */
+function originLabel(agent){
+  if (typeof agent !== "string" || !agent.trim()) return "";
+  const name = agent.trim();
+  switch (name.toLowerCase()) {
+    case "codex": return "Codex";
+    case "claude": case "claude-code": case "claude code": return "Claude Code";
+    case "pi": return "pi";
+    default: return name;
+  }
+}
+
+/** Where it runs and which agent started it, then the command beneath. */
 function jobName(j){
+  const origin = originLabel(j.agent);
   return `<span class="name two" role="button" tabindex="0" aria-expanded="${UI.expanded.has(j.id)}" data-act="expand" data-id="${j.id}" title="${esc(j.full_cmd)}">
-    <b>${esc(j.label)}</b><span class="cmd">${esc(j.cmd)}</span>${
+    <span class="job-title"><b>${esc(j.label)}</b>${origin ? `<span class="job-origin" title="Started by ${esc(origin)}">${esc(origin)}</span>` : ""}</span><span class="cmd">${esc(j.cmd)}</span>${
     j.now ? `<span class="now" title="The largest process running inside it now">↳ ${esc(j.now)}</span>` : ""}</span>`;
 }
 
@@ -840,8 +856,9 @@ function renderRunning(j){
       </div>
       ${fpBar(j)}
       <div class="l2 num">
-        <span class="meta">${frozen ? `❄︎ frozen ${dur(j.frozen_s)}` : dur(j.elapsed_s)}</span>
-        <span class="meta" title="Memory in use now, all its processes">RAM ${gb(j.footprint)} GB</span>
+        <span class="meta" title="Time since this attempt was admitted to run, including pauses">Elapsed ${dur(j.elapsed_s)}</span>
+        ${frozen ? `<span class="meta" title="Time in the current pause">❄︎ Paused ${dur(j.frozen_s)}</span>` : ""}
+        ${j.runtime_estimate_s != null ? `<span class="meta" title="The scheduler's usual runtime estimate for this attempt, not a guaranteed finish time">Usual ${dur(j.runtime_estimate_s)}</span>` : ""}
         <span class="meta">CPU ${Math.round(j.cpu_pct)}%</span>
         ${j.tuned ? `<span class="meta" title="Started with fewer workers so it fits in memory; it runs slower">${j.tuned.workers}/${j.tuned.default} workers</span>` : ""}
         <span class="acts-i">
@@ -881,14 +898,46 @@ function renderQueued(j, i, S){
     </div>`;
 }
 
+function schedulingText(j){
+  if (j.state === "queued") {
+    return j.pinned
+      ? "Prioritized; skips memory checks. Still waits for queue hold, memory pressure and CPU limits. Protected from automatic pause or kill."
+      : `Uses the ${gb(j.estimate)} GB memory estimate to decide whether it fits.`;
+  }
+  const memory = j.state === "frozen"
+    ? `Keeps ${gb(j.footprint)} GB RAM while paused; no extra growth allowance. No predicted memory release while paused.`
+    : j.growth_reserved != null
+      ? `Allows another ${gb(j.growth_reserved)} GB for growth when starting queued jobs. Current RAM is already included in system usage.`
+      : "Current RAM is already included in system usage.";
+  const runtime = j.state === "frozen" ? "" : !STATE.settings.backfill
+    ? " Usual runtime is historical context. Short jobs going first is turned off; jobs follow queue order."
+    : j.runtime_estimate_s == null
+    ? " No runtime estimate yet; cannot predict when this job frees memory."
+    : j.elapsed_s >= j.runtime_estimate_s
+      ? " Past its usual runtime. Queue planning allows as much time again as has elapsed; this is not a finish prediction."
+      : " Usual runtime helps predict memory releases so fitting shorter jobs can go ahead in the queue.";
+  return memory + runtime + (j.pinned ? " Protected from automatic pause or kill." : "");
+}
+
 function renderDetail(j){
+  const origin = originLabel(j.agent);
+  const queueIndex = j.state === "queued" ? STATE.queued.findIndex(x => x.id === j.id) : -1;
+  const runtimeUse = STATE.settings.backfill
+    ? "It helps plan when queued jobs might fit."
+    : "Short jobs going first is turned off; this is historical context and jobs follow queue order.";
   return `
     <div class="detail">
       <span class="k">command</span><span class="v mono">${esc(j.full_cmd)}</span>
       <span class="k">cwd</span><span class="v mono">${esc(j.cwd)}</span>
+      ${origin ? `<span class="k">agent</span><span class="v">${esc(origin)}</span>` : ""}
       <span class="k">session</span><span class="v mono">${esc(j.session || "—")}</span>
       <span class="k">profile</span><span class="v">${esc(keyLabel(j.key))} · ${j.samples} run${j.samples === 1 ? "" : "s"}</span>
+      <span class="k">queue wait</span><span class="v num">${dur(j.waited_s)} ${j.state === "queued" ? "so far" : "before this attempt"}</span>
+      <span class="k">usual runtime</span><span class="v num" title="The scheduler's estimate for this attempt, from previous uninterrupted runs of this command at the same worker count. ${runtimeUse} It is not a guaranteed finish time.">${j.runtime_estimate_s == null ? "Unknown for this worker count" : dur(j.runtime_estimate_s)}</span>
+      <span class="k">scheduling</span><span class="v">${esc(schedulingText(j))}</span>
+      ${queueIndex >= 0 ? `<span class="k">queue</span><span class="v">${queueIndex === 0 && STATE.queue_reason ? esc(reasonText(STATE.queue_reason)) : `Position ${queueIndex + 1}`}</span>` : ""}
       ${j.state !== "queued" ? `
+        <span class="k">elapsed</span><span class="v num">${dur(j.elapsed_s)} including pauses</span>
         <span class="k">processes</span><span class="v num">${j.procs}</span>
         <span class="k">peak</span><span class="v num">${gb(j.peak)} GB</span>` : ""}
       ${j.retry ? `<span class="k">retry</span><span class="v">requeued after a guard kill (${j.retry}/1)</span>` : ""}
@@ -1423,7 +1472,7 @@ const PROFILES = {
 function job(o){
   return Object.assign({
     state:"running", pinned:false, low:false, footprint:0, peak:0, samples:5,
-    elapsed_s:0, frozen_s:0, waited_s:0, cpu_pct:0, procs:1, retry:0, session:"",
+    elapsed_s:0, frozen_s:0, waited_s:0, runtime_estimate_s:null, cpu_pct:0, procs:1, retry:0, session:"",
   }, o, {
     runaway_at: o.runaway_at ?? Math.max(2 * o.estimate, G(8)),
     peak: o.peak ?? o.footprint,
@@ -1433,14 +1482,14 @@ function job(o){
 const J = {
   vitest: () => job({ id:"j41", label:"sc-49123", cmd:"vitest run", now:"vitest run --pool=forks", key:"browser-churchdesk · vitest run",
     full_cmd:"cd apps/web && pnpm vitest run src/features/calendar", cwd:"~/Projects/browser-churchdesk.worktrees/sc-49123",
-    session:"a7d0…2e", estimate:G(4.1), footprint:G(3.8), peak:G(3.9), samples:10, elapsed_s:134, cpu_pct:380, procs:9,
+    session:"a7d0…2e", agent:"codex", estimate:G(4.1), footprint:G(3.8), peak:G(3.9), samples:10, elapsed_s:134, runtime_estimate_s:142, cpu_pct:380, procs:9,
     memory_range:{ lower:G(3.1), upper:G(4), samples:10, workers:null } }),
   tsc: () => job({ id:"j42", label:"fix-main", cmd:"tsc --noEmit", key:"fix-main · tsc --noEmit", low:true,
-    full_cmd:"pnpm tsc --noEmit -p tsconfig.json", cwd:"~/Projects/fix-main",
+    full_cmd:"pnpm tsc --noEmit -p tsconfig.json", cwd:"~/Projects/fix-main", agent:"claude",
     estimate:G(1.3), footprint:G(1.1), samples:5, elapsed_s:41, cpu_pct:100, procs:2,
     memory_range:{ lower:G(1.1), upper:G(1.3), samples:5, workers:null } }),
   e2e: () => job({ id:"j43", state:"queued", label:"browser-cd", cmd:"playwright test", key:"browser-churchdesk · playwright test",
-    full_cmd:"pnpm playwright test --project=chromium", cwd:"~/Projects/browser-churchdesk", pinned:true,
+    full_cmd:"pnpm playwright test --project=chromium", cwd:"~/Projects/browser-churchdesk", pinned:true, agent:"pi",
     estimate:G(4.2), samples:3, waited_s:64 }),
   build: () => job({ id:"j44", state:"queued", label:"sc-49201", cmd:"pnpm build", key:"browser-churchdesk · pnpm build",
     full_cmd:"pnpm build", cwd:"~/Projects/browser-churchdesk.worktrees/sc-49201", estimate:G(2.0), samples:4, waited_s:21 }),
@@ -1637,7 +1686,8 @@ if (!LIVE){
   setInterval(() => {
     if (!STATE) return;
     STATE.running.forEach(j => {
-      if (j.state === "frozen") j.frozen_s++; else j.elapsed_s++;
+      j.elapsed_s++;
+      if (j.state === "frozen") j.frozen_s++;
     });
     STATE.queued.forEach(j => j.waited_s++);
     render();

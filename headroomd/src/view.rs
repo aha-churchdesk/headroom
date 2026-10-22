@@ -236,12 +236,15 @@ fn job_json(j: &Job, now: u64, cfg: &Config, profiles: &Profiles) -> Value {
         "full_cmd": j.spec.full_cmd,
         "cwd": j.spec.cwd,
         "session": j.spec.session,
+        "agent": j.spec.agent,
         "key": j.spec.key,
         "state": state,
         "pinned": j.pinned,
         "low": j.spec.low,
         "estimate": j.estimate,
         "memory_range": memory_range,
+        "runtime_estimate_s": j.median_ms.map(secs),
+        "growth_reserved": headroom_core::admission::pending_growth(&[j]),
         "samples": j.samples,
         "footprint": j.footprint,
         "peak": j.peak,
@@ -806,6 +809,62 @@ mod tests {
     }
 
     #[test]
+    fn runtime_display_uses_the_jobs_scheduler_estimate_not_a_fresh_profile_median() {
+        use headroom_core::profile::Run;
+
+        let cfg = Config::default();
+        let mut profiles = Profiles::default();
+        let mut job = listing().running[0].clone();
+        profiles.record(
+            &job.spec.key,
+            &job.spec.fallback_key,
+            Run {
+                peak: GIB,
+                duration_ms: 900_000,
+                exit: Some(0),
+                flagged: false,
+                at: 1,
+                workers: None,
+                parts: vec![],
+            },
+        );
+        // A running attempt retains its admission estimate when history changes.
+        job.median_ms = Some(45_000);
+        assert_eq!(
+            job_json(&job, 100_000, &cfg, &profiles)["runtime_estimate_s"],
+            45
+        );
+        // No threshold hides an estimate based on one run, or a subsecond run.
+        job.median_ms = Some(500);
+        assert_eq!(
+            job_json(&job, 100_000, &cfg, &profiles)["runtime_estimate_s"],
+            0
+        );
+        // History at another worker count must not invent a missing job estimate.
+        job.median_ms = None;
+        assert!(job_json(&job, 100_000, &cfg, &profiles)["runtime_estimate_s"].is_null());
+
+        job.state = JobState::Running;
+        job.estimate = 4 * GIB;
+        job.footprint = GIB;
+        assert_eq!(
+            job_json(&job, 100_000, &cfg, &profiles)["growth_reserved"],
+            3 * GIB
+        );
+        job.state = JobState::Frozen;
+        assert_eq!(
+            job_json(&job, 100_000, &cfg, &profiles)["growth_reserved"],
+            0
+        );
+        job.state = JobState::Running;
+        job.footprint = 5 * GIB;
+        assert_eq!(
+            job_json(&job, 100_000, &cfg, &profiles)["growth_reserved"],
+            0
+        );
+    }
+
+    #[test]
     fn state_matches_the_prototype_contract() {
         let (cfg, p, d) = (Config::default(), Profiles::default(), HashSet::new());
         let v = state(&listing(), &extras(&cfg, &p, &d));
@@ -832,6 +891,34 @@ mod tests {
         assert_eq!(v["history"][0]["ended_ago_s"], 100);
         assert!(v["history"][1]["guard"].is_null());
         assert_eq!(v["last_day"]["runs"], 2);
+    }
+
+    #[test]
+    fn job_origin_preserves_the_reported_agent_for_running_and_queued_jobs() {
+        let cfg = Config::default();
+        let profiles = Profiles::default();
+        let dismissed = HashSet::new();
+        let mut l = listing();
+        for agent in [
+            None,
+            Some(""),
+            Some("codex"),
+            Some("claude"),
+            Some("pi"),
+            Some("custom <agent>"),
+        ] {
+            for j in l.running.iter_mut().chain(&mut l.queued) {
+                j.spec.agent = agent.map(str::to_owned);
+                // Session and command text must never be used to guess an origin.
+                j.spec.session = Some("codex-session".into());
+                j.spec.cmd = "claude test".into();
+            }
+            let v = state(&l, &extras(&cfg, &profiles, &dismissed));
+            for group in ["running", "queued"] {
+                assert!(v[group][0].get("agent").is_some());
+                assert_eq!(v[group][0]["agent"], json!(agent));
+            }
+        }
     }
 
     #[test]
