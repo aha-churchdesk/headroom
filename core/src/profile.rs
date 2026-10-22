@@ -1,8 +1,9 @@
 //! What a command has needed before, and so what it will probably need now.
 //!
-//! Each profile keeps a command's last runs. The estimate is the p90 of
-//! their peak footprints: high enough that one run in ten exceeds it, so the
-//! queue rarely admits a job that then pushes the machine into swap.
+//! Each profile keeps a command's last runs. Successful uninterrupted runs
+//! supply observed peak percentiles and typical durations. Failed or
+//! interrupted runs can raise the memory reservation through measured peaks,
+//! but cannot establish a typical successful workload.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -12,7 +13,7 @@ use crate::model::{Bytes, Part};
 
 /// Runs kept per key.
 pub const KEEP: usize = 20;
-/// Clean runs needed before a key's own history is trusted outright.
+/// Successful uninterrupted runs needed before a key's history is trusted outright.
 pub const TRUSTED: usize = 3;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -59,7 +60,7 @@ pub struct Profile {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Estimate {
     pub bytes: Bytes,
-    /// Clean runs of the exact key behind it; 0 means no history of its own.
+    /// Successful measured runs of the exact key; 0 means no representative memory history.
     pub samples: u32,
 }
 
@@ -83,50 +84,59 @@ fn p90(values: &mut [Bytes]) -> Option<Bytes> {
     Some(values[rank - 1])
 }
 
+impl Run {
+    /// Successful and uninterrupted. Failed exits can have done less work than
+    /// a successful run, so their time and peak cannot describe a typical run.
+    pub fn representative(&self) -> bool {
+        !self.flagged && self.exit == Some(0)
+    }
+}
+
 impl Profile {
     fn clean_peaks(&self) -> Vec<Bytes> {
         self.runs
             .iter()
             // A command can finish between samples. Its zero peak means
             // unmeasured memory, while its duration is still useful.
-            .filter(|r| !r.flagged && r.peak > 0)
+            .filter(|r| r.representative() && r.peak > 0)
             .map(|r| r.peak)
             .collect()
     }
 
-    /// Highest peak of a flagged run. A run killed at 7 GB needed at least
-    /// 7 GB, so it may raise an estimate; a run frozen early proves nothing
-    /// low, so it never lowers one.
-    fn flagged_floor(&self) -> Bytes {
+    /// Highest peak of an unsuccessful or interrupted run. A run that failed
+    /// at 7 GB needed at least 7 GB, so it may raise an estimate. A run frozen
+    /// early proves no lower requirement, so it never lowers the estimate.
+    fn observed_floor(&self) -> Bytes {
         self.runs
             .iter()
-            .filter(|r| r.flagged)
+            .filter(|r| !r.representative())
             .map(|r| r.peak)
             .max()
             .unwrap_or(0)
     }
 
-    /// The key's own p90 when it has enough clean runs to stand alone.
+    /// The key's p90 with enough successful measured runs to stand alone,
+    /// raised to any observed lower bound from unsuccessful attempts.
     fn trusted(&self) -> Option<Bytes> {
         let mut peaks = self.clean_peaks();
         if peaks.len() < TRUSTED {
             return None;
         }
-        p90(&mut peaks).map(|p| p.max(self.flagged_floor()))
+        p90(&mut peaks).map(|p| p.max(self.observed_floor()))
     }
 
     pub fn p90(&self) -> Option<Bytes> {
         p90(&mut self.clean_peaks())
     }
 
-    /// Nearest-rank p10/p90 of at least three clean, measured runs with
-    /// exactly these workers. Unknown counts match only unknown counts;
+    /// Nearest-rank p10/p90 of at least three successful uninterrupted runs
+    /// measured with exactly these workers. Unknown counts match only unknown counts;
     /// worker scaling and interrupted runs cannot supply observed bounds.
     pub fn memory_range(&self, workers: Option<u32>) -> Option<MemoryRange> {
         let mut peaks: Vec<Bytes> = self
             .runs
             .iter()
-            .filter(|r| !r.flagged && r.peak > 0 && r.workers == workers)
+            .filter(|r| r.representative() && r.peak > 0 && r.workers == workers)
             .map(|r| r.peak)
             .collect();
         if peaks.len() < TRUSTED {
@@ -145,8 +155,8 @@ impl Profile {
         self.median_ms_matching(|_| true)
     }
 
-    /// Runtime at exactly this worker count. Unknown counts match only
-    /// unknown counts; memory scaling cannot predict how long a run takes.
+    /// Successful uninterrupted runtime at exactly this worker count. Unknown
+    /// counts match only unknown counts; memory scaling cannot predict runtime.
     pub fn median_ms_for_workers(&self, workers: Option<u32>) -> Option<u64> {
         self.median_ms_matching(|r| r.workers == workers)
     }
@@ -155,7 +165,7 @@ impl Profile {
         let mut d: Vec<u64> = self
             .runs
             .iter()
-            .filter(|r| !r.flagged && matches(r))
+            .filter(|r| r.representative() && matches(r))
             .map(|r| r.duration_ms)
             .collect();
         if d.is_empty() {
@@ -165,16 +175,16 @@ impl Profile {
         Some(d[(d.len() - 1) / 2])
     }
 
-    /// How peak memory grows with workers, from clean runs that recorded
-    /// their worker count. With two or more counts seen in at least
+    /// How peak memory grows with workers, from successful uninterrupted runs
+    /// that recorded their worker count. With two or more counts seen in at least
     /// `TRUSTED` runs: the least-squares slope, with the base raised until
     /// every run lies on or under the line, so it never underestimates a run
     /// it has seen. Otherwise an assumption, from the p90 at the count seen
-    /// most often. Flagged peaks can raise the base to preserve their lower
-    /// bounds, but never participate in fitting the slope.
+    /// most often. Unsuccessful or interrupted peaks raise the base to preserve
+    /// their lower bounds, but never participate in fitting the slope.
     pub fn scaling(&self) -> Option<Scaling> {
         let mut scaling = self.clean_scaling()?;
-        for run in self.runs.iter().filter(|r| r.flagged) {
+        for run in self.runs.iter().filter(|r| !r.representative()) {
             // With no worker count, no part of this lower bound can safely
             // be attributed to workers. Keep it as a fixed cost instead.
             let variable = scaling
@@ -189,7 +199,7 @@ impl Profile {
         let pts: Vec<(u32, Bytes)> = self
             .runs
             .iter()
-            .filter(|r| !r.flagged && r.peak > 0)
+            .filter(|r| r.representative() && r.peak > 0)
             .filter_map(|r| r.workers.filter(|&n| n > 0).map(|n| (n, r.peak)))
             .collect();
         let mut counts: BTreeMap<u32, usize> = BTreeMap::new();
@@ -227,7 +237,7 @@ impl Profile {
     pub fn samples(&self) -> u32 {
         self.runs
             .iter()
-            .filter(|r| !r.flagged && r.peak > 0)
+            .filter(|r| r.representative() && r.peak > 0)
             .count() as u32
     }
 }
@@ -253,8 +263,8 @@ impl Profiles {
     }
 
     /// Blend toward the best available prior while a key has few runs:
-    /// with one clean run the key's own peak weighs a third, with three it
-    /// stands alone.
+    /// with one successful measured run the key's own peak weighs a third;
+    /// with three it stands alone.
     pub fn estimate(&self, key: &str, fallback: &str, default: Bytes) -> Estimate {
         let prior = self
             .0
@@ -283,7 +293,7 @@ impl Profiles {
             None => prior,
         };
         Estimate {
-            bytes: blended.max(own.flagged_floor()),
+            bytes: blended.max(own.observed_floor()),
             samples: n,
         }
     }
@@ -352,6 +362,95 @@ mod tests {
 
     fn profile(runs: Vec<Run>) -> Profile {
         Profile { runs: runs.into() }
+    }
+
+    #[test]
+    fn unsuccessful_runs_are_not_representative_samples_or_runtime() {
+        for exit in [Some(1), Some(101), Some(124), Some(137), None] {
+            let failed = Run {
+                exit,
+                duration_ms: 1,
+                ..at(0.1, 4)
+            };
+            let mut p = profile(vec![at(2.0, 4), at(4.0, 4), failed.clone()]);
+            assert_eq!(p.samples(), 2);
+            assert_eq!(p.trusted(), None);
+            assert_eq!(p.memory_range(Some(4)), None);
+            assert_eq!(p.median_ms(), Some(1000));
+            assert_eq!(p.median_ms_for_workers(Some(4)), Some(1000));
+            p.runs.push_back(at(3.0, 4));
+            assert_eq!(p.memory_range(Some(4)).unwrap().samples, 3);
+            assert_eq!(p.memory_range(Some(4)).unwrap().lower, 2 * GIB);
+            assert_eq!(p.p90(), Some(4 * GIB));
+
+            let only_failed = profile(vec![failed; 3]);
+            assert_eq!(only_failed.samples(), 0);
+            assert_eq!(only_failed.p90(), None);
+            assert_eq!(only_failed.median_ms(), None);
+            assert_eq!(only_failed.median_ms_for_workers(Some(4)), None);
+            assert_eq!(only_failed.scaling(), None);
+        }
+    }
+
+    #[test]
+    fn failed_peaks_raise_memory_floors_without_becoming_fresh_evidence() {
+        for successes in [0, 1, 3] {
+            let mut p = Profiles::default();
+            for _ in 0..successes {
+                p.record("k", "f", at(2.0, 4));
+            }
+            p.record(
+                "k",
+                "f",
+                Run {
+                    exit: Some(101),
+                    ..at(8.0, 4)
+                },
+            );
+            assert_eq!(p.estimate("k", "f", DEF).bytes, 8 * GIB);
+            assert_eq!(p.estimate("k", "f", DEF).samples, successes);
+            assert!(p.estimate_for_workers("k", "f", DEF, Some(4)).bytes >= 8 * GIB);
+            let own = p.get("k").unwrap();
+            assert_eq!(own.p90(), (successes > 0).then_some(2 * GIB));
+            assert_eq!(own.trusted(), (successes >= 3).then_some(8 * GIB));
+            if successes >= 3 {
+                assert_eq!(p.estimate("new", "f", DEF).bytes, 8 * GIB);
+            }
+        }
+        let mut p = Profiles::default();
+        for _ in 0..3 {
+            p.record("k", "f", run(4.0));
+        }
+        p.record(
+            "k",
+            "f",
+            Run {
+                exit: Some(1),
+                ..run(0.1)
+            },
+        );
+        assert_eq!(p.estimate("k", "f", DEF).bytes, 4 * GIB);
+        assert_eq!(p.estimate("k", "f", DEF).samples, 3);
+    }
+
+    #[test]
+    fn unsuccessful_peaks_raise_scaling_without_fitting_the_slope() {
+        for workers in [Some(2), None] {
+            let mut p = profile(vec![at(8.0, 8), at(5.0, 4), at(3.5, 2)]);
+            let before = p.scaling().unwrap();
+            p.runs.push_back(Run {
+                exit: Some(1),
+                workers,
+                ..run(9.0)
+            });
+            let after = p.scaling().unwrap();
+            assert_eq!(after.per_worker, before.per_worker);
+            assert_eq!(p.samples(), 3);
+            assert!(after.at(workers.unwrap_or(0)) >= 9 * GIB);
+            for n in 1..=8 {
+                assert!(after.at(n) >= before.at(n));
+            }
+        }
     }
 
     #[test]

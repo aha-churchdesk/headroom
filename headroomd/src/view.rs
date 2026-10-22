@@ -194,7 +194,7 @@ fn profile_parts(p: &Profile, own: &str) -> Vec<Value> {
             e.runs += 1;
             e.peak = e.peak.max(part.peak);
             e.procs = e.procs.max(part.procs);
-            if !r.flagged {
+            if r.representative() {
                 e.secs.push(part.samples);
             }
         }
@@ -343,7 +343,7 @@ pub fn state(l: &Listing, x: &Extras) -> Value {
             let peaks: Vec<Bytes> = p
                 .runs
                 .iter()
-                .filter(|r| !r.flagged && r.peak > 0)
+                .filter(|r| r.representative() && r.peak > 0)
                 .map(|r| r.peak)
                 .collect();
             // This summarizes observed peaks. Scheduling can reserve more at
@@ -354,7 +354,7 @@ pub fn state(l: &Listing, x: &Extras) -> Value {
                 json!({
                     "peaks": peaks,
                     "p90": est.bytes,
-                    "median_s": p.median_ms().map_or(0, secs),
+                    "median_s": p.median_ms().map(secs),
                     "samples": p.samples(),
                     "runs": p.runs.len(),
                     "parts": profile_parts(p, k.rsplit('|').next().unwrap_or("")),
@@ -632,16 +632,16 @@ mod tests {
     }
 
     #[test]
-    fn inner_runtime_ignores_flagged_runs_but_keeps_their_observed_peaks() {
+    fn inner_runtime_ignores_unsuccessful_runs_but_keeps_their_observed_peaks() {
         use headroom_core::model::Part;
         use headroom_core::profile::Run;
         let p = Profile {
-            runs: [(30, false), (600, true), (900, true)]
+            runs: [(30, false, 0), (600, false, 1), (900, true, 0)]
                 .into_iter()
-                .map(|(samples, flagged)| Run {
+                .map(|(samples, flagged, exit)| Run {
                     peak: samples as Bytes,
                     duration_ms: samples as u64 * 1000,
-                    exit: Some(0),
+                    exit: Some(exit),
                     flagged,
                     at: 0,
                     workers: None,
@@ -660,7 +660,7 @@ mod tests {
         assert_eq!(rows[0]["runs"], 3);
         assert_eq!(rows[0]["peak"], 900);
         let flagged = Profile {
-            runs: p.runs.into_iter().filter(|r| r.flagged).collect(),
+            runs: p.runs.into_iter().filter(|r| !r.representative()).collect(),
         };
         let rows = profile_parts(&flagged, "git push");
         assert!(rows[0]["median_s"].is_null());
@@ -691,10 +691,11 @@ mod tests {
         use headroom_core::profile::Run;
         let (cfg, mut p, d) = (Config::default(), Profiles::default(), HashSet::new());
         let key = "/r|vitest run";
-        for (peak, flagged, duration_ms) in [
-            (0, false, 1_000),
-            (4 * GIB, false, 3_000),
-            (8 * GIB, true, 9_000),
+        for (peak, flagged, duration_ms, exit) in [
+            (0, false, 1_000, 0),
+            (4 * GIB, false, 3_000, 0),
+            (8 * GIB, true, 9_000, 0),
+            (6 * GIB, false, 500, 1),
         ] {
             p.record(
                 key,
@@ -703,7 +704,7 @@ mod tests {
                     peak,
                     flagged,
                     duration_ms,
-                    exit: Some(0),
+                    exit: Some(exit),
                     at: 0,
                     workers: Some(2),
                     parts: vec![],
@@ -714,7 +715,7 @@ mod tests {
         let profile = &v["profiles"][key];
         assert_eq!(profile["peaks"], json!([4 * GIB]));
         assert_eq!(profile["samples"], 1);
-        assert_eq!(profile["runs"], 3);
+        assert_eq!(profile["runs"], 4);
         assert_eq!(profile["median_s"], 1, "unmeasured durations still count");
         assert_eq!(
             profile["p90"],
@@ -740,6 +741,25 @@ mod tests {
         assert_eq!(v["profiles"][key]["peaks"], json!([]));
         assert_eq!(v["profiles"][key]["samples"], 0);
         assert_eq!(v["profiles"][key]["runs"], 1);
+
+        let mut failed = Profiles::default();
+        failed.record(
+            key,
+            key,
+            Run {
+                peak: 6 * GIB,
+                flagged: false,
+                duration_ms: 500,
+                exit: Some(1),
+                at: 0,
+                workers: None,
+                parts: vec![],
+            },
+        );
+        let v = state(&listing(), &extras(&cfg, &failed, &d));
+        assert!(v["profiles"][key]["median_s"].is_null());
+        assert_eq!(v["profiles"][key]["peaks"], json!([]));
+        assert_eq!(v["profiles"][key]["p90"], 6 * GIB);
     }
 
     #[test]
