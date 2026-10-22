@@ -38,6 +38,10 @@ def listing():
 def until(what, predicate, seconds=5):
     end = time.monotonic() + seconds
     while time.monotonic() < end:
+        # Readline can fill the PTY with redisplay output before executing a
+        # command, especially with TERM=dumb. Keep draining while polling the
+        # daemon, and retain the bytes for the next terminal assertion.
+        drain_terminal()
         result = predicate()
         if result:
             return result
@@ -51,16 +55,23 @@ if pid == 0:
     os.execv("/bin/bash", ["bash", "--noprofile", "--norc", "-i"])
 
 groups = set()
+pending_terminal = bytearray()
+
+
+def drain_terminal(timeout=0):
+    if terminal is None:
+        return
+    ready, _, _ = select.select([terminal], [], [], timeout)
+    if ready:
+        pending_terminal.extend(os.read(terminal, 65536))
 
 
 def read_for(seconds=0.15):
-    output = b""
     end = time.monotonic() + seconds
     while time.monotonic() < end:
-        ready, _, _ = select.select([terminal], [], [], max(0, end - time.monotonic()))
-        if not ready:
-            break
-        output += os.read(terminal, 65536)
+        drain_terminal(max(0, end - time.monotonic()))
+    output = bytes(pending_terminal)
+    pending_terminal.clear()
     return output
 
 
@@ -203,6 +214,9 @@ try:
     shell_prompt()
     until("terminal cancellation job exit", lambda: not listing()["running"])
     until("detached worker cancellation after grace", lambda: not ps("stat", detached))
+except BaseException:
+    print("Pending terminal output:", repr(read_for()), file=sys.stderr)
+    raise
 finally:
     # Keep cleanup bounded even if an assertion fails with a stopped wrapper.
     for job in listing()["running"]:
@@ -223,4 +237,5 @@ finally:
     except ProcessLookupError:
         pass
     os.close(terminal)
+    terminal = None
     until("shell cleanup", lambda: os.waitpid(pid, os.WNOHANG)[0])

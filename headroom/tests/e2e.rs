@@ -692,13 +692,13 @@ fn wrapper_cancellation_reaches_detached_groups_and_keeps_grace_escalation() {
     }
 }
 
-#[test]
-fn terminal_job_control_stops_and_resumes_the_wrapper_with_its_child() {
-    let d = Daemon::start("terminal-control", quick());
+fn terminal_job_control_case(name: &str, term: &str) {
+    let d = Daemon::start(name, quick());
     let out = Command::new("python3")
         .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/job_control.py"))
         .arg(BIN)
         .env("HEADROOM_HOME", &d.home)
+        .env("TERM", term)
         .env_remove("HEADROOM_JOB")
         .output()
         .unwrap();
@@ -708,6 +708,16 @@ fn terminal_job_control_stops_and_resumes_the_wrapper_with_its_child() {
         text(&out.stdout),
         text(&out.stderr)
     );
+}
+
+#[test]
+fn terminal_job_control_stops_and_resumes_the_wrapper_with_its_child() {
+    terminal_job_control_case("terminal-control", "xterm-256color");
+}
+
+#[test]
+fn terminal_job_control_works_with_a_dumb_terminal() {
+    terminal_job_control_case("terminal-dumb", "dumb");
 }
 
 fn runtime_lifecycle_case(case: &str) {
