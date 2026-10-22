@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use headroom_core::config::Config;
 use headroom_core::hookio::Agent;
@@ -23,6 +23,7 @@ use headroom_core::tally::Tally;
 use serde_json::Value;
 
 use crate::bridge::{self, Do, UiCmd};
+use crate::hook_refresh::HookVerification;
 use crate::view::{self, AppUsage, Extras, Login};
 use crate::{login, sample};
 
@@ -57,6 +58,7 @@ pub struct App {
     tally: Tally,
     others: Vec<AppUsage>,
     hooks: Vec<(&'static str, &'static str)>,
+    hook_verification: HookVerification,
     login: Login,
     listing: Option<Listing>,
     attached: bool,
@@ -113,6 +115,7 @@ impl App {
             classify: None,
             others: Vec::new(),
             hooks: Vec::new(),
+            hook_verification: HookVerification::default(),
             login: Login::Off,
             listing: None,
             attached: false,
@@ -185,6 +188,14 @@ impl App {
 
     pub fn refresh_hooks(&mut self) {
         self.hooks = hook_states(&self.home, &self.cli);
+        if let Some((_, state)) = self.hooks.iter_mut().find(|(agent, _)| *agent == "codex") {
+            *state = self.hook_verification.refresh(
+                &self.home.join(".codex/hooks.json"),
+                &self.cli,
+                state,
+                Instant::now(),
+            );
+        }
     }
 
     /// Whether the queue this app shows runs in another headroomd.

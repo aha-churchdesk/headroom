@@ -1023,11 +1023,20 @@ fn codex_hook_capture_and_review_status_use_a_scratch_home() {
     assert!(output.status.success() && output.stdout.is_empty());
 
     std::fs::create_dir_all(home.join(".codex")).unwrap();
+    // Exercise unavailable verification without launching an installed Codex.
+    let unavailable_codex = home.join("codex");
+    std::fs::write(&unavailable_codex, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(
+        &unavailable_codex,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
     let run = |action: &str| {
         Command::new(BIN)
             .args(["hook", action, "--agent", "codex"])
             .env("HOME", &home)
             .env("HEADROOM_HOME", &home)
+            .env("PATH", &home)
             .output()
             .unwrap()
     };
@@ -1041,6 +1050,85 @@ fn codex_hook_capture_and_review_status_use_a_scratch_home() {
     std::fs::write(&config, disabled).unwrap();
     assert!(text(&run("status").stdout).contains("disabled"));
     assert_eq!(std::fs::read_to_string(config).unwrap(), disabled);
+}
+
+#[test]
+fn codex_hook_status_verifies_current_metadata_without_changing_approval() {
+    let home = tmp("codex-verified-status");
+    let codex = home.join(".codex");
+    let bin = home.join("bin");
+    std::fs::create_dir_all(&codex).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    let script = bin.join("codex");
+    std::fs::write(&script, r#"#!/usr/bin/env python3
+import json, os, pathlib, sys
+root = pathlib.Path(os.environ['CODEX_HOME'])
+mode = (pathlib.Path(__file__).parent / 'mode').read_text()
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req['method']
+    if method == 'initialized':
+        continue
+    if method == 'initialize':
+        result = {'codexHome': str(root)}
+    elif method == 'hooks/list':
+        source = root / 'hooks.json'
+        command = json.loads(source.read_text())['hooks']['PreToolUse'][0]['hooks'][0]['command']
+        hook = {'source': 'project' if mode == 'wrong-source' else 'user',
+                'sourcePath': str(source), 'key': str(source) + ':pre_tool_use:0:0',
+                'eventName': 'preToolUse', 'handlerType': 'command', 'command': command,
+                'enabled': True, 'trustStatus': 'modified' if mode == 'modified' else 'trusted',
+                'currentHash': 'sha256:fixture'}
+        result = {'data': [{'cwd': req['params']['cwds'][0], 'errors': [], 'warnings': [], 'hooks': [hook]}]}
+    elif method == 'experimentalFeature/list':
+        result = {'data': [{'name': 'hooks', 'enabled': True}], 'nextCursor': None}
+    else:
+        raise RuntimeError('Unexpected request: ' + method)
+    print(json.dumps({'id': req['id'], 'result': result}), flush=True)
+"#).unwrap();
+    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let mut paths = vec![bin.clone()];
+    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+    let path = std::env::join_paths(paths).unwrap();
+    let run = |action: &str| {
+        Command::new(BIN)
+            .args(["hook", action, "--agent", "codex"])
+            .env("HOME", &home)
+            .env("HEADROOM_HOME", &home)
+            .env("PATH", &path)
+            .output()
+            .unwrap()
+    };
+    assert!(run("install").status.success());
+    let source = codex.join("hooks.json");
+    let config = codex.join("config.toml");
+    let key = format!("{}:pre_tool_use:0:0", source.display());
+    std::fs::write(
+        &config,
+        format!(
+            "[features]\nhooks = true\n[hooks.state.{}]\ntrusted_hash = 'fixture'\n",
+            serde_json::to_string(&key).unwrap()
+        ),
+    )
+    .unwrap();
+    let hooks_before = std::fs::read(&source).unwrap();
+    let config_before = std::fs::read(&config).unwrap();
+    for (mode, expected) in [
+        ("trusted", "approved"),
+        ("modified", "needs review"),
+        ("wrong-source", "check in Codex"),
+    ] {
+        std::fs::write(bin.join("mode"), mode).unwrap();
+        let output = run("status");
+        assert!(output.status.success());
+        assert!(
+            text(&output.stdout).contains(expected),
+            "{mode}: {}",
+            text(&output.stdout)
+        );
+        assert_eq!(std::fs::read(&source).unwrap(), hooks_before);
+        assert_eq!(std::fs::read(&config).unwrap(), config_before);
+    }
 }
 
 #[test]

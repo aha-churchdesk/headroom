@@ -890,7 +890,7 @@ test('Codex hook notices distinguish approval, unknown trust, and disabled hooks
     ['needs_review', 'hook needs approval in /hooks', 'Codex needs review',
       'Open /hooks in Codex to approve the Headroom hook before it runs.'],
     ['review_unknown', 'check hook approval in /hooks', 'Codex check in Codex',
-      'A trust record exists. Open /hooks in Codex to confirm it matches the current Headroom hook.'],
+      'Headroom could not verify the current hook approval. Open /hooks in Codex to check it.'],
     ['disabled', 'hook disabled', 'Codex disabled',
       'Disabled in Codex. Check /hooks and the hook settings under [features] in ~/.codex/config.toml'],
   ];

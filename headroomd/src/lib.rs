@@ -3,6 +3,7 @@
 pub mod app;
 pub mod bridge;
 pub mod daemon;
+mod hook_refresh;
 pub mod login;
 pub mod sample;
 pub mod server;

@@ -1105,7 +1105,7 @@ const HOOK_STATUS = {
   installed:     ["ok",   "installed",     "Gated through {where}."],
   not_installed: ["fail", "not installed", "Run <span class=\"mono\">headroom hook install</span>; it adds only its own entry to {where}.", "hook not installed"],
   needs_review:  ["guard","needs review",  "Installed in {where}. Open <span class=\"mono\">/hooks</span> in Codex to approve the Headroom hook before it runs.", "hook needs approval in /hooks"],
-  review_unknown:["guard","check in Codex", "A trust record exists. Open <span class=\"mono\">/hooks</span> in Codex to confirm it matches the current Headroom hook.", "check hook approval in /hooks"],
+  review_unknown:["guard","check in Codex", "Headroom could not verify the current hook approval. Open <span class=\"mono\">/hooks</span> in Codex to check it.", "check hook approval in /hooks"],
   disabled:      ["guard","disabled", "Disabled in Codex. Check <span class=\"mono\">/hooks</span> and the hook settings under <span class=\"mono\">[features]</span> in <span class=\"mono\">~/.codex/config.toml</span>.", "hook disabled"],
   stale:         ["guard","stale path",    "{where} points at a headroom binary that is gone. Re-run <span class=\"mono\">headroom hook install</span>.", "hook path is stale"],
   absent:        ["user", "not found",     ""],

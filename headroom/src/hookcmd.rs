@@ -80,7 +80,10 @@ pub fn manage(action: &str, t: &Target) -> i32 {
             "install" => hooksettings::install(agent, &path, &exe, t.dry_run).map(Some),
             "uninstall" => hooksettings::uninstall(agent, &path, t.dry_run).map(Some),
             _ => {
-                match hooksettings::status(agent, &path, &exe) {
+                match hooksettings::verified_status(agent, &path, &exe) {
+                    Ok(Status::Installed) if agent == Agent::Codex => {
+                        println!("{name:<7}approved       {shown}")
+                    }
                     Ok(Status::Installed) => println!("{name:<7}installed      {shown}"),
                     Ok(Status::NeedsReview) => {
                         println!("{name:<7}needs review   {shown}; open /hooks in Codex")
@@ -89,7 +92,7 @@ pub fn manage(action: &str, t: &Target) -> i32 {
                         "{name:<7}disabled       {shown}; check /hooks and ~/.codex/config.toml"
                     ),
                     Ok(Status::ReviewStatusUnknown) => println!(
-                        "{name:<7}check in Codex {shown}; approval recorded, confirm current hook in /hooks"
+                        "{name:<7}check in Codex {shown}; current approval could not be verified, check /hooks"
                     ),
                     Ok(Status::NotInstalled) => println!("{name:<7}not installed  {shown}"),
                     Ok(Status::Stale { exe: old }) => {
