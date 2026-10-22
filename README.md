@@ -43,7 +43,7 @@ cd headroom
 
 That builds `Headroom.app` into `/Applications`, links the CLI to `~/.local/bin/headroom` (`--bin DIR` for elsewhere), starts the app now and at login, and installs the agent hooks. Leave out `--login` or `--hooks` to do those yourself later. It never edits your shell config; if the bin directory isn't on your PATH it prints the line to add. Run it again after `git pull` to upgrade. `./scripts/install.sh --uninstall` removes the hooks, the login item, the link and the app, and keeps your learned profiles.
 
-To install a bundle you have already built and tested, run `./scripts/install.sh --bundle ./Headroom.app`. Updates stage and verify the replacement before stopping the installed app, refuse to restart a busy queue, and preserve the existing login registration. If replacement fails, the previous bundle is restored. The idle check happens immediately before shutdown; a new job arriving between those steps can still lose its queue connection and run directly.
+To install a bundle you have already built and tested, run `./scripts/install.sh --bundle ./Headroom.app`. Updates stage and verify the replacement before stopping the installed app, refuse to restart a busy queue, and preserve the existing login registration. The installer checks that the app is running and its queue responds before reporting success. If replacement fails, it restores the previous bundle when safe. If the new app has accepted jobs or its state cannot be checked, it keeps both bundles and reports the backup path. The idle check happens immediately before shutdown; a new job arriving between those steps can still lose its queue connection and run directly.
 
 Homebrew:
 

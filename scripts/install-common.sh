@@ -67,12 +67,30 @@ hr_stop() {
   return 1
 }
 
+hr_wait_started() {
+  local deadline=$((SECONDS + 10)) pids
+  # A successful launch command does not mean macOS executed the app. Require
+  # its exact process and a live socket response. Jobs may already be arriving.
+  # The CLI's five-second response timeout can extend the deadline by that much.
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    pids=$(hr_pids) || return 1
+    if [ -n "$pids" ] && "$HR_APP/Contents/MacOS/headroom" ls >/dev/null 2>&1; then
+      pids=$(hr_pids) || return 1
+      [ -z "$pids" ] || return 0
+    fi
+    sleep 0.1
+  done
+  hr_error "the installed daemon did not respond after launch"
+  return 1
+}
+
 hr_restart() {
   if launchctl print "$HR_SERVICE" >/dev/null 2>&1; then
-    launchctl kickstart "$HR_SERVICE"
-  else
-    open -a "$HR_APP"
+    if launchctl kickstart "$HR_SERVICE" && hr_wait_started; then return 0; fi
+    hr_error "registered service did not start; trying the installed app directly"
   fi
+  open -a "$HR_APP" || return 1
+  hr_wait_started
 }
 
 hr_validate_bundle() {
@@ -100,7 +118,16 @@ hr_install_bundle() (
     local status=$?
     trap - EXIT HUP INT TERM
     if [ "$committed" -eq 0 ]; then
-      if [ "$installed" -eq 1 ]; then rm -rf "$HR_APP"; fi
+      if [ "$installed" -eq 1 ]; then
+        # The replacement may have started accepting jobs even if its health
+        # check failed. Never remove it under a busy or unresponsive daemon.
+        if ! hr_stop; then
+          hr_error "cannot safely roll back; keeping $HR_APP and the previous app at $backup/Headroom.app"
+          [ -z "$stage" ] || rm -rf "$stage"
+          return 1
+        fi
+        rm -rf "$HR_APP"
+      fi
       if [ -n "$backup" ] && [ -e "$backup/Headroom.app" ]; then
         if ! mv "$backup/Headroom.app" "$HR_APP"; then
           hr_error "restore failed; previous app is at $backup/Headroom.app"

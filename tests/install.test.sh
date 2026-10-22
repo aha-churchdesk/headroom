@@ -24,6 +24,8 @@ kill() {
   touch "$TEST_WORK/stopping"
 }
 sleep() {
+  # Advance the startup deadline without waiting in tests.
+  SECONDS=$((SECONDS + 1))
   if [ -f "$TEST_WORK/stopping" ]; then
     local count
     count=$(cat "$TEST_WORK/sleeps")
@@ -33,6 +35,14 @@ sleep() {
       : > "$TEST_WORK/processes"
     fi
   fi
+}
+simulate_start() {
+  rm -f "$TEST_WORK/stopping"
+  if [ "$(cat "$HR_APP/version")" = new ]; then
+    [ ! -f "$TEST_WORK/no-process" ] || return 0
+    if [ "$1" = kickstart ] && [ -f "$TEST_WORK/kickstart-no-process" ]; then return 0; fi
+  fi
+  printf '%s 12345 %s/Contents/MacOS/headroomd\n' "$(id -u)" "$HR_APP" > "$TEST_WORK/processes"
 }
 codesign() {
   echo "$*" >> "$TEST_WORK/signing"
@@ -49,7 +59,7 @@ launchctl() {
   echo "$*" >> "$TEST_WORK/launch"
   case "$1" in
     print) [ -f "$TEST_WORK/registered" ] ;;
-    kickstart) [ ! -f "$TEST_WORK/restart-fail" ] ;;
+    kickstart) [ ! -f "$TEST_WORK/restart-fail" ] || return 1; simulate_start kickstart ;;
     *) fail "unexpected launchctl: $*" ;;
   esac
 }
@@ -57,6 +67,7 @@ open() {
   [ "$1" = -a ] && [ "$2" = "$HR_APP" ] || fail "wrong app opened: $*"
   echo "$(cat "$HR_APP/version")" >> "$TEST_WORK/opens"
   if [ -f "$TEST_WORK/restart-fail" ] && [ "$(cat "$HR_APP/version")" = new ]; then return 1; fi
+  simulate_start open
 }
 
 fixture() {
@@ -67,7 +78,21 @@ fixture() {
   mkdir -p "$HR_APP/Contents/MacOS" "$TEST_WORK/user"
   printf 'old\n' > "$HR_APP/version"
   printf '<plist/>\n' > "$HR_APP/Contents/Info.plist"
-  printf '#!/bin/bash\ncat "$TEST_WORK/listing"\n[ ! -f "$TEST_WORK/list-fail" ]\n' > "$HR_APP/Contents/MacOS/headroom"
+  cat > "$HR_APP/Contents/MacOS/headroom" <<'CLI'
+#!/bin/bash
+if [ "$(cat "$TEST_WORK/apps/Headroom.app/version")" = new ]; then
+  [ ! -f "$TEST_WORK/new-list-fail" ] || exit 1
+  if [ -f "$TEST_WORK/new-busy-after" ]; then
+    count=$(cat "$TEST_WORK/list-attempts")
+    count=$((count + 1))
+    echo "$count" > "$TEST_WORK/list-attempts"
+    [ "$count" -gt "$(cat "$TEST_WORK/new-busy-after")" ] || exit 1
+  fi
+  if [ -f "$TEST_WORK/new-listing" ]; then cat "$TEST_WORK/new-listing"; exit 0; fi
+fi
+cat "$TEST_WORK/listing"
+[ ! -f "$TEST_WORK/list-fail" ]
+CLI
   printf '#!/bin/bash\nexit 0\n' > "$HR_APP/Contents/MacOS/headroomd"
   chmod +x "$HR_APP/Contents/MacOS/"*
   command cp -R "$HR_APP" "$TEST_WORK/new.app"
@@ -75,6 +100,7 @@ fixture() {
   printf 'memory   test\nrunning  0\nqueued   0\n' > "$TEST_WORK/listing"
   printf '%s 12345 %s/Contents/MacOS/headroomd\n' "$(id -u)" "$HR_APP" > "$TEST_WORK/processes"
   echo 0 > "$TEST_WORK/sleeps"
+  echo 0 > "$TEST_WORK/list-attempts"
   echo 1 > "$TEST_WORK/exit-after"
   echo 'custom login config' > "$HR_PLIST"
 }
@@ -163,6 +189,42 @@ registered() {
   [ "$(cat "$HR_PLIST")" = 'custom login config' ] || fail 'changed login config'
   assert_clean
 }
+registered_fallback() {
+  touch "$TEST_WORK/registered" "$TEST_WORK/kickstart-no-process"
+  hr_install_bundle "$TEST_WORK/new.app" > "$TEST_WORK/output" 2>&1
+  grep -qx "kickstart $HR_SERVICE" "$TEST_WORK/launch" || fail 'service launch not attempted'
+  [ "$(cat "$TEST_WORK/opens")" = new ] || fail 'did not recover through exact-app open'
+  [ "$(cat "$HR_APP/version")" = new ] || fail 'replacement missing'
+  assert_clean
+}
+startup_absent() {
+  touch "$TEST_WORK/no-process"
+  expect_failure; assert_old; assert_clean
+  [ "$(cat "$TEST_WORK/opens")" = $'new\nold' ] || fail 'failed startup did not restore old app'
+}
+assert_retained() {
+  local backup
+  [ "$(cat "$HR_APP/version")" = new ] || fail 'removed replacement beneath live process'
+  backup=$(find "$TEST_WORK/apps" -path '*/.headroom-backup.*/Headroom.app/version' -print)
+  [ -n "$backup" ] && [ "$(cat "$backup")" = old ] || fail 'previous app not retained'
+  [ "$(cat "$TEST_WORK/signals")" = '-TERM 12345' ] || fail 'signalled replacement with unknown or busy queue'
+  grep -q 'cannot safely roll back' "$TEST_WORK/output" || fail 'missing recovery instruction'
+}
+startup_unknown() {
+  touch "$TEST_WORK/new-list-fail"
+  expect_failure; assert_retained
+}
+startup_busy_rollback() {
+  echo 10 > "$TEST_WORK/new-busy-after"
+  printf 'memory   test\nrunning  1\nqueued   0\n' > "$TEST_WORK/new-listing"
+  expect_failure; assert_retained
+}
+startup_busy_healthy() {
+  printf 'memory   test\nrunning  1\nqueued   0\n' > "$TEST_WORK/new-listing"
+  hr_install_bundle "$TEST_WORK/new.app" > "$TEST_WORK/output" 2>&1
+  [ "$(cat "$HR_APP/version")" = new ] || fail 'rejected healthy busy replacement'
+  assert_clean
+}
 relative_bundle() {
   local repo="$TEST_WORK/repo" caller="$TEST_WORK/caller" status
   mkdir -p "$repo/scripts" "$caller/release builds" "$TEST_WORK/stubs"
@@ -187,6 +249,6 @@ STUB
   [ "$(cat "$TEST_WORK/bundle-argument")" = "$caller/release builds/Headroom.app" ] || fail 'bundle path resolved outside caller directory'
   assert_old; assert_no_signal
 }
-for name in busy queued unknown unreachable custom_home process_failure near_matches delayed_exit timeout stage_failure sign_failure rollback restart_rollback registered relative_bundle; do
+for name in busy queued unknown unreachable custom_home process_failure near_matches delayed_exit timeout stage_failure sign_failure rollback restart_rollback registered registered_fallback startup_absent startup_unknown startup_busy_rollback startup_busy_healthy relative_bundle; do
   run_case "$name" "$name"
 done
