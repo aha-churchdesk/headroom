@@ -251,6 +251,7 @@ fn job_json(j: &Job, now: u64, cfg: &Config, profiles: &Profiles) -> Value {
         "runaway_at": j.runaway_at(cfg.runaway_factor, cfg.runaway_cap),
         "elapsed_s": j.started_at.map_or(0, |t| secs(now.saturating_sub(t))),
         "frozen_s": j.frozen_at.map_or(0, |t| secs(now.saturating_sub(t))),
+        "frozen_by": j.frozen_by,
         "waited_s": secs(j.started_at.unwrap_or(now).saturating_sub(j.enqueued_at)),
         "cpu_pct": j.cpu_pct,
         "procs": j.procs,
@@ -323,6 +324,7 @@ fn banners(l: &Listing, x: &Extras) -> Vec<Value> {
 pub fn state(l: &Listing, x: &Extras) -> Value {
     let s = &l.snapshot;
     let cfg = x.cfg;
+    let growth = headroom_core::admission::pending_growth(&l.running.iter().collect::<Vec<_>>());
     let mut keys: Vec<&str> = l
         .running
         .iter()
@@ -399,6 +401,10 @@ pub fn state(l: &Listing, x: &Extras) -> Value {
             "cpu_pct": s.cpu_pct,
         },
         "held": l.held,
+        "queue_budget": {
+            "growth": growth,
+            "available": s.mem_available.saturating_sub(cfg.headroom).saturating_sub(growth),
+        },
         "hooks": hooks,
         "queue_reason": l.blocked,
         "running": l.running.iter().map(|j| job_json(j, l.now, cfg, x.profiles)).collect::<Vec<_>>(),
@@ -561,6 +567,25 @@ mod tests {
             login: Login::Brew,
             attached: false,
         }
+    }
+
+    #[test]
+    fn queue_budget_reserves_growth_only_for_running_jobs_and_never_goes_negative() {
+        let mut l = listing();
+        let cfg = Config::default();
+        let profiles = Profiles::default();
+        let dismissed = HashSet::new();
+        l.snapshot.mem_available = cfg.headroom + 6 * GIB;
+        l.running[0].estimate = 12 * GIB;
+        l.running[0].footprint = 2 * GIB;
+        let v = state(&l, &extras(&cfg, &profiles, &dismissed));
+        assert_eq!(v["queue_budget"]["growth"], 0);
+        assert_eq!(v["queue_budget"]["available"], 6 * GIB);
+        assert_eq!(v["running"][0]["frozen_by"], "guard");
+        l.running[0].state = JobState::Running;
+        let v = state(&l, &extras(&cfg, &profiles, &dismissed));
+        assert_eq!(v["queue_budget"]["growth"], 10 * GIB);
+        assert_eq!(v["queue_budget"]["available"], 0);
     }
 
     #[test]

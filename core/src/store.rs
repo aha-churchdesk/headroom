@@ -110,8 +110,12 @@ impl Store {
     }
 
     fn save<T: Serialize>(&self, name: &str, value: &T) -> io::Result<()> {
-        let path = self.root.join(name);
         let body = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
+        self.save_bytes(name, &body)
+    }
+
+    fn save_bytes(&self, name: &str, body: &[u8]) -> io::Result<()> {
+        let path = self.root.join(name);
         // Hooks can save newly adopted defaults at the same time as the
         // daemon. Each writer must own its temporary file until rename.
         let (tmp, mut file) = loop {
@@ -130,7 +134,7 @@ impl Store {
             }
         };
         let result = (|| {
-            file.write_all(&body)?;
+            file.write_all(body)?;
             drop(file);
             fs::rename(&tmp, &path)
         })();
@@ -182,6 +186,76 @@ impl Store {
     pub fn save_tally(&self, t: &Tally) -> io::Result<()> {
         self.save("stats.json", t)
     }
+
+    /// Clear only learned data, including corrupt copies kept by `load`.
+    /// Preflight every path and retain original bytes so an ordinary I/O
+    /// failure can roll back the entire operation before memory is cleared.
+    pub fn clear_data(&self) -> io::Result<()> {
+        let names = [
+            "profiles.json",
+            "history.json",
+            "stats.json",
+            "profiles.json.corrupt",
+            "history.json.corrupt",
+            "stats.json.corrupt",
+            "trend.json",
+            "trend.json.corrupt",
+        ];
+        let mut before = Vec::new();
+        for name in names {
+            let path = self.root.join(name);
+            let bytes = match fs::symlink_metadata(&path) {
+                Ok(meta) if meta.is_file() => Some(fs::read(&path)?),
+                Ok(_) => {
+                    return Err(io::Error::other(format!(
+                        "cannot clear non-file {}",
+                        path.display()
+                    )));
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+                Err(e) => return Err(e),
+            };
+            before.push((name, bytes));
+        }
+        let result = (|| {
+            self.save_profiles(&Profiles::default())?;
+            self.save_history(&VecDeque::new())?;
+            self.save_tally(&Tally::default())?;
+            for (name, bytes) in &before {
+                if (name.ends_with(".corrupt") || *name == "trend.json") && bytes.is_some() {
+                    fs::remove_file(self.root.join(name))?;
+                }
+            }
+            for name in &names[..3] {
+                fs::File::open(self.root.join(name))?.sync_all()?;
+            }
+            fs::File::open(&self.root)?.sync_all()
+        })();
+        if let Err(error) = result {
+            let mut rollback_errors = Vec::new();
+            for (name, bytes) in before {
+                let restored = match bytes {
+                    Some(bytes) => self.save_bytes(name, &bytes),
+                    None => match fs::remove_file(self.root.join(name)) {
+                        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+                        _ => Ok(()),
+                    },
+                };
+                if let Err(e) = restored {
+                    rollback_errors.push(format!("{name}: {e}"));
+                }
+            }
+            return Err(io::Error::other(if rollback_errors.is_empty() {
+                format!("clear data failed; previous data restored: {error}")
+            } else {
+                format!(
+                    "clear data failed: {error}; restoration incomplete: {}",
+                    rollback_errors.join(", ")
+                )
+            }));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -193,6 +267,62 @@ mod tests {
         let p = std::env::temp_dir().join(format!("headroom-store-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&p);
         Store::at(p).unwrap()
+    }
+
+    #[test]
+    fn clear_data_removes_learned_files_and_corrupt_copies_but_keeps_settings() {
+        let s = tmp("clear-data");
+        let config = Config {
+            wait_cap_s: 123,
+            ..Config::default()
+        };
+        s.save_config(&config).unwrap();
+        for name in [
+            "profiles.json",
+            "history.json",
+            "stats.json",
+            "profiles.json.corrupt",
+            "history.json.corrupt",
+            "stats.json.corrupt",
+            "trend.json",
+            "trend.json.corrupt",
+        ] {
+            fs::write(s.root().join(name), "private old data").unwrap();
+        }
+        fs::write(s.root().join("unrelated.txt"), "keep").unwrap();
+        s.clear_data().unwrap();
+        assert_eq!(s.load_profiles(), Profiles::default());
+        assert!(s.load_history().is_empty());
+        assert_eq!(s.load_tally(), Tally::default());
+        assert_eq!(s.load_config(), config);
+        assert_eq!(
+            fs::read_to_string(s.root().join("unrelated.txt")).unwrap(),
+            "keep"
+        );
+        for name in [
+            "profiles.json.corrupt",
+            "history.json.corrupt",
+            "stats.json.corrupt",
+            "trend.json",
+            "trend.json.corrupt",
+        ] {
+            assert!(!s.root().join(name).exists());
+        }
+        s.clear_data().unwrap();
+    }
+
+    #[test]
+    fn clear_data_preflights_every_path_before_changing_any_file() {
+        let s = tmp("clear-data-refused");
+        fs::write(s.root().join("profiles.json"), "original").unwrap();
+        fs::create_dir(s.root().join("stats.json")).unwrap();
+        assert!(s.clear_data().is_err());
+        assert_eq!(
+            fs::read_to_string(s.root().join("profiles.json")).unwrap(),
+            "original"
+        );
+        assert!(!s.root().join("history.json").exists());
+        assert!(s.root().join("stats.json").is_dir());
     }
 
     #[test]

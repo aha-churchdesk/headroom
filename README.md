@@ -6,7 +6,6 @@ Headroom is a macOS menu bar app and CLI that schedules heavy development comman
 - **Live job overview.** Shows the agent behind each job, memory and CPU use, subprocesses, elapsed time, and usual runtime when known.
 - **Workload-specific estimates.** Learns memory and runtime separately for complete invocations, including package filters, test files, and build flags. Shows when history is missing or memory use varies widely.
 - **Scheduling explanations.** Shows why jobs wait and how memory availability, system pressure, CPU load, and runtime estimates affect the queue.
-- **Worker adjustment.** Can reduce parallel workers in supported tools to fit a job into available memory, while respecting explicit worker settings.
 - **Queue controls.** Hold, reorder, pin, pause, resume, or stop jobs from the menu bar. Inspect past runs and the memory used by other apps.
 
 Status: early. Apple Silicon only, ad-hoc signed, used daily by one person.
@@ -15,24 +14,12 @@ Status: early. Apple Silicon only, ad-hoc signed, used daily by one person.
 
 - **Memory, not job count.** Headroom records peak memory per repository, starting directory, and complete invocation. With at least three successful measured runs, the estimate uses their p90 peak among the last 20 attempts. Until then, it blends with broader repository history or a 1.5 GB default. Failed or interrupted peaks remain minimum memory requirements, and known worker counts can raise the estimate. A queued job normally starts when its estimate fits in available memory, minus a reserve (2 GB by default), minus what running jobs are still expected to grow into. Memory includes processes started by the job, including tasks that move to their own process groups.
 - **Pressure.** Under normal memory pressure jobs start as above. Under warn, one job may start only when nothing else of ours is running. Under critical, nothing starts.
-- **Queue order.** The queue considers its first job before later jobs. With "Short jobs go first" disabled, later jobs wait if the first does not fit. When enabled, the exception below applies. An oversized estimate can still start when Headroom has no running jobs, provided the queue is not held and memory pressure is not critical.
-- **Short jobs may go first.** Enabled by default. While the head waits on memory, a later job may start if it fits now and its typical run time says it will be done before the head could start anyway (when the running jobs are expected to finish). A job with no history never goes first. The head is passed over at most 3 times or for 5 minutes; after that the queue waits for it. The popover shows `passed over 2× · strict in 3m`.
-- **The guard.** Under sustained critical pressure the newest job gets SIGSTOP. If pressure stays critical it is killed and requeued once; a second kill gives up and the agent sees exit 137 with the reason. Low-priority jobs go first, and a job using more than twice its estimate (and over 8 GB) goes before anything else. Freezing and killing reach every process the job started. Pinned jobs and processes Headroom didn't start are never touched.
+- **Queue order.** The queue considers its first job before later jobs. With "Let smaller jobs go first" disabled, later jobs wait if the first does not fit. When enabled, the exception below applies. An oversized estimate can still start when Headroom has no running jobs, provided the queue is not held and memory pressure is not critical.
+- **Smaller jobs may go first.** Enabled by default. While the head waits on memory, a later job may start if it fits now and its typical run time says it will be done before the head could start anyway (when the running jobs are expected to finish). When either runtime is unknown, a fitting job can still pass, but it may delay the head. The head is passed over at most 3 times or for 5 minutes; after that the queue waits for it. The popover shows `passed over 2× · strict in 3m`.
+- **The guard.** Under sustained critical pressure the newest job gets SIGSTOP. If pressure stays critical it is killed and requeued once; a second kill gives up and the agent sees exit 137 with the reason. Low-priority jobs go first, and a job using more than twice its estimate (and over 8 GB) goes before anything else. Freezing and killing reach every process the job started. Pinned jobs and processes Headroom didn't start are never touched. A small estimate overrun alone does not trigger a freeze; the runaway threshold respects fallback estimates too. After pressure stabilizes, the guard resumes jobs automatically. At warn, it resumes only one non-runaway job when no other work is running and available memory covers the reserve and its expected growth. Manually paused jobs wait for you to resume them.
 - **Fail open.** If the daemon isn't running or stops answering, `headroom run` runs the command directly. Headroom can slow a command down; it can't stop one from running.
 
-## Shrinking a job to fit
-
-Vitest, turbo and cargo run work concurrently, and memory use can grow with the worker count. When the next job doesn't fit, Headroom can start it with fewer workers instead of making it wait. The agent sees one line saying so: `starting with 6 vitest workers instead of 14 so it fits in memory`.
-
-| Tool | How | Default it assumes |
-|---|---|---|
-| vitest | `VITEST_MAX_WORKERS` | cores - 1 |
-| turbo | `--concurrency=N` appended to the command | 10 |
-| cargo | `CARGO_BUILD_JOBS` | cores |
-
-It is found in the command itself or behind an npm script (`pnpm test` running `vitest run`). Headroom leaves the count alone when you chose one yourself: a flag in the command or script (`--maxWorkers`, `--concurrency`, `-j`), the environment variable, or a parallelism setting in `vitest.config.*`, `vite.config.*` or `.cargo/config.toml`. It never goes below 2 workers, because one worker can change how a test suite behaves and not only how fast it runs.
-
-Runs record worker counts when Headroom can determine them. With successful measured runs at two or more counts, peak memory is fitted as a line in the worker count, kept above the observations; failed or interrupted peaks can raise that allowance. Before that, a quarter of the peak is assumed to be fixed cost. A command with no history is never tuned. Turn it off in Settings ("Shrink jobs to fit"), or for one tool or repository with `"tune_off": ["turbo", "/path/to/repo"]` in `config.json`.
+Headroom preserves each command's worker settings. It controls when commands start and does not change their parallelism.
 
 A foreground command waits at most 8 minutes in the queue (under the 10 minute limit of Claude Code's Bash tool), then exits 75 with "still queued, try again later". The hook raises the Bash tool's timeout by the time it may spend queued.
 
@@ -166,7 +153,7 @@ claude mcp add headroom -- headroom mcp
 
 ## Files
 
-Everything lives in `~/Library/Application Support/dev.headroom/` (or `$HEADROOM_HOME`): `config.json`, `profiles.json`, `history.json`, `stats.json` (the Commands page's totals) and the daemon's socket. Delete `profiles.json` to forget what Headroom has learned.
+Everything lives in `~/Library/Application Support/dev.headroom/` (or `$HEADROOM_HOME`): `config.json`, `profiles.json`, `history.json`, `stats.json` (the Commands page's totals) and the daemon's socket. Settings → Stored data → Clear all usage data removes saved profiles, history, statistics and legacy memory trends after a second confirmation. Settings, hooks and active jobs are kept. Running attempts retain their memory reservations and guard thresholds; queued jobs use fresh estimates. Finished jobs begin building new history.
 
 `headroomd --headless` runs the queue without the menu bar. `headroomd --probe` prints what it measures and exits.
 

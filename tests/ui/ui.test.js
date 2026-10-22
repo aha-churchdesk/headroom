@@ -70,7 +70,7 @@ test('state updates restore focus to replacement controls even when their next v
   try {
     for (const data of [
       { act: 'hold' },
-      { act: 'set', key: 'tune', val: 'false' },
+      { act: 'set', key: 'backfill', val: 'false' },
       { act: 'set', key: 'headroom', step: 'up', val: '2' },
     ]) {
       const before = { id: '', dataset: data };
@@ -78,7 +78,7 @@ test('state updates restore focus to replacement controls even when their next v
         focus() { document.activeElement = this; } };
       let queries = 0;
       document.activeElement = before;
-      document.querySelectorAll = () => [queries++ ? after : before];
+      document.querySelectorAll = selector => selector === '[data-act]' ? [queries++ ? after : before] : [];
       ui.setState(busy);
       if (document.activeElement !== after) throw new Error('control focus was lost');
     }
@@ -101,7 +101,7 @@ test('refresh reveals a collapsed queued action before restoring its focus', () 
   let queries = 0;
   try {
     document.activeElement = before;
-    document.querySelectorAll = () => [queries++ ? after : before];
+    document.querySelectorAll = selector => selector === '[data-act]' ? [queries++ ? after : before] : [];
     ui.setState(busy);
     eq(document.activeElement === after, true);
     eq(classes.has('restoring-focus'), false, 'temporary visibility clears after focus');
@@ -145,8 +145,7 @@ test('job details and command profiles open from keyboard controls', () => {
 test('settings switches expose their names and current states', () => {
   ui.setState(busy);
   ui.click({ act: 'goto', page: 'settings' }, 0);
-  for (const [key, label] of [['tune', 'Shrink jobs to fit'],
-    ['backfill', 'Let short jobs go first'], ['start_at_login', 'Start at login']]) {
+  for (const [key, label] of [['backfill', 'Let smaller jobs go first'], ['start_at_login', 'Start at login']]) {
     const control = ui.find({ act: 'set', key })[0];
     eq([control.role, control.label, control.checked],
        ['switch', label, String(busy.settings[key])]);
@@ -577,7 +576,7 @@ test('disabled backfilling keeps runtime historical below and above the estimate
     ui.setState(s);
     has(ui.view(), 'Usual 2m00');
     has(ui.view(), 'Usual runtime is historical context.');
-    has(ui.view(), 'Short jobs going first is turned off; jobs follow queue order.');
+    has(ui.view(), 'Smaller jobs going first is turned off; jobs follow queue order.');
     lacks(ui.html(), 'It helps plan when queued jobs might fit.');
     lacks(ui.view(), 'fitting shorter jobs can go ahead');
     lacks(ui.view(), 'Queue planning allows as much time again');
@@ -762,7 +761,7 @@ test('zeros are dimmed, failures are not coloured, and every stat explains itsel
   ui.setState(history);
   const html = ui.html();
   has(html, 'class="" data-tip="1 exited with an error');
-  has(html, 'class="zero" data-tip="Short jobs that started ahead');
+  has(html, 'class="zero" data-tip="Smaller jobs that started ahead');
   eq((html.match(/data-tip=/g) || []).length, 6, 'one tooltip per stat');
   lacks(html, 'class="bad"');
   ui.setState(busy);
@@ -984,6 +983,52 @@ test('profile reset escapes repository names and preserves its confirmation key'
   eq(ui.sent, [{ cmd: 'reset_profile', key }]);
 });
 
+test('button tooltips expose action consequences to assistive technology', () => {
+  ui.setState(busy);
+  for (const [dataset, expected] of [
+    [{ act:'pin', on:'1' }, 'skip its memory-fit check'],
+    [{ act:'pin', on:'0' }, 'restore normal queue priority'],
+    [{ act:'freeze' }, 'It keeps its RAM'],
+    [{ act:'resume' }, 'until memory pressure returns to normal'],
+    [{ act:'clear_data' }, 'Click twice to confirm'],
+    [{ act:'copy' }, 'Copy command'],
+  ]) {
+    const attrs = { title:'Copy command' };
+    const button = { dataset, textContent:'Copy', getAttribute: key => attrs[key],
+      setAttribute: (key, val) => { attrs[key] = val; }, removeAttribute: key => { delete attrs[key]; } };
+    ui.describeButton(button);
+    has(button.dataset.tip, expected);
+    eq(attrs['aria-description'], button.dataset.tip);
+    eq(attrs.title, undefined);
+  }
+});
+
+test('clear usage data needs confirmation and waits for the backend result', () => {
+  ui.setState(busy);
+  ui.click({ act: 'goto', page: 'settings' }, 0);
+  has(ui.view(), 'Running and queued jobs continue');
+  ui.click({ act: 'clear_data' });
+  eq(ui.sent, []);
+  has(ui.view(), 'Clear permanently? Click again');
+  ui.click({ act: 'clear_data' });
+  eq(ui.sent, [{ cmd: 'clear_data' }]);
+  eq(ui.STATE.running, busy.running);
+  eq(ui.STATE.history, busy.history);
+  lacks(ui.view(), 'statistics cleared');
+  for (const ok of [true, false]) {
+    ui.setState({ ...busy, data_clear: { ok, message: '<script>result</script>' } });
+    has(ui.html(), `role="${ok ? 'status' : 'alert'}"`);
+    has(ui.html(), '&lt;script&gt;result&lt;/script&gt;');
+    lacks(ui.html(), '<script>result</script>');
+  }
+});
+
+test('header explains the usable queue budget and running growth', () => {
+  ui.setState({ ...busy, queue_budget: { available: .5 * GiB, growth: 4 * GiB } });
+  has(ui.head(), 'Queue budget 0.5 GB · growth allowance 4 GB');
+  has(ui.headHtml(), 'Pressure, CPU and queue-order checks still apply');
+});
+
 test('settings send whole values the bridge understands', () => {
   ui.setState(busy);
   ui.click({ act: 'goto', page: 'settings' }, 0);
@@ -1118,14 +1163,11 @@ test('hook status updates remove obsolete notices and suggested actions', () => 
   eq(ui.find({ act: 'copy', text: 'headroom hook install' }).length, 0);
 });
 
-test('shrinking jobs to fit can be switched off and on', () => {
+test('automatic worker shrinking is absent even with an older state', () => {
   ui.setState(tuned);
   ui.click({ act: 'goto', page: 'settings' }, 0);
-  has(ui.view(), 'Shrink jobs to fit');
-  ui.click({ act: 'set', key: 'tune' });
-  ui.setState({ ...tuned, settings: { ...tuned.settings, tune: false } });
-  ui.click({ act: 'set', key: 'tune' });
-  eq(ui.sent, [{ cmd: 'set', key: 'tune', value: false }, { cmd: 'set', key: 'tune', value: true }]);
+  lacks(ui.view(), 'Shrink jobs to fit');
+  eq(ui.find({ act: 'set', key: 'tune' }).length, 0);
 });
 
 test('letting short jobs go first can be switched off', () => {

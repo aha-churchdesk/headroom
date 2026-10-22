@@ -27,6 +27,7 @@ pub enum UiCmd {
     Dismiss { id: String },
     Copy { text: String },
     ResetProfile { key: String },
+    ClearData,
     Set { key: String, value: Value },
     AddPattern { pattern: String },
     RemovePattern { pattern: String },
@@ -66,6 +67,7 @@ pub fn translate(cmd: UiCmd, cfg: &Config) -> Result<Do, String> {
         UiCmd::Low { id, on } => Do::Control(Control::Low { id: job(&id)?, on }),
         UiCmd::Move { id, to } => Do::Control(Control::Move { id: job(&id)?, to }),
         UiCmd::ResetProfile { key } => Do::Control(Control::ResetProfile { key }),
+        UiCmd::ClearData => Do::Control(Control::ClearData),
         UiCmd::Dismiss { id } => Do::Dismiss(id),
         UiCmd::Copy { text } => Do::Copy(text),
         UiCmd::Classify { text } => Do::Classify(text),
@@ -143,6 +145,10 @@ mod tests {
 
     #[test]
     fn queue_intents_become_controls_with_numeric_ids() {
+        assert_eq!(
+            translate(UiCmd::ClearData, &Config::default()),
+            Ok(Do::Control(Control::ClearData))
+        );
         assert_eq!(
             t(r#"{"cmd":"pin","id":"4","on":true}"#),
             Ok(Do::Control(Control::Pin { id: 4, on: true }))

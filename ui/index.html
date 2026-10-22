@@ -179,10 +179,12 @@ button:disabled{ cursor:default; opacity:.4; }
 .tip{
   position:fixed; z-index:20; max-width:240px; padding:5px 8px; border-radius:6px;
   background:var(--text); color:var(--bg); font-size:11px; line-height:1.35;
-  pointer-events:none; opacity:0; transition:opacity .08s;
+  pointer-events:none; opacity:0; visibility:hidden; transition:opacity .08s;
 }
-.tip.on{ opacity:1; }
+.tip.on{ opacity:1; visibility:visible; }
 [data-tip]{ cursor:default; }
+button[data-tip], [role="button"][data-tip]{ cursor:pointer; }
+button:disabled[data-tip]{ cursor:default; }
 .head .alert{
   margin-top:8px; font-size:11.5px; padding:6px 9px; border-radius:7px;
   background:var(--warn-tint);
@@ -259,7 +261,7 @@ button:disabled{ cursor:default; opacity:.4; }
 }
 .job .l2{ display:flex; flex-wrap:wrap; align-items:center; gap:5px 9px; margin-top:5px; font-size:11px; color:var(--text-dim); }
 .job .l2 .meta{ white-space:nowrap; }
-.job .l2 .acts-i{ margin-left:auto; }
+.job .l2 .mem{ margin-left:auto; }
 .tag{ font-size:12px; }
 
 .memory{ margin-top:8px; }
@@ -443,7 +445,8 @@ pre.snip{
     <header class="head" id="head" aria-label="Memory and queue status"></header>
     <main class="body" id="view" aria-labelledby="page-title"></main>
     <nav class="foot" id="foot" aria-label="Headroom pages"></nav>
-    <div class="tip" id="tip"></div>
+    <!-- Button descriptions are exposed on each trigger; this overlay is visual only. -->
+    <div class="tip" id="tip" role="tooltip" aria-hidden="true"></div>
   </div>
 </div>
 
@@ -659,6 +662,10 @@ function render(destination = null){
   $("foot").innerHTML = UI.page === "main" ? renderFoot() : "";
   $("foot").style.display = UI.page === "main" ? "" : "none";
 
+  for (const button of document.querySelectorAll("button, [role='button']")) {
+    describeButton(button);
+  }
+
   // Keep the reader's place and the cursor across the 1 s rerender.
   view.scrollTop = destination ? destination.scroll : scroll;
   const target = destination
@@ -712,6 +719,7 @@ function renderHead(S){
       <span data-tip="Memory moved to disk. It grows when RAM runs short; a lot of it makes everything slow.">swap ${gb(m.swap_used)} GB</span>·
       <span data-tip="CPU in use across all cores">CPU ${Math.round(m.cpu_pct)}%</span>
     </div>
+    ${S.queue_budget ? `<div class="row2 num" data-tip="Available memory minus ${gb(S.settings.headroom)} GB kept free and ${gb(S.queue_budget.growth)} GB allowed for running jobs to grow. Pressure, CPU and queue-order checks still apply.">Queue budget ${gb(S.queue_budget.available)} GB · growth allowance ${gb(S.queue_budget.growth)} GB</div>` : ""}
     ${alert}`;
 }
 
@@ -737,7 +745,7 @@ function renderLastDay(h){
         ${cell(waited, "waited", ofRuns, h.waited ? "" : "zero")}
         ${cell(dur(h.wait_p50_s), "wait p50", `Half the jobs that waited, waited this long or less. ${waits}`, h.wait_p50_s ? "" : "zero")}
         ${cell(dur(h.wait_p95_s), "wait p95", `95 in 100 jobs that waited, waited this long or less. ${waits}`, h.wait_p95_s ? "" : "zero")}
-        ${cell(h.went_first, "went first", "Short jobs that started ahead of a bigger one waiting for memory", h.went_first ? "" : "zero")}
+        ${cell(h.went_first, "went first", "Smaller jobs that started ahead of a bigger one waiting for memory", h.went_first ? "" : "zero")}
       </div>
     </div>`;
 }
@@ -755,7 +763,7 @@ function renderMain(S){
         ${S.queued.length && S.queue_reason
           ? `<span class="why blocked">· ${esc(reasonText(S.queue_reason))}</span>` : ""}
         ${S.queued.length && S.queued[0].skipped
-          ? `<span class="why" title="Shorter jobs that fit started ahead of it. After ${S.settings.backfill_skips ?? 3} times or ${dur(S.settings.backfill_wait_s ?? 300)}, the queue waits for it.">· passed over ${S.queued[0].skipped}×${S.queued[0].strict_in_s ? ` · strict in ${dur(S.queued[0].strict_in_s)}` : ""}</span>` : ""}
+          ? `<span class="why" title="Smaller jobs that fit started ahead of it. After ${S.settings.backfill_skips ?? 3} times or ${dur(S.settings.backfill_wait_s ?? 300)}, the queue waits for it.">· passed over ${S.queued[0].skipped}×${S.queued[0].strict_in_s ? ` · strict in ${dur(S.queued[0].strict_in_s)}` : ""}</span>` : ""}
       </h2>
       ${S.queued.length
         ? S.queued.map((j, i) => renderQueued(j, i, S)).join("")
@@ -855,16 +863,6 @@ function renderRunning(j){
     <div class="job ${UI.expanded.has(j.id) ? "expanded" : ""}" data-job-id="${esc(j.id)}">
       <div class="l1">
         ${jobName(j)}${marks(j)}
-        <span class="mem num"><b>${gb(j.footprint)}</b> / ${estLabel(j)}</span>
-      </div>
-      ${j.now ? `<div class="now" title="Largest subprocess: ${esc(j.now)}">↳ ${esc(j.now)}</div>` : ""}
-      ${fpBar(j)}
-      <div class="l2 num">
-        <span class="meta" title="Time since this attempt was admitted to run, including pauses">Elapsed ${dur(j.elapsed_s)}</span>
-        ${frozen ? `<span class="meta" title="Time in the current pause">❄︎ Paused ${dur(j.frozen_s)}</span>` : ""}
-        ${j.runtime_estimate_s != null ? `<span class="meta" title="The scheduler's usual runtime estimate for this attempt, not a guaranteed finish time">Usual ${dur(j.runtime_estimate_s)}</span>` : ""}
-        <span class="meta">CPU ${Math.round(j.cpu_pct)}%</span>
-        ${j.tuned ? `<span class="meta" title="Started with fewer workers so it fits in memory; it runs slower">${j.tuned.workers}/${j.tuned.default} workers</span>` : ""}
         <span class="acts-i">
           ${frozen
             ? `<button class="ib" data-act="resume" data-id="${j.id}" aria-label="Resume ${jobLabel(j)}" title="Resume">▶︎</button>`
@@ -873,6 +871,16 @@ function renderRunning(j){
           <button class="ib ${j.pinned ? "on" : ""}" data-act="pin" data-id="${j.id}" data-on="${j.pinned ? 0 : 1}"
             aria-label="Pin ${jobLabel(j)}" aria-pressed="${j.pinned}" title="${j.pinned ? "Unpin" : "Pin: never freeze or kill this job"}"><span class="emo">📌</span></button>
         </span>
+      </div>
+      ${j.now ? `<div class="now" title="Largest subprocess: ${esc(j.now)}">↳ ${esc(j.now)}</div>` : ""}
+      ${fpBar(j)}
+      <div class="l2 num">
+        <span class="meta" title="Time since this attempt was admitted to run, including pauses">Elapsed ${dur(j.elapsed_s)}</span>
+        ${frozen ? `<span class="meta" title="Time in the current pause">❄︎ ${j.frozen_by === "guard" ? "Auto-paused" : "Paused"} ${dur(j.frozen_s)}</span>` : ""}
+        ${j.runtime_estimate_s != null ? `<span class="meta" title="The scheduler's usual runtime estimate for this attempt, not a guaranteed finish time">Usual ${dur(j.runtime_estimate_s)}</span>` : ""}
+        <span class="meta">CPU ${Math.round(j.cpu_pct)}%</span>
+        ${j.tuned ? `<span class="meta" title="Started with fewer workers so it fits in memory; it runs slower">${j.tuned.workers}/${j.tuned.default} workers</span>` : ""}
+        <span class="mem num"><b>${gb(j.footprint)}</b> / ${estLabel(j)}</span>
       </div>
       ${UI.expanded.has(j.id) ? renderDetail(j) : ""}
     </div>`;
@@ -909,14 +917,14 @@ function schedulingText(j){
       : `Uses the ${gb(j.estimate)} GB memory estimate to decide whether it fits.`;
   }
   const memory = j.state === "frozen"
-    ? `Keeps ${gb(j.footprint)} GB RAM while paused; no extra growth allowance. No predicted memory release while paused.`
+    ? `Keeps ${gb(j.footprint)} GB RAM while paused; no extra growth allowance. No predicted memory release while paused.${j.frozen_by === "guard" ? " Headroom resumes this pause automatically when recovery checks pass." : j.frozen_by === "user" ? " Paused by you; resume it when ready." : ""}`
     : j.growth_reserved != null
       ? `Allows another ${gb(j.growth_reserved)} GB for growth when starting queued jobs. Current RAM is already included in system usage.`
       : "Current RAM is already included in system usage.";
   const runtime = j.state === "frozen" ? "" : !STATE.settings.backfill
-    ? " Usual runtime is historical context. Short jobs going first is turned off; jobs follow queue order."
+    ? " Usual runtime is historical context. Smaller jobs going first is turned off; jobs follow queue order."
     : j.runtime_estimate_s == null
-    ? " No runtime estimate yet; cannot predict when this job frees memory."
+    ? " No runtime estimate yet; cannot predict when this job frees memory. Smaller jobs may still go first within the queue limits."
     : j.elapsed_s >= j.runtime_estimate_s
       ? " Past its usual runtime. Queue planning allows as much time again as has elapsed; this is not a finish prediction."
       : " Usual runtime helps predict memory releases so fitting shorter jobs can go ahead in the queue.";
@@ -928,7 +936,7 @@ function renderDetail(j){
   const queueIndex = j.state === "queued" ? STATE.queued.findIndex(x => x.id === j.id) : -1;
   const runtimeUse = STATE.settings.backfill
     ? "It helps plan when queued jobs might fit."
-    : "Short jobs going first is turned off; this is historical context and jobs follow queue order.";
+    : "Smaller jobs going first is turned off; this is historical context and jobs follow queue order.";
   return `
     <div class="detail">
       <span class="k">command</span><span class="v mono">${esc(j.full_cmd)}</span>
@@ -1182,16 +1190,9 @@ function renderSettings(S){
     </div>
     <div class="set">
       <div class="ctl" style="margin-top:0;justify-content:space-between">
-        <div><div class="k">Shrink jobs to fit</div>
-          <div class="h">When the next job doesn't fit, start it with fewer workers (vitest, turbo, cargo) instead of waiting. Never below 2, and never when you set a worker count yourself.</div></div>
-        <button class="toggle ${c.tune ? "on" : ""}" role="switch" aria-label="Shrink jobs to fit" aria-checked="${c.tune}" data-act="set" data-key="tune" data-val="${!c.tune}"></button>
-      </div>
-    </div>
-    <div class="set">
-      <div class="ctl" style="margin-top:0;justify-content:space-between">
-        <div><div class="k">Let short jobs go first</div>
-          <div class="h">While the next job waits on memory, start a later one that fits and should finish before it could start. At most ${c.backfill_skips ?? 3} times or ${dur(c.backfill_wait_s ?? 300)}, then the queue waits for it.</div></div>
-        <button class="toggle ${c.backfill ? "on" : ""}" role="switch" aria-label="Let short jobs go first" aria-checked="${c.backfill}" data-act="set" data-key="backfill" data-val="${!c.backfill}"></button>
+        <div><div class="k">Let smaller jobs go first</div>
+          <div class="h">While the next job waits on memory, let later jobs use the remaining budget. Known runtimes must fit the predicted wait; unknown runtimes can also pass, but may delay it. At most ${c.backfill_skips ?? 3} times or ${dur(c.backfill_wait_s ?? 300)}, then the queue waits for it.</div></div>
+        <button class="toggle ${c.backfill ? "on" : ""}" role="switch" aria-label="Let smaller jobs go first" aria-checked="${c.backfill}" data-act="set" data-key="backfill" data-val="${!c.backfill}"></button>
       </div>
     </div>
     <div class="set">
@@ -1220,6 +1221,13 @@ function renderSettings(S){
         ${UI.snippet ? `<button class="chip-btn" data-act="copy" data-text="${esc(HOOK_SNIPPET)}">Copy</button>` : ""}
       </div>
       ${UI.snippet ? `<pre class="snip">${esc(HOOK_SNIPPET)}</pre>` : ""}
+    </div>
+    <div class="set">
+      <div class="k">Stored data</div>
+      <div class="h">Clear learned profiles, job history, statistics and legacy memory trends. Running and queued jobs continue. Settings and hook connections stay in place. Finished jobs will start building new history.</div>
+      <div class="ctl"><button class="chip-btn ${confirming("clear-data") ? "confirm" : "danger"}"
+        data-act="clear_data" data-confirm="clear-data">${confirming("clear-data") ? "Clear permanently? Click again" : "Clear all usage data"}</button></div>
+      ${S.data_clear ? `<div class="h" role="${S.data_clear.ok ? "status" : "alert"}">${esc(S.data_clear.message)}</div>` : ""}
     </div>
     <div class="quit">
       <span>${S.attached
@@ -1313,6 +1321,7 @@ $("pop").addEventListener("click", (e) => {
     case "dismiss": send({ cmd:"dismiss", id }); return;
     case "copy":    send({ cmd:"copy", text: d.text }); return;
     case "reset_profile": send({ cmd:"reset_profile", key: d.key }); return;
+    case "clear_data": send({ cmd:"clear_data" }); return;
     case "set": {
       const v = d.val === "true" ? true : d.val === "false" ? false
               : isNaN(Number(d.val)) ? d.val : Number(d.val);
@@ -1371,20 +1380,47 @@ function clearDropMarks(){
 /* The tooltip follows the element under the pointer, found again after each
    redraw: the numbers it explains change every second, and the element it
    was opened on is replaced by the redraw. */
+function describeButton(button){
+  button.dataset.tip = buttonTip(button);
+  button.setAttribute("aria-description", button.dataset.tip);
+  button.removeAttribute("title");
+}
+function buttonTip(button){
+  const d = button.dataset;
+  switch (d.act) {
+    case "pin": return d.on === "1"
+      ? "Pin: prioritize this job, skip its memory-fit check, and protect it from automatic pause or kill. Queue hold, critical pressure and CPU checks still apply."
+      : "Unpin: restore normal queue priority, memory checks and automatic protection.";
+    case "freeze": return "Pause this job and its subprocesses. It keeps its RAM and stays paused until you resume it; other jobs still follow memory and pressure checks.";
+    case "resume": return "Resume this job and its subprocesses now. Resuming a guard pause protects it from another automatic pause or kill until memory pressure returns to normal.";
+    case "kill": return "Stop this job and its subprocesses. Click twice to confirm; completed work may be lost.";
+    case "cancel": return "Remove this queued job before it starts; its waiting command exits.";
+    case "top": return "Move this job to the front of the unpinned queue. Memory and pressure checks still apply.";
+    case "low": return d.on === "1" ? "Use background CPU priority. This job is paused first if memory runs short." : "Restore normal CPU and guard priority.";
+    case "clear_data": return "Permanently clear saved profiles, job history and statistics. Running jobs, settings and hook connections are kept. Click twice to confirm.";
+    case "reset_profile": return "Forget this workload's learned history. Future estimates use broader history or the default. Click twice to confirm.";
+    case "hold": return STATE.held ? "Allow queued jobs to start again when resources permit." : "Hold new jobs in the queue. Running jobs continue.";
+    case "set": if (d.key === "backfill") return "Let jobs that fit pass a job waiting for memory, subject to the pass-count and wait-time limits.";
+      break;
+  }
+  return button.getAttribute("title") || button.getAttribute("aria-label") || button.textContent.trim();
+}
 const POINTER = { x: null, y: null };
 function showTip(t){
   const tip = $("tip");
   if (!t){ tip.classList.remove("on"); return; }
-  tip.textContent = t.dataset.tip;
+  tip.textContent = t.dataset.tip || buttonTip(t);
   tip.classList.add("on");
   // Below the element, or above it near the bottom; never past the sides.
   const r = t.getBoundingClientRect(), box = $("pop").getBoundingClientRect();
   const w = tip.offsetWidth, h = tip.offsetHeight;
   tip.style.left = Math.max(box.left + 6, Math.min(r.left + r.width / 2 - w / 2, box.right - w - 6)) + "px";
-  tip.style.top = (r.bottom + 6 + h <= box.bottom ? r.bottom + 6 : r.top - h - 6) + "px";
+  tip.style.top = Math.max(box.top + 6, Math.min(r.bottom + 6 + h <= box.bottom ? r.bottom + 6 : r.top - h - 6, box.bottom - h - 6)) + "px";
 }
 function refreshTip(){
-  if (POINTER.x == null || !document.elementFromPoint) return;
+  if (POINTER.x == null || !document.elementFromPoint) {
+    showTip(document.activeElement?.dataset?.tip ? document.activeElement : null); return;
+  }
   const el = document.elementFromPoint(POINTER.x, POINTER.y);
   showTip(el && el.closest ? el.closest("[data-tip]") : null);
 }
@@ -1393,6 +1429,8 @@ $("pop").addEventListener("mousemove", (e) => {
   showTip(e.target.closest && e.target.closest("[data-tip]"));
 });
 $("pop").addEventListener("mouseleave", () => { POINTER.x = null; $("tip").classList.remove("on"); });
+$("pop").addEventListener("focusin", e => { POINTER.x = null; showTip(e.target.closest?.("[data-tip]")); });
+$("pop").addEventListener("focusout", () => showTip(null));
 
 $("pop").addEventListener("dragstart", (e) => {
   const row = e.target.closest("[data-qid]");
@@ -1441,7 +1479,6 @@ const G = n => Math.round(n * GiB);
 const BASE_SETTINGS = {
   headroom: G(2), kill_mode: "freeze_kill", wait_cap_s: 480, default_estimate: G(1.5),
   start_at_login: true,
-  tune: true,
   backfill: true, backfill_skips: 3, backfill_wait_s: 300,
   patterns: ["vitest", "jest", "playwright", "tsc", "pnpm test", "pnpm build", "nx run", "turbo run",
              "next build", "cargo build", "cargo test", "xcodebuild", "docker build", "pytest"],
@@ -1661,6 +1698,11 @@ function mockApply(m){
     case "low": { const j = find(m.id); if (j) j.low = m.on; break; }
     case "dismiss": S.banners = S.banners.filter(b => b.id !== m.id); break;
     case "reset_profile": delete S.profiles[m.key]; all().forEach(j => { if (j.key === m.key){ j.samples = 0; j.memory_range = null; j.estimate = S.settings.default_estimate; } }); break;
+    case "clear_data":
+      S.profiles = {}; S.history = []; S.commands = [];
+      S.last_day = Object.fromEntries(Object.keys(S.last_day || {}).map(k => [k, k === "more" ? false : 0]));
+      S.data_clear = { ok:true, message:"Saved profiles, history and statistics cleared." };
+      break;
     case "set": S.settings[m.key] = m.value; break;
     case "add_pattern": if (!S.settings.patterns.includes(m.pattern)) S.settings.patterns.push(m.pattern); break;
     case "remove_pattern": S.settings.patterns = S.settings.patterns.filter(p => p !== m.pattern); break;

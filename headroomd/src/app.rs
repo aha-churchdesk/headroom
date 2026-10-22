@@ -62,6 +62,7 @@ pub struct App {
     login: Login,
     listing: Option<Listing>,
     attached: bool,
+    data_clear: Option<Value>,
     /// The last thing the daemon refused, for stderr; not shown in the page.
     pub last_error: Option<String>,
 }
@@ -120,6 +121,7 @@ impl App {
             login: Login::Off,
             listing: None,
             attached: false,
+            data_clear: None,
             last_error: None,
         };
         app.refresh_settings();
@@ -211,7 +213,7 @@ impl App {
     /// The popover's state, once the daemon has answered at least once.
     pub fn state(&self) -> Option<Value> {
         let l = self.listing.as_ref()?;
-        Some(view::state(
+        let mut state = view::state(
             l,
             &Extras {
                 cfg: &self.cfg,
@@ -226,7 +228,9 @@ impl App {
                 login: self.login,
                 attached: self.attached,
             },
-        ))
+        );
+        state["data_clear"] = self.data_clear.clone().unwrap_or(Value::Null);
+        Some(state)
     }
 
     /// One intent from the page. Anything malformed or refused is noted in
@@ -250,6 +254,29 @@ impl App {
         match action {
             Do::Quit => return Next::Quit,
             Do::Control(c) => {
+                if c == Control::ClearData {
+                    let result = match request(&self.socket, &ClientMsg::Control(c)) {
+                        Ok(DaemonMsg::Ok) => Ok(()),
+                        Ok(DaemonMsg::Error { msg }) => Err(msg),
+                        Ok(other) => Err(format!("unexpected clear-data answer {other:?}")),
+                        Err(e) => Err(e),
+                    };
+                    self.data_clear = Some(match result {
+                        Ok(()) => {
+                            self.refresh_settings();
+                            self.dismissed.clear();
+                            self.classify = None;
+                            self.last_error = None;
+                            serde_json::json!({ "ok": true, "message": "Saved profiles, history and statistics cleared." })
+                        }
+                        Err(message) => {
+                            self.last_error = Some(message.clone());
+                            serde_json::json!({ "ok": false, "message": message })
+                        }
+                    });
+                    self.poll();
+                    return Next::Continue;
+                }
                 // The daemon saves the config after it answers, so the new
                 // one is taken from what was sent rather than re-read.
                 let sent = match &c {
@@ -374,6 +401,50 @@ mod tests {
                 thread: Some(thread),
             },
         )
+    }
+
+    #[test]
+    fn clear_data_reports_durable_success_and_preserves_settings() {
+        let (mut app, _d) = with_daemon("clear-data");
+        app.command(r#"{"cmd":"set","key":"wait_cap_s","value":123}"#);
+        app.command(r#"{"cmd":"hold","on":true}"#);
+        // Persisted legacy data is cleared even if this daemon did not load it.
+        std::fs::write(
+            app.store.root().join("profiles.json.corrupt"),
+            "old private data",
+        )
+        .unwrap();
+        assert_eq!(app.command(r#"{"cmd":"clear_data"}"#), Next::Continue);
+        let state = app.state().unwrap();
+        assert_eq!(state["data_clear"]["ok"], true);
+        assert_eq!(state["held"], true);
+        assert_eq!(state["settings"]["wait_cap_s"], 123);
+        assert_eq!(app.store.load_config().wait_cap_s, 123);
+        assert!(!app.store.root().join("profiles.json.corrupt").exists());
+        assert_eq!(app.store.load_profiles(), Profiles::default());
+        assert!(app.store.load_history().is_empty());
+        assert_eq!(app.store.load_tally(), Tally::default());
+    }
+
+    #[test]
+    fn clear_data_persistence_failure_is_visible_and_does_not_claim_success() {
+        let (mut app, _d) = with_daemon("clear-data-error");
+        std::fs::write(app.store.root().join("profiles.json"), "original bytes").unwrap();
+        std::fs::create_dir(app.store.root().join("stats.json")).unwrap();
+        app.command(r#"{"cmd":"clear_data"}"#);
+        let state = app.state().unwrap();
+        assert_eq!(state["data_clear"]["ok"], false);
+        assert!(
+            state["data_clear"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("non-file")
+        );
+        assert_eq!(
+            std::fs::read_to_string(app.store.root().join("profiles.json")).unwrap(),
+            "original bytes"
+        );
+        assert!(app.last_error.is_some());
     }
 
     #[test]

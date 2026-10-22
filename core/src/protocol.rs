@@ -75,6 +75,8 @@ pub enum Control {
     ResetProfile {
         key: String,
     },
+    /// Forget learned profiles, completed runs and command statistics.
+    ClearData,
     /// Replace the settings, as edited in the menu bar.
     Configure {
         config: Box<Config>,
@@ -200,6 +202,7 @@ mod tests {
             },
             ClientMsg::List,
             ClientMsg::Control(Control::Move { id: 3, to: 1 }),
+            ClientMsg::Control(Control::ClearData),
         ];
         let mut buf = Vec::new();
         for m in &msgs {

@@ -89,7 +89,7 @@ function loadUI() {
     querySelectorAll: () => [],
   };
 
-  const exported = `;module.exports = { keyLabel, reasonText, get UI(){ return UI }, get STATE(){ return STATE } };`;
+  const exported = `;module.exports = { keyLabel, reasonText, describeButton, get UI(){ return UI }, get STATE(){ return STATE } };`;
   const mod = { exports: {} };
   new Function('module', src + exported)(mod);
 

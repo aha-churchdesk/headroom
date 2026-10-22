@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use headroom_core::model::{JobId, Snapshot};
 use headroom_core::proctree;
-use headroom_core::protocol::{ClientMsg, DaemonMsg};
+use headroom_core::protocol::{ClientMsg, Control, DaemonMsg};
 use headroom_core::scheduler::{Effect, Scheduler, Sig, Usage};
 use headroom_core::store::Store;
 
@@ -177,6 +177,10 @@ pub fn run_with(
                     fx
                 }
                 ClientMsg::List => vec![Effect::Send(c, DaemonMsg::Jobs(sched.list()))],
+                ClientMsg::Control(Control::ClearData) => match store.clear_data() {
+                    Ok(()) => sched.control(c, Control::ClearData, ms(), wall()),
+                    Err(e) => vec![Effect::Send(c, DaemonMsg::Error { msg: e.to_string() })],
+                },
                 ClientMsg::Control(ctl) => sched.control(c, ctl, ms(), wall()),
             },
             Ok(Event::Closed(c)) => {

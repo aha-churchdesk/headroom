@@ -359,6 +359,31 @@ impl Scheduler {
 
     pub fn control(&mut self, conn: ConnId, ctl: Control, now: Millis, wall: u64) -> Vec<Effect> {
         self.clock = self.clock.max(now);
+        if ctl == Control::ClearData {
+            // The daemon persists this reset before invoking the control.
+            // Preserve every lease and process state; the next normal tick
+            // re-evaluates admission with the fresh estimates.
+            self.profiles = Profiles::default();
+            self.history.clear();
+            self.tally = Tally::default();
+            for e in self.jobs.values_mut() {
+                if e.job.state == JobState::Queued {
+                    e.job.estimate = self.cfg.default_estimate;
+                } else {
+                    // This attempt was admitted with this estimate. Keep its
+                    // remaining growth allowance and guard threshold until
+                    // it ends; replacing either would change live safety.
+                    e.job.runaway_floor = Some(
+                        e.job
+                            .runaway_at(self.cfg.runaway_factor, self.cfg.runaway_cap),
+                    );
+                }
+                e.job.samples = 0;
+                e.job.median_ms = None;
+                e.told = None;
+            }
+            return vec![Effect::Send(conn, DaemonMsg::Ok)];
+        }
         let mut fx = vec![];
         let r = self.apply_control(ctl, now, wall, &mut fx);
         fx.push(reply(conn, r));
@@ -375,6 +400,7 @@ impl Scheduler {
     ) -> Result<(), String> {
         let missing = |id: JobId| format!("no job {id}");
         match ctl {
+            Control::ClearData => unreachable!("handled before scheduling"),
             Control::Hold { on } => self.held = on,
             Control::Pin { id, on } => {
                 self.jobs
@@ -1895,8 +1921,120 @@ mod tests {
             id: 1,
             retry: 0,
             low: true,
-            workers: None,
         }));
+    }
+
+    #[test]
+    fn clear_data_keeps_pending_growth_and_guard_threshold_until_retry() {
+        let mut s = sched(30);
+        s.enqueue(1, spec("a"), 0);
+        s.started(1, 11);
+        {
+            let j = &mut s.jobs.get_mut(&1).unwrap().job;
+            j.estimate = 12 * GIB;
+            j.samples = 5;
+            j.footprint = 2 * GIB;
+            j.peak = 2 * GIB;
+        }
+        let before = s.list().running[0].runaway_at(s.cfg.runaway_factor, s.cfg.runaway_cap);
+        s.control(99, Control::ClearData, 1000, 100);
+        let j = &s.list().running[0];
+        assert_eq!(j.samples, 0);
+        assert_eq!(j.estimate, 12 * GIB);
+        assert_eq!(
+            admission::pending_growth(&[j]),
+            10 * GIB,
+            "clearing keeps room for expected growth"
+        );
+        assert_eq!(
+            j.runaway_at(s.cfg.runaway_factor, s.cfg.runaway_cap),
+            before
+        );
+        let entry = s.jobs.remove(&1).unwrap();
+        s.requeue(entry, 2000);
+        let j = &s.list().queued[0];
+        assert_eq!(j.runaway_floor, None);
+        assert_eq!(j.estimate, s.cfg.default_estimate);
+    }
+
+    #[test]
+    fn clear_data_does_not_raise_a_runaway_threshold_to_observed_memory() {
+        let mut s = sched(30);
+        s.enqueue(1, spec("a"), 0);
+        s.started(1, 11);
+        {
+            let j = &mut s.jobs.get_mut(&1).unwrap().job;
+            j.estimate = 2 * GIB;
+            j.samples = 5;
+            j.footprint = 10 * GIB;
+            j.peak = 10 * GIB;
+        }
+        let before = s.list().running[0].runaway_at(s.cfg.runaway_factor, s.cfg.runaway_cap);
+        assert_eq!(before, 8 * GIB);
+        s.control(99, Control::ClearData, 1000, 100);
+        let j = &s.list().running[0];
+        assert_eq!(j.estimate, 2 * GIB);
+        assert_eq!(
+            j.runaway_at(s.cfg.runaway_factor, s.cfg.runaway_cap),
+            before
+        );
+        assert!(
+            j.footprint > j.runaway_at(s.cfg.runaway_factor, s.cfg.runaway_cap),
+            "clearing cannot hide an already runaway attempt"
+        );
+    }
+
+    #[test]
+    fn clear_data_keeps_every_active_job_and_lease_but_forgets_learning() {
+        let mut s = sched(20);
+        s.enqueue(1, spec("a"), 0);
+        s.started(1, 11);
+        s.exited(1, Some(0), None, 1000, 100);
+        assert!(!s.history.is_empty());
+        assert!(!s.tally.window(100, 1).is_empty());
+        s.enqueue(2, spec("a"), 1000);
+        s.started(2, 22);
+        s.enqueue(3, spec("a"), 1000);
+        s.started(3, 33);
+        s.control(99, Control::Freeze { id: 3 }, 1100, 100);
+        s.control(99, Control::Hold { on: true }, 1100, 100);
+        s.enqueue(4, spec("a"), 1200);
+        let before = s.list();
+        let config = s.cfg.clone();
+        let fx = s.control(99, Control::ClearData, 1200, 100);
+        assert_eq!(
+            fx,
+            vec![Effect::Send(99, DaemonMsg::Ok)],
+            "no process signal or grant"
+        );
+        assert_eq!(s.profiles, Profiles::default());
+        assert!(s.history.is_empty());
+        assert_eq!(s.tally, Tally::default());
+        assert_eq!(s.cfg, config);
+        assert!(s.held);
+        let after = s.list();
+        for (old, new) in before
+            .running
+            .iter()
+            .chain(&before.queued)
+            .zip(after.running.iter().chain(&after.queued))
+        {
+            let mut expected = old.clone();
+            if old.state == JobState::Queued {
+                expected.estimate = config.default_estimate;
+            } else {
+                expected.runaway_floor =
+                    Some(old.runaway_at(config.runaway_factor, config.runaway_cap));
+            }
+            expected.samples = 0;
+            expected.median_ms = None;
+            assert_eq!(*new, expected);
+        }
+        assert_eq!((after.running.len(), after.queued.len()), (2, 1));
+        // The wrapper can still finish its original lease after clearing.
+        s.exited(2, Some(0), None, 2000, 101);
+        assert_eq!(s.history.len(), 1);
+        assert_eq!(s.history[0].id, 2);
     }
 
     #[test]
