@@ -33,7 +33,7 @@ impl Inputs {
     }
 }
 
-type ProbeResult = Result<Status, String>;
+type ProbeResult = Result<Option<Status>, String>;
 
 struct Pending {
     inputs: Inputs,
@@ -97,9 +97,8 @@ impl HookVerification {
                         self.cached = Some(Cached {
                             inputs: pending.inputs,
                             checked: pending.started,
-                            // A failed check replaces any earlier Installed result
-                            // with the current file-only status until the next retry.
-                            status: result.ok().and_then(Result::ok),
+                            // Inconclusive checks stay neutral until the next retry.
+                            status: result.ok().and_then(Result::ok).flatten(),
                         });
                     }
                 }
@@ -114,28 +113,34 @@ impl HookVerification {
                 Some(Status::ReviewStatusUnknown) => "review_unknown",
                 Some(Status::NotInstalled) => "not_installed",
                 Some(Status::Stale { .. }) => "stale",
-                None => fallback,
+                None => "review_unknown",
             };
         }
 
         if self.pending.is_none()
-            && let Some(inputs) = inputs
+            && let Some(inputs) = inputs.as_ref()
         {
             self.pending = Some(Pending {
                 result: launch(path.to_path_buf(), cli.to_owned(), inputs.clone()),
-                inputs,
+                inputs: inputs.clone(),
                 invalidated: false,
                 started: now,
             });
         }
-        fallback
+        if !eligible {
+            fallback
+        } else if inputs.is_some() && self.pending.is_some() {
+            "checking"
+        } else {
+            "review_unknown"
+        }
     }
 }
 
 fn verify_snapshot(path: &Path, cli: &str, inputs: &Inputs) -> ProbeResult {
     // Bind the core's own pre-query reads to the UI's cache key. Checking only
     // after completion would miss A -> B -> A edits during a pending check.
-    hooksettings::verified_status_for_snapshot(
+    hooksettings::confirmed_status_for_snapshot(
         Agent::Codex,
         path,
         cli,
@@ -234,7 +239,7 @@ mod tests {
                 assert_eq!(c, "headroom");
                 started_tx.send(()).unwrap();
                 release_rx.recv().unwrap();
-                Ok(Status::Installed)
+                Ok(Some(Status::Installed))
             },
         );
         started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -242,29 +247,46 @@ mod tests {
         release_tx.send(()).unwrap();
         assert_eq!(
             result.recv_timeout(Duration::from_secs(2)).unwrap(),
-            Ok(Status::Installed)
+            Ok(Some(Status::Installed))
         );
     }
 
     #[test]
     fn only_one_request_runs_and_unchanged_inputs_are_cached_until_ttl() {
         let mut f = Fixture::new();
-        assert_eq!(f.tick("review_unknown"), "review_unknown");
+        assert_eq!(f.tick("review_unknown"), "checking");
         for _ in 0..10 {
             f.now += Duration::from_secs(5);
-            assert_eq!(f.tick("review_unknown"), "review_unknown");
+            assert_eq!(f.tick("review_unknown"), "checking");
         }
         assert_eq!(f.requests.len(), 1);
-        f.answer(0, Ok(Status::Installed));
+        f.answer(0, Ok(Some(Status::Installed)));
         assert_eq!(f.tick("review_unknown"), "installed");
         f.now += Duration::from_secs(9);
         assert_eq!(f.tick("review_unknown"), "installed");
         assert_eq!(f.requests.len(), 1);
         f.now += Duration::from_secs(1);
-        assert_eq!(f.tick("review_unknown"), "review_unknown");
+        assert_eq!(f.tick("review_unknown"), "checking");
         assert_eq!(f.requests.len(), 2);
-        f.answer(1, Ok(Status::NeedsReview));
+        f.answer(1, Ok(Some(Status::NeedsReview)));
         assert_eq!(f.tick("review_unknown"), "needs_review");
+    }
+
+    #[test]
+    fn unconfirmed_file_status_never_warns_during_initial_or_expired_checks() {
+        for fallback in ["needs_review", "disabled", "review_unknown"] {
+            let mut f = Fixture::new();
+            assert_eq!(f.tick(fallback), "checking");
+            f.answer(0, Ok(Some(Status::Installed)));
+            assert_eq!(f.tick(fallback), "installed");
+            f.now += VERIFY_TTL;
+            assert_eq!(f.tick(fallback), "checking");
+            assert_eq!(f.requests.len(), 2);
+            f.answer(1, Ok(None));
+            assert_eq!(f.tick(fallback), "review_unknown");
+            assert_eq!(f.tick(fallback), "review_unknown");
+            assert_eq!(f.requests.len(), 2);
+        }
     }
 
     #[test]
@@ -274,38 +296,40 @@ mod tests {
             let changed = f.path.parent().unwrap().join(filename);
             fs::write(&changed, "before").unwrap();
             f.tick("review_unknown");
-            f.answer(0, Ok(Status::Installed));
+            f.answer(0, Ok(Some(Status::Installed)));
             assert_eq!(f.tick("review_unknown"), "installed");
             // Same length: cache keys must compare bytes, not file sizes.
             fs::write(&changed, "after!").unwrap();
-            assert_eq!(f.tick("review_unknown"), "review_unknown");
+            assert_eq!(f.tick("review_unknown"), "checking");
             assert_eq!(f.requests.len(), 2);
             fs::write(&changed, "third!").unwrap();
-            assert_eq!(f.tick("review_unknown"), "review_unknown");
+            assert_eq!(f.tick("review_unknown"), "checking");
             assert_eq!(f.requests.len(), 2);
-            f.answer(1, Ok(Status::Installed));
-            assert_eq!(f.tick("review_unknown"), "review_unknown");
+            f.answer(1, Ok(Some(Status::Installed)));
+            assert_eq!(f.tick("review_unknown"), "checking");
             assert_eq!(f.requests.len(), 3);
-            f.answer(2, Ok(Status::Installed));
+            f.answer(2, Ok(Some(Status::Installed)));
             assert_eq!(f.tick("review_unknown"), "installed");
         }
     }
 
     #[test]
-    fn errors_and_disconnected_workers_use_fast_status_and_throttle_retries() {
-        for disconnected in [false, true] {
+    fn inconclusive_errors_and_disconnections_stay_neutral_and_throttle_retries() {
+        for outcome in ["inconclusive", "error", "disconnected"] {
             let mut f = Fixture::new();
             f.tick("needs_review");
-            if disconnected {
+            if outcome == "disconnected" {
                 f.requests.clear();
+            } else if outcome == "inconclusive" {
+                f.answer(0, Ok(None));
             } else {
                 f.answer(0, Err("Codex missing or incompatible".into()));
             }
-            assert_eq!(f.tick("needs_review"), "needs_review");
+            assert_eq!(f.tick("needs_review"), "review_unknown");
             let count = f.requests.len();
             for _ in 0..11 {
                 f.now += Duration::from_secs(5);
-                assert_eq!(f.tick("needs_review"), "needs_review");
+                assert_eq!(f.tick("needs_review"), "review_unknown");
             }
             assert_eq!(f.requests.len(), count);
             f.now += Duration::from_secs(5);
@@ -321,7 +345,7 @@ mod tests {
             assert_eq!(f.tick(fallback), fallback);
             assert!(f.requests.is_empty());
             f.tick("needs_review");
-            f.answer(0, Ok(Status::Installed));
+            f.answer(0, Ok(Some(Status::Installed)));
             assert_eq!(f.tick("needs_review"), "installed");
             assert_eq!(f.tick(fallback), fallback);
             assert_eq!(f.requests.len(), 1);
@@ -331,13 +355,13 @@ mod tests {
     #[test]
     fn disabled_file_status_is_checked_for_effective_config_overrides() {
         let mut f = Fixture::new();
-        assert_eq!(f.tick("disabled"), "disabled");
+        assert_eq!(f.tick("disabled"), "checking");
         assert_eq!(f.requests.len(), 1);
-        f.answer(0, Ok(Status::Installed));
+        f.answer(0, Ok(Some(Status::Installed)));
         assert_eq!(f.tick("disabled"), "installed");
         assert_eq!(f.requests.len(), 1);
         fs::write(f.path.parent().unwrap().join("config.toml"), "changed").unwrap();
-        assert_eq!(f.tick("disabled"), "disabled");
+        assert_eq!(f.tick("disabled"), "checking");
         assert_eq!(f.requests.len(), 2);
     }
 
@@ -378,7 +402,7 @@ mod tests {
                         receiver
                     },
                 ),
-                "review_unknown"
+                "checking"
             );
             assert!(worker.unwrap().join().unwrap().is_err());
             // The files are back to A. A result for B must not bless A.
@@ -392,9 +416,9 @@ mod tests {
         let mut f = Fixture::new();
         f.tick("needs_review");
         assert_eq!(f.tick("stale"), "stale");
-        assert_eq!(f.tick("needs_review"), "needs_review");
-        f.answer(0, Ok(Status::Installed));
-        assert_eq!(f.tick("needs_review"), "needs_review");
+        assert_eq!(f.tick("needs_review"), "checking");
+        f.answer(0, Ok(Some(Status::Installed)));
+        assert_eq!(f.tick("needs_review"), "checking");
         assert_eq!(f.requests.len(), 2);
     }
 
@@ -402,10 +426,10 @@ mod tests {
     fn reopening_after_ttl_discards_uncollected_results() {
         let mut f = Fixture::new();
         f.tick("review_unknown");
-        f.answer(0, Ok(Status::Installed));
+        f.answer(0, Ok(Some(Status::Installed)));
         // The popover can stay closed long after the worker has finished.
         f.now += VERIFY_TTL;
-        assert_eq!(f.tick("review_unknown"), "review_unknown");
+        assert_eq!(f.tick("review_unknown"), "checking");
         assert_eq!(f.requests.len(), 2);
     }
 
@@ -413,7 +437,7 @@ mod tests {
     fn unreadable_inputs_cannot_keep_a_verified_result() {
         let mut f = Fixture::new();
         f.tick("review_unknown");
-        f.answer(0, Ok(Status::Installed));
+        f.answer(0, Ok(Some(Status::Installed)));
         assert_eq!(f.tick("review_unknown"), "installed");
         // A directory is consistently unreadable as bytes, including as root.
         fs::create_dir(f.path.parent().unwrap().join("config.toml")).unwrap();
@@ -433,7 +457,7 @@ mod tests {
         ] {
             let mut f = Fixture::new();
             f.tick("needs_review");
-            f.answer(0, Ok(status));
+            f.answer(0, Ok(Some(status)));
             assert_eq!(f.tick("needs_review"), expected);
             assert_eq!(f.requests.len(), 1);
         }

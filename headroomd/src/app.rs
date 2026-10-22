@@ -88,7 +88,8 @@ pub fn hook_states(home: &Path, cli: &str) -> Vec<(&'static str, &'static str)> 
                         "installed"
                     }
                     Some(Ok(Status::Stale { .. })) => "stale",
-                    // An unreadable or broken file is shown as missing:
+                    Some(Err(_)) if agent == Agent::Codex => "review_unknown",
+                    // For other agents, an unreadable or broken file is shown as missing:
                     // `headroom hook install` explains what is wrong with it.
                     _ => "not_installed",
                 }
@@ -576,8 +577,28 @@ mod tests {
         )
         .unwrap();
         assert_eq!(hook_states(&home, cli)[0], ("claude", "installed"));
-        // Broken JSON.
+        // Broken JSON is inconclusive, not proof of a missing hook.
         fs::write(home.join(".codex/hooks.json"), "{").unwrap();
+        assert_eq!(hook_states(&home, cli)[1], ("codex", "review_unknown"));
+    }
+
+    #[test]
+    fn unreadable_codex_files_and_invalid_config_remain_unknown() {
+        let home = dir("codex-unreadable");
+        let cli = "/nonexistent/bin/headroom";
+        let path = home.join(".codex/hooks.json");
+        hooksettings::install(Agent::Codex, &path, cli, false).unwrap();
+        let config = home.join(".codex/config.toml");
+        fs::write(&config, "[broken").unwrap();
+        assert_eq!(hook_states(&home, cli)[1], ("codex", "review_unknown"));
+        fs::remove_file(&config).unwrap();
+        fs::create_dir(&config).unwrap();
+        assert_eq!(hook_states(&home, cli)[1], ("codex", "review_unknown"));
+        fs::remove_dir(&config).unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert_eq!(hook_states(&home, cli)[1], ("codex", "review_unknown"));
+        fs::remove_dir(&path).unwrap();
         assert_eq!(hook_states(&home, cli)[1], ("codex", "not_installed"));
     }
 }

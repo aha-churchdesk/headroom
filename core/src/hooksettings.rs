@@ -351,6 +351,31 @@ pub fn verified_status_for_snapshot(
     )
 }
 
+/// Return only a status confirmed for these exact bytes. Unavailable or
+/// unrecognized Codex metadata is inconclusive, even when local configuration
+/// suggests the hook needs approval or is disabled.
+pub fn confirmed_status_for_snapshot(
+    agent: Agent,
+    path: &Path,
+    exe: &str,
+    expected_hooks: &[u8],
+    expected_config: Option<&[u8]>,
+) -> Result<Option<Status>, String> {
+    check_status_with_snapshot(
+        agent,
+        path,
+        exe,
+        Some((expected_hooks, expected_config)),
+        crate::codex_hooks::query,
+    )
+    .map(|check| check.confirmed.then_some(check.status))
+}
+
+struct StatusCheck {
+    status: Status,
+    confirmed: bool,
+}
+
 fn verified_status_with(
     agent: Agent,
     path: &Path,
@@ -367,6 +392,16 @@ fn verified_status_with_snapshot(
     expected: Option<(&[u8], Option<&[u8]>)>,
     query: impl FnOnce(&Path) -> Option<Value>,
 ) -> Result<Status, String> {
+    check_status_with_snapshot(agent, path, exe, expected, query).map(|check| check.status)
+}
+
+fn check_status_with_snapshot(
+    agent: Agent,
+    path: &Path,
+    exe: &str,
+    expected: Option<(&[u8], Option<&[u8]>)>,
+    query: impl FnOnce(&Path) -> Option<Value>,
+) -> Result<StatusCheck, String> {
     let before = read_opt(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let base = status(agent, path, exe)?;
     let eligible = agent == Agent::Codex
@@ -375,7 +410,10 @@ fn verified_status_with_snapshot(
             Status::NeedsReview | Status::ReviewStatusUnknown | Status::Disabled
         );
     if expected.is_none() && !eligible {
-        return Ok(base);
+        return Ok(StatusCheck {
+            status: base,
+            confirmed: true,
+        });
     }
     let config_path = path.with_file_name("config.toml");
     let config_before =
@@ -387,19 +425,28 @@ fn verified_status_with_snapshot(
         return Err("Codex hook configuration changed while checking status".to_owned());
     }
     if !eligible {
-        return Ok(base);
+        return Ok(StatusCheck {
+            status: base,
+            confirmed: true,
+        });
     }
     let root = parse_json(path, before.as_deref())?;
     let result = query(path);
     // A hook edited while Codex was answering needs a new check. Do not attach
     // a previous definition's approval to the replacement file.
     if read_opt(path).ok() != Some(before) || read_opt(&config_path).ok() != Some(config_before) {
-        return status(agent, path, exe);
+        return status(agent, path, exe).map(|status| StatusCheck {
+            status,
+            confirmed: false,
+        });
     }
-    Ok(result
+    let confirmed = result
         .as_ref()
-        .and_then(|metadata| verified_codex_metadata(&root, path, metadata))
-        .unwrap_or(base))
+        .and_then(|metadata| verified_codex_metadata(&root, path, metadata));
+    Ok(StatusCheck {
+        confirmed: confirmed.is_some(),
+        status: confirmed.unwrap_or(base),
+    })
 }
 
 fn verified_codex_metadata(root: &Value, path: &Path, metadata: &Value) -> Option<Status> {
@@ -740,6 +787,89 @@ mod tests {
             }),
             Ok(Status::NotInstalled)
         );
+    }
+
+    #[test]
+    fn snapshot_confirmation_requires_authoritative_metadata_even_without_local_approval() {
+        let d = tmpdir("confirmed-metadata");
+        let path = d.join("hooks.json");
+        install(Agent::Codex, &path, EXE, false).unwrap();
+        let hooks = fs::read(&path).unwrap();
+        let config_path = d.join("config.toml");
+        for config in [
+            "",
+            "profile = \"active\"\n[features]\nhooks = false\n[profiles.active.features]\nhooks = true\n",
+        ] {
+            fs::write(&config_path, config).unwrap();
+            let expected = Some((hooks.as_slice(), Some(config.as_bytes())));
+            let mut wrong_hook = metadata(&path, "trusted", true);
+            wrong_hook["hooks"][0]["sourcePath"] = json!("/other/hooks.json");
+            for response in [
+                None,
+                Some(json!({})),
+                Some(json!({"hooksEnabled": true, "hooks": []})),
+                Some(wrong_hook),
+                Some(metadata(&path, "future-status", true)),
+            ] {
+                let check =
+                    check_status_with_snapshot(Agent::Codex, &path, EXE, expected, |_| response)
+                        .unwrap();
+                assert!(
+                    !check.confirmed,
+                    "file-only status must remain inconclusive"
+                );
+            }
+            for (trust, enabled, status) in [
+                ("trusted", true, Status::Installed),
+                ("untrusted", true, Status::NeedsReview),
+                ("modified", true, Status::NeedsReview),
+                ("trusted", false, Status::Disabled),
+            ] {
+                let check = check_status_with_snapshot(Agent::Codex, &path, EXE, expected, |_| {
+                    Some(metadata(&path, trust, enabled))
+                })
+                .unwrap();
+                assert!(check.confirmed);
+                assert_eq!(check.status, status);
+            }
+            assert_eq!(fs::read(&path).unwrap(), hooks);
+            assert_eq!(fs::read_to_string(&config_path).unwrap(), config);
+        }
+    }
+
+    #[test]
+    fn files_changed_during_query_cannot_produce_confirmed_status() {
+        let d = tmpdir("confirmed-race");
+        let path = d.join("hooks.json");
+        install(Agent::Codex, &path, EXE, false).unwrap();
+        let hooks = fs::read(&path).unwrap();
+        let config_path = d.join("config.toml");
+        let config = b"# before\n";
+        for changed in [&path, &config_path] {
+            fs::write(&path, &hooks).unwrap();
+            fs::write(&config_path, config).unwrap();
+            let check = check_status_with_snapshot(
+                Agent::Codex,
+                &path,
+                EXE,
+                Some((&hooks, Some(config))),
+                |_| {
+                    fs::write(
+                        changed,
+                        if changed == &path {
+                            "{}"
+                        } else {
+                            "[features]\nhooks = false\n"
+                        },
+                    )
+                    .unwrap();
+                    Some(metadata(&path, "trusted", true))
+                },
+            )
+            .unwrap();
+            assert!(!check.confirmed);
+            assert_ne!(check.status, Status::Installed);
+        }
     }
 
     #[test]

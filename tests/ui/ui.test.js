@@ -885,12 +885,10 @@ test('hook status per agent, with the install command to copy', () => {
   lacks(ui.page(), 'wsq');
 });
 
-test('Codex hook notices distinguish approval, unknown trust, and disabled hooks', () => {
+test('confirmed Codex hook problems show approval and disabled notices', () => {
   const states = [
     ['needs_review', 'hook needs approval in /hooks', 'Codex needs review',
       'Open /hooks in Codex to approve the Headroom hook before it runs.'],
-    ['review_unknown', 'check hook approval in /hooks', 'Codex check in Codex',
-      'Headroom could not verify the current hook approval. Open /hooks in Codex to check it.'],
     ['disabled', 'hook disabled', 'Codex disabled',
       'Disabled in Codex. Check /hooks and the hook settings under [features] in ~/.codex/config.toml'],
   ];
@@ -907,12 +905,31 @@ test('Codex hook notices distinguish approval, unknown trust, and disabled hooks
       'reinstalling cannot fix disabled hooks or establish approval');
     ui.click({ act: 'copy', text: '/hooks' });
   }
-  eq(ui.sent, Array(3).fill({ cmd: 'copy', text: '/hooks' }));
+  eq(ui.sent, Array(2).fill({ cmd: 'copy', text: '/hooks' }));
+});
+
+test('pending and unavailable Codex checks stay neutral in the header and Settings', () => {
+  for (const [status, label, hint] of [
+    ['checking', 'Codex checking', 'Checking hook approval in Codex.'],
+    ['review_unknown', 'Codex not verified', 'Headroom could not verify the current hook approval.'],
+  ]) {
+    ui.UI.page = 'main';
+    ui.setState({ ...busy, hooks: { claude: 'installed', codex: status, pi: 'absent' } });
+    lacks(document.getElementById('head').innerHTML, 'class="alert"');
+    lacks(ui.head(), 'Hook settings');
+    ui.click({ act: 'goto', page: 'settings' });
+    has(ui.view(), label);
+    has(ui.view(), hint);
+    has(ui.html(), 'gtag user');
+    eq(ui.find({ act: 'copy', text: 'headroom hook install' }).length, 0);
+    eq(ui.find({ act: 'copy', text: '/hooks' }).length, status === 'review_unknown' ? 1 : 0);
+  }
 });
 
 test('mixed hook issues keep installation and Codex review actions available', () => {
   ui.setState({ ...busy, hooks: { claude: 'stale', codex: 'review_unknown', pi: 'not_installed' } });
-  has(ui.head(), 'Claude Code: hook path is stale. Codex: check hook approval in /hooks. pi: hook not installed.');
+  has(ui.head(), 'Claude Code: hook path is stale. pi: hook not installed.');
+  lacks(ui.head(), 'Codex:');
   ui.click({ act: 'goto', page: 'settings' }, 0);
   ui.click({ act: 'copy', text: 'headroom hook install' });
   ui.click({ act: 'copy', text: '/hooks' });

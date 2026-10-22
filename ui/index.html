@@ -685,7 +685,7 @@ function renderHead(S){
   const usedPct = Math.min(100, m.mem_used / m.mem_total * 100);
   const reservePct = Math.min(100, S.settings.headroom / m.mem_total * 100);
   const color = { normal:"var(--accent)", warn:"var(--warn)", critical:"var(--bad)" }[m.pressure];
-  const gaps = AGENTS.filter(([k]) => S.hooks[k] && S.hooks[k] !== "installed" && S.hooks[k] !== "absent");
+  const gaps = AGENTS.filter(([k]) => ["not_installed", "stale", "needs_review", "disabled"].includes(S.hooks[k]));
   const alert = gaps.length
     ? `<div class="alert"><span>⚠︎ ${gaps.map(([k, n]) => `${n}: ${HOOK_STATUS[S.hooks[k]][3]}`).join(". ")}.</span>
          <button data-act="goto" data-page="settings">Hook settings</button></div>`
@@ -1186,7 +1186,8 @@ const HOOK_STATUS = {
   installed:     ["ok",   "installed",     "Gated through {where}."],
   not_installed: ["fail", "not installed", "Run <span class=\"mono\">headroom hook install</span>; it adds only its own entry to {where}.", "hook not installed"],
   needs_review:  ["guard","needs review",  "Installed in {where}. Open <span class=\"mono\">/hooks</span> in Codex to approve the Headroom hook before it runs.", "hook needs approval in /hooks"],
-  review_unknown:["guard","check in Codex", "Headroom could not verify the current hook approval. Open <span class=\"mono\">/hooks</span> in Codex to check it.", "check hook approval in /hooks"],
+  checking:      ["user", "checking", "Checking hook approval in Codex."],
+  review_unknown:["user", "not verified", "Headroom could not verify the current hook approval. Open <span class=\"mono\">/hooks</span> in Codex to check it."],
   disabled:      ["guard","disabled", "Disabled in Codex. Check <span class=\"mono\">/hooks</span> and the hook settings under <span class=\"mono\">[features]</span> in <span class=\"mono\">~/.codex/config.toml</span>.", "hook disabled"],
   stale:         ["guard","stale path",    "{where} points at a headroom binary that is gone. Re-run <span class=\"mono\">headroom hook install</span>.", "hook path is stale"],
   absent:        ["user", "not found",     ""],
