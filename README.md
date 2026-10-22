@@ -1,23 +1,25 @@
 # Headroom
 
-Run four coding agents on one Mac and sooner or later they all start a test suite in the same minute. Vitest forks a worker per core, Playwright opens browsers, `tsc` holds a few GB, swap climbs past 10 GB and the machine stalls. Headroom puts those commands in a queue and starts each one only when there is memory for it.
+Headroom is a macOS menu bar app and CLI that schedules heavy commands from Codex, Claude Code, pi, and other development tools. It uses memory availability, system pressure, CPU load, and learned workload history to decide when jobs can start.
 
-It is a macOS menu bar app plus a small CLI. Each agent's pre-tool hook sends heavy shell commands (tests, builds, e2e runs, type checks) through `headroom run`, which waits for a slot and then runs the command unchanged. Everything else runs as before.
+See what is running, which agent started it, elapsed time, usual runtime, and how each job affects the queue. Profiles distinguish complete invocations, so a single-file test and a full test suite learn separately. Estimates remain explicit about missing history and variable memory use.
+
+Agent hooks route tests, builds, e2e runs, and type checks through `headroom run`. Headroom can reduce worker counts for supported tools when a job would otherwise wait for memory, while respecting explicit worker settings. Other commands run as before.
 
 Status: early. Apple Silicon only, ad-hoc signed, used daily by one person.
 
 ## How it decides
 
-- **Memory, not job count.** Headroom records the peak memory of every run, per repository and command. A command's estimate is the p90 of successful, uninterrupted runs among its last 20 attempts, with failed or interrupted peaks retained as minimum memory requirements. A queued job starts when its estimate fits in available memory, minus a reserve (2 GB by default), minus what the running jobs are still expected to grow into. A command with no history is assumed to need 1.5 GB. A job's memory is everything it starts, including tasks that turbo or a git hook's terminal move to a process group of their own.
+- **Memory, not job count.** Headroom records peak memory per repository, starting directory, and complete invocation. With at least three successful measured runs, the estimate uses their p90 peak among the last 20 attempts. Until then, it blends with broader repository history or a 1.5 GB default. Failed or interrupted peaks remain minimum memory requirements, and known worker counts can raise the estimate. A queued job normally starts when its estimate fits in available memory, minus a reserve (2 GB by default), minus what running jobs are still expected to grow into. Memory includes processes started by the job, including tasks that move to their own process groups.
 - **Pressure.** Under normal memory pressure jobs start as above. Under warn, one job may start only when nothing else of ours is running. Under critical, nothing starts.
-- **Strict order.** If the head of the queue doesn't fit, nothing behind it starts, so a big e2e run can't be starved by a stream of small jobs. A job always starts when the queue is otherwise idle, so an estimate bigger than the machine can't block forever.
-- **Short jobs may go first.** While the head waits on memory, a later job may start if it fits now and its typical run time says it will be done before the head could start anyway (when the running jobs are expected to finish). A job with no history never goes first. The head is passed over at most 3 times or for 5 minutes; after that the queue waits for it. The popover shows `passed over 2× · strict in 3m`.
+- **Queue order.** The queue considers its first job before later jobs. With "Short jobs go first" disabled, later jobs wait if the first does not fit. When enabled, the exception below applies. An oversized estimate can still start when Headroom has no running jobs, provided the queue is not held and memory pressure is not critical.
+- **Short jobs may go first.** Enabled by default. While the head waits on memory, a later job may start if it fits now and its typical run time says it will be done before the head could start anyway (when the running jobs are expected to finish). A job with no history never goes first. The head is passed over at most 3 times or for 5 minutes; after that the queue waits for it. The popover shows `passed over 2× · strict in 3m`.
 - **The guard.** Under sustained critical pressure the newest job gets SIGSTOP. If pressure stays critical it is killed and requeued once; a second kill gives up and the agent sees exit 137 with the reason. Low-priority jobs go first, and a job using more than twice its estimate (and over 8 GB) goes before anything else. Freezing and killing reach every process the job started. Pinned jobs and processes Headroom didn't start are never touched.
 - **Fail open.** If the daemon isn't running or stops answering, `headroom run` runs the command directly. Headroom can slow a command down; it can't stop one from running.
 
 ## Shrinking a job to fit
 
-Vitest, turbo and cargo start one worker per core by default, and their memory grows with the worker count. When the next job doesn't fit, Headroom can start it with fewer workers instead of making it wait. The agent sees one line saying so: `starting with 6 vitest workers instead of 14 so it fits in memory`.
+Vitest, turbo and cargo run work concurrently, and memory use can grow with the worker count. When the next job doesn't fit, Headroom can start it with fewer workers instead of making it wait. The agent sees one line saying so: `starting with 6 vitest workers instead of 14 so it fits in memory`.
 
 | Tool | How | Default it assumes |
 |---|---|---|
@@ -27,7 +29,7 @@ Vitest, turbo and cargo start one worker per core by default, and their memory g
 
 It is found in the command itself or behind an npm script (`pnpm test` running `vitest run`). Headroom leaves the count alone when you chose one yourself: a flag in the command or script (`--maxWorkers`, `--concurrency`, `-j`), the environment variable, or a parallelism setting in `vitest.config.*`, `vite.config.*` or `.cargo/config.toml`. It never goes below 2 workers, because one worker can change how a test suite behaves and not only how fast it runs.
 
-Each run records its worker count. With runs at two or more counts, peak memory is fitted as a line in the worker count, kept above every run seen. Before that, a quarter of the peak is assumed to be fixed cost. A command with no history is never tuned. Turn it off in Settings ("Shrink jobs to fit"), or for one tool or repository with `"tune_off": ["turbo", "/path/to/repo"]` in `config.json`.
+Runs record worker counts when Headroom can determine them. With successful measured runs at two or more counts, peak memory is fitted as a line in the worker count, kept above the observations; failed or interrupted peaks can raise that allowance. Before that, a quarter of the peak is assumed to be fixed cost. A command with no history is never tuned. Turn it off in Settings ("Shrink jobs to fit"), or for one tool or repository with `"tune_off": ["turbo", "/path/to/repo"]` in `config.json`.
 
 A foreground command waits at most 8 minutes in the queue (under the 10 minute limit of Claude Code's Bash tool), then exits 75 with "still queued, try again later". The hook raises the Bash tool's timeout by the time it may spend queued.
 
@@ -115,7 +117,7 @@ Earlier broad profiles remain fallback estimates; each new workload collects its
 
 The icon is a four-bar memory gauge. It turns amber or red under memory pressure, and the title shows running·queued jobs, with ❄︎ while something is frozen and ⏸︎ while the queue is held.
 
-The popover lists running and queued jobs and why the queue is waiting (`next needs 4.2 GB, 2.9 GB free`). A running job shows its memory and CPU, and the largest process inside it when that isn't the command itself: `git commit`, then `↳ tsc --noEmit` while the hook runs.
+The popover lists running and queued jobs, their reported agent, and why the queue is waiting (`next needs 4.2 GB, 2.9 GB free`). Running jobs show memory, CPU, elapsed time including pauses, and usual runtime when known. The largest process inside a job appears when it differs from the command itself: `git commit`, then `↳ tsc --noEmit` while the hook runs. Expand a job to see its full command, queue wait, memory growth allowance, and how runtime estimates, pinning, or worker counts affect scheduling.
 
 After at least three successful, uninterrupted measured runs of the same workload at the same recorded worker count, the popover also shows the historical p10–p90 band of peak memory. The conservative scheduling estimate stays separate. This band describes past runs; it is not a guarantee for the current run. When the spread exceeds fourfold and 1 GB, the UI says “Memory varies widely” instead of drawing a band; the observed bounds remain in the explanation.
 
