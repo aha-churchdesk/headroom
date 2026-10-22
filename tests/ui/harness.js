@@ -53,10 +53,12 @@ function actionable(html) {
     for (const a of attrs.matchAll(/data-([\w-]+)="([^"]*)"/g)) {
       dataset[a[1].replace(/-(\w)/g, (_, c) => c.toUpperCase())] = unescape(a[2]);
     }
-    out.push({ tag: m[1], dataset, disabled: /\sdisabled(\s|$|=)/.test(attrs),
+    out.push({ tag: m[1], tagName: m[1].toUpperCase(), dataset,
+      focus() { document.activeElement = this; }, disabled: /\sdisabled(\s|$|=)/.test(attrs),
       role: /\srole="([^"]*)"/.exec(attrs)?.[1],
       tabIndex: /\stabindex="([^"]*)"/.exec(attrs)?.[1],
-      label: /\saria-label="([^"]*)"/.exec(attrs)?.[1],
+      label: unescape(/\saria-label="([^"]*)"/.exec(attrs)?.[1] || ""),
+      pressed: /\saria-pressed="([^"]*)"/.exec(attrs)?.[1],
       checked: /\saria-checked="([^"]*)"/.exec(attrs)?.[1] });
   }
   return out;
@@ -93,7 +95,13 @@ function loadUI() {
 
   const pop = byId.pop;
   const page = () => byId.head._html + byId.view._html + byId.foot._html;
-  const find = (want) => actionable(page()).filter(el =>
+  let rendered = null, controls = [];
+  const actions = () => {
+    if (rendered !== page()) { rendered = page(); controls = actionable(rendered); }
+    return controls;
+  };
+  document.querySelectorAll = selector => selector === '[data-act]' ? actions() : [];
+  const find = (want) => actions().filter(el =>
     Object.entries(want).every(([k, v]) => el.dataset[k] === String(v)));
   const fire = (type, target) => pop._listeners[type](target);
 
@@ -106,6 +114,7 @@ function loadUI() {
     html: () => byId.view._html,
     head: () => text(byId.head._html),
     headHtml: () => byId.head._html,
+    source: () => html,
     page: () => text(page()),
     find,
     /** Click the rendered element matching these data-* values; it must be
@@ -130,7 +139,8 @@ function loadUI() {
       if (els.length !== 1) throw new Error(`press ${JSON.stringify(want)}: ${els.length} matches`);
       const el = els[0];
       let prevented = false;
-      el.closest = () => el.role === 'button' ? el : null;
+      el.focus();
+      el.closest = selector => selector === '[role="button"][data-act]' && el.role === 'button' ? el : null;
       el.click = () => fire('click', { target: { closest: () => el } });
       fire('keydown', { key, target: el, preventDefault() { prevented = true; } });
       return prevented;

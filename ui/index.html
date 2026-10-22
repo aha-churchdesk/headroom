@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Work Scheduler</title>
+<title>Headroom</title>
 <style>
 /* ─────────────────────────────────────────────────────────────
    Work Scheduler — menu bar popover UI
@@ -12,6 +12,7 @@
    ───────────────────────────────────────────────────────────── */
 
 :root{
+  color-scheme: light dark;
   --pop-w: 400px;
   --pop-max-h: 640px;
 
@@ -19,17 +20,23 @@
   --bg-elev:   #f2f2f7;
   --bg-sunk:   #e9e9ee;
   --text:      #1c1c1e;
-  --text-dim:  #8a8a8e;
-  --text-faint:#aeaeb2;
+  --text-dim:  #5b5b61;
+  --text-faint:#64646a;
   --sep:       rgba(0,0,0,.10);
   --sep-soft:  rgba(0,0,0,.06);
 
-  --accent:    #3b82f6;
-  --good:      #10b981;
-  --warn:      #f59e0b;
-  --bad:       #ef4444;
-  --ice:       #38bdf8;
+  --accent:    #205fca;
+  --good:      #086b46;
+  --warn:      #865300;
+  --bad:       #b42323;
+  --ice:       #126b91;
   --track:     rgba(0,0,0,.07);
+
+  --on-status: #ffffff;
+  --warn-tint: #ece3d6;
+  --bad-tint: #f3dcdc;
+  --good-tint: #dceae4;
+  --ice-tint: #d4e4eb;
 
   --radius: 10px;
 }
@@ -40,8 +47,8 @@
     --bg-elev:   #2c2c2e;
     --bg-sunk:   #151517;
     --text:      #f2f2f7;
-    --text-dim:  #98989d;
-    --text-faint:#6c6c70;
+    --text-dim:  #b0b0b6;
+    --text-faint:#a5a5ac;
     --sep:       rgba(255,255,255,.13);
     --sep-soft:  rgba(255,255,255,.07);
 
@@ -51,8 +58,18 @@
     --bad:       #f87171;
     --ice:       #7dd3fc;
     --track:     rgba(255,255,255,.09);
+    --on-status: #1c1c1e;
+    --warn-tint: #3f351e;
+    --bad-tint: #412b2d;
+    --good-tint: #213732;
+    --ice-tint: #2f3f48;
   }
 }
+
+@media (prefers-reduced-motion: reduce){
+  *, *::before, *::after{ transition:none !important; animation:none !important; scroll-behavior:auto !important; }
+}
+.sr-only{ position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
 
 *{ box-sizing:border-box; margin:0; padding:0; }
 
@@ -152,7 +169,7 @@ button:disabled{ cursor:default; opacity:.4; }
   font-size:11px; font-weight:600; padding:3px 9px; border-radius:6px;
   border:1px solid var(--sep); background:var(--bg-elev);
 }
-.btn-hold.on{ background:var(--warn); border-color:transparent; color:#1c1c1e; }
+.btn-hold.on{ background:var(--warn); border-color:transparent; color:var(--on-status); }
 .head .row2{ display:flex; align-items:center; gap:8px; margin-top:7px; font-size:11.5px; color:var(--text-dim); }
 .level{ font-size:10.5px; font-weight:700; letter-spacing:.06em; }
 .level.normal{ color:var(--good); }
@@ -168,7 +185,7 @@ button:disabled{ cursor:default; opacity:.4; }
 [data-tip]{ cursor:default; }
 .head .alert{
   margin-top:8px; font-size:11.5px; padding:6px 9px; border-radius:7px;
-  background:color-mix(in srgb, var(--warn) 16%, transparent);
+  background:var(--warn-tint);
   display:flex; justify-content:space-between; align-items:center; gap:8px;
 }
 .head .alert button{ font-size:11px; font-weight:600; color:var(--accent); white-space:nowrap; }
@@ -181,9 +198,9 @@ button:disabled{ cursor:default; opacity:.4; }
   margin:10px 12px 0; padding:9px 11px; border-radius:var(--radius);
   font-size:12px; position:relative;
 }
-.banner.frozen{ background:color-mix(in srgb, var(--ice) 18%, transparent); }
-.banner.requeued{ background:color-mix(in srgb, var(--warn) 18%, transparent); }
-.banner.gave_up{ background:color-mix(in srgb, var(--bad) 16%, transparent); }
+.banner.frozen{ background:var(--ice-tint); }
+.banner.requeued{ background:var(--warn-tint); }
+.banner.gave_up{ background:var(--bad-tint); }
 .banner .t{ font-weight:600; padding-right:18px; }
 .banner .d{ color:var(--text-dim); font-size:11.5px; margin-top:1px; }
 .banner .acts{ display:flex; gap:6px; margin-top:7px; }
@@ -193,7 +210,7 @@ button:disabled{ cursor:default; opacity:.4; }
   background:var(--bg); border:1px solid var(--sep);
 }
 .chip-btn.danger{ color:var(--bad); }
-.chip-btn.confirm{ background:var(--bad); color:#fff; border-color:transparent; }
+.chip-btn.confirm{ background:var(--bad); color:var(--on-status); border-color:transparent; }
 
 /* Sections */
 .sec{ padding:10px 0 4px; }
@@ -242,7 +259,7 @@ button:disabled{ cursor:default; opacity:.4; }
 .fp.over .f{ background:var(--warn); }
 .fp.runaway .f{ background:var(--bad); }
 .fp.frozen .f{
-  background: repeating-linear-gradient(135deg, var(--ice) 0 4px, color-mix(in srgb, var(--ice) 55%, transparent) 4px 8px);
+  background: repeating-linear-gradient(135deg, var(--ice) 0 4px, var(--ice-tint) 4px 8px);
 }
 .fp .tick{ position:absolute; top:-3px; bottom:-3px; width:2px; margin-left:-1px; background:var(--text); opacity:.55; border-radius:1px; }
 
@@ -253,12 +270,12 @@ button:disabled{ cursor:default; opacity:.4; }
 }
 .ib:hover{ background:var(--bg-sunk); color:var(--text); }
 .ib.on{ color:var(--text); background:var(--bg-sunk); }
-.ib.kill-confirm{ width:auto; padding:0 7px; background:var(--bad); color:#fff; font-weight:600; }
+.ib.kill-confirm{ width:auto; padding:0 7px; background:var(--bad); color:var(--on-status); font-weight:600; }
 /* Queued rows swap the estimate for their actions on hover, so the name
    keeps the full width the rest of the time. */
 .job.queued .acts-i{ display:none; }
-.job.queued:hover .acts-i, .job.queued.expanded .acts-i{ display:flex; }
-.job.queued:hover .mem, .job.queued.expanded .mem{ display:none; }
+.job.queued:hover .acts-i, .job.queued:focus-within .acts-i, .job.queued.restoring-focus .acts-i, .job.queued.expanded .acts-i{ display:flex; }
+.job.queued:hover .mem, .job.queued:focus-within .mem, .job.queued.restoring-focus .mem, .job.queued.expanded .mem{ display:none; }
 /* Emoji toggles are coloured either way; mute the off state so on reads as on. */
 .ib:not(.on) .emo{ filter:grayscale(1); opacity:.55; }
 
@@ -291,7 +308,7 @@ button:disabled{ cursor:default; opacity:.4; }
   position:sticky; top:0; background:var(--bg); z-index:1;
 }
 .pagehead .back{ color:var(--accent); font-size:12.5px; }
-.pagehead h3{ font-size:13px; font-weight:650; flex:1; text-align:center; margin-right:44px; }
+.pagehead h1{ font-size:13px; font-weight:650; flex:1; text-align:center; margin-right:44px; }
 
 .hrow{ padding:7px 14px; cursor:pointer; }
 .hrow:hover{ background:var(--bg-elev); }
@@ -302,9 +319,9 @@ button:disabled{ cursor:default; opacity:.4; }
   font-size:9.5px; font-weight:700; letter-spacing:.04em; text-transform:uppercase;
   padding:1px 6px; border-radius:4px; white-space:nowrap;
 }
-.gtag.ok{ color:var(--good); background:color-mix(in srgb, var(--good) 14%, transparent); }
-.gtag.fail{ color:var(--bad); background:color-mix(in srgb, var(--bad) 14%, transparent); }
-.gtag.guard{ color:#1c1c1e; background:var(--warn); }
+.gtag.ok{ color:var(--good); background:var(--good-tint); }
+.gtag.fail{ color:var(--bad); background:var(--bad-tint); }
+.gtag.guard{ color:var(--on-status); background:var(--warn); }
 .gtag.user{ color:var(--text-dim); background:var(--bg-sunk); }
 
 .cmd-ctl{ display:flex; justify-content:space-between; gap:8px; padding:10px 14px 8px; }
@@ -408,9 +425,9 @@ pre.snip{
     <span class="faux">Tue 09:42</span>
   </div>
   <div class="popover" id="pop">
-    <div class="head" id="head"></div>
-    <div class="body" id="view"></div>
-    <div class="foot" id="foot"></div>
+    <header class="head" id="head" aria-label="Memory and queue status"></header>
+    <main class="body" id="view" aria-labelledby="page-title"></main>
+    <nav class="foot" id="foot" aria-label="Headroom pages"></nav>
     <div class="tip" id="tip"></div>
   </div>
 </div>
@@ -478,6 +495,7 @@ let STATE = null;
 const UI = {
   page: "main",           // main | history | commands | profile | others | settings
   profileKey: null,
+  trail: [],             // Previous page, reader position, and the control that opened this page
   cmdDays: 7,             // Commands page: window in days, and the column it sorts by
   cmdSort: "run_s",
   expanded: new Set(),
@@ -506,13 +524,25 @@ const $ = id => document.getElementById(id);
 // Values and toggle states change on each reply; the action itself stays put.
 function controlKey(el){
   const d = el.dataset;
-  return JSON.stringify([d.act, d.id, d.key, d.name, d.page, d.pattern, d.confirm, d.step,
+  return JSON.stringify([d.act, d.id, d.key, d.name, d.page, d.pattern, d.confirm, d.step, d.run,
     d.act === "set" && d.key !== "kill_mode" ? null : d.val]);
 }
 const controlsWithKey = key => [...document.querySelectorAll("[data-act]")]
   .filter(el => controlKey(el) === key);
 
-function render(){
+function navigate(page, trigger, back = false){
+  const saved = back ? UI.trail.pop() : null;
+  if (!back){
+    const key = trigger?.dataset?.act ? controlKey(trigger) : null;
+    UI.trail.push({ page:UI.page, profileKey:UI.profileKey, scroll:$("view").scrollTop,
+      control:key, occurrence:key ? Math.max(0, controlsWithKey(key).indexOf(trigger)) : 0 });
+  }
+  UI.page = saved?.page || page;
+  if (saved) UI.profileKey = saved.profileKey;
+  render(saved || { scroll:0 });
+}
+
+function render(destination = null){
   if (!STATE) return;
   // Updates arrive every second. A rerender mid-drag would drop the drag, so
   // defer it; the drop sends its own intent and the next tick catches up.
@@ -539,11 +569,18 @@ function render(){
   $("foot").style.display = UI.page === "main" ? "" : "none";
 
   // Keep the reader's place and the cursor across the 1 s rerender.
-  view.scrollTop = scroll;
-  const target = focus ? $(focus) : control ? controlsWithKey(control)[occurrence] : null;
+  view.scrollTop = destination ? destination.scroll : scroll;
+  const target = destination
+    ? (destination.control && controlsWithKey(destination.control)[destination.occurrence]) || $("page-title")
+    : focus ? $(focus) : control ? controlsWithKey(control)[occurrence] : null;
   if (target && !target.disabled){
+    // Replacement rows have lost :focus-within, which hides queued actions.
+    // Reveal the row until focus restores that selector, including in WebKit.
+    const row = target.closest?.(".job.queued");
+    row?.classList.add("restoring-focus");
     target.focus({ preventScroll:true });
-    if (caret != null) target.setSelectionRange(caret, selectionEnd, selectionDirection);
+    row?.classList.remove("restoring-focus");
+    if (!destination && caret != null) target.setSelectionRange(caret, selectionEnd, selectionDirection);
   }
   if (!LIVE) renderTray(STATE);
   refreshTip();
@@ -573,7 +610,7 @@ function renderHead(S){
         <div class="reserve" style="width:${reservePct}%"></div>
       </div>
       <span class="memtxt num">${gb(m.mem_used)} / ${gb(m.mem_total)} GB</span>
-      <button class="btn-hold ${S.held ? "on" : ""}" data-act="hold"
+      <button class="btn-hold ${S.held ? "on" : ""}" data-act="hold" aria-label="Hold new jobs" aria-pressed="${S.held}"
         title="${S.held ? "Start admitting jobs again" : "Stop starting new jobs; running jobs continue"}">
         ${S.held ? "Held" : "Hold"}</button>
     </div>
@@ -600,7 +637,7 @@ function renderLastDay(h){
     : "No job had to wait";
   return `
     <div class="sec day">
-      <div class="sec-h">Last 24h</div>
+      <h2 class="sec-h">Last 24h</h2>
       <div class="day-row num">
         ${cell(`${h.runs}${h.more ? "+" : ""}`, h.runs === 1 ? "run" : "runs",
           h.more ? "History keeps 2,000 runs; more than that finished today" : "Jobs that finished", h.runs ? "" : "zero")}
@@ -614,20 +651,20 @@ function renderLastDay(h){
 }
 
 function renderMain(S){
-  return S.banners.map(renderBanner).join("") + renderLastDay(S.last_day) + `
+  return `<h1 id="page-title" class="sr-only" tabindex="-1">Jobs</h1>` + S.banners.map(renderBanner).join("") + renderLastDay(S.last_day) + `
     <div class="sec">
-      <div class="sec-h">Running ${S.running.length || ""}</div>
+      <h2 class="sec-h">Running ${S.running.length || ""}</h2>
       ${S.running.length
         ? S.running.map(renderRunning).join("")
         : `<div class="empty">Nothing running · ${gb(S.system.mem_available)} GB available</div>`}
     </div>
     <div class="sec" id="queue">
-      <div class="sec-h">Queued ${S.queued.length || ""}
+      <h2 class="sec-h">Queued ${S.queued.length || ""}
         ${S.queued.length && S.queue_reason
           ? `<span class="why blocked">· ${esc(reasonText(S.queue_reason))}</span>` : ""}
         ${S.queued.length && S.queued[0].skipped
           ? `<span class="why" title="Shorter jobs that fit started ahead of it. After ${S.settings.backfill_skips ?? 3} times or ${dur(S.settings.backfill_wait_s ?? 300)}, the queue waits for it.">· passed over ${S.queued[0].skipped}×${S.queued[0].strict_in_s ? ` · strict in ${dur(S.queued[0].strict_in_s)}` : ""}</span>` : ""}
-      </div>
+      </h2>
       ${S.queued.length
         ? S.queued.map((j, i) => renderQueued(j, i, S)).join("")
         : `<div class="empty">Queue empty</div>`}
@@ -637,13 +674,13 @@ function renderMain(S){
 function renderBanner(b){
   const killKey = "bkill:" + b.id;
   const acts = b.kind === "frozen" ? `
-      <button class="chip-btn" data-act="resume" data-id="${b.job_id}">Resume</button>
+      <button class="chip-btn" data-act="resume" data-id="${b.job_id}" aria-label="Resume ${jobLabel(b)}">Resume</button>
       <button class="chip-btn ${confirming(killKey) ? "confirm" : "danger"}"
-        data-act="kill" data-id="${b.job_id}" data-confirm="${killKey}">
+        data-act="kill" data-id="${b.job_id}" data-confirm="${killKey}" aria-label="${confirming(killKey) ? "Confirm kill" : "Kill"} ${jobLabel(b)}">
         ${confirming(killKey) ? "Kill?" : "Kill"}</button>`
     : b.kind === "requeued" ? `
       <button class="chip-btn" data-act="pin" data-id="${b.job_id}" data-on="1"
-        title="Pinned jobs are never frozen or killed">Pin it</button>`
+        aria-label="Pin ${jobLabel(b)}" title="Pinned jobs are never frozen or killed">Pin it</button>`
     : "";
   const title = { frozen:"Froze", requeued:"Killed and requeued", gave_up:"Gave up on" }[b.kind];
   return `
@@ -651,7 +688,7 @@ function renderBanner(b){
       <div class="t">${b.kind === "frozen" ? "❄︎" : "⚠︎"} ${title} “${esc(b.cmd)}” (${esc(b.label)})</div>
       <div class="d">${esc(b.why)}</div>
       ${acts ? `<div class="acts">${acts}</div>` : ""}
-      <button class="x" data-act="dismiss" data-id="${b.id}" title="Dismiss">✕</button>
+      <button class="x" data-act="dismiss" data-id="${b.id}" aria-label="Dismiss notice for ${jobLabel(b)}" title="Dismiss">✕</button>
     </div>`;
 }
 
@@ -685,11 +722,13 @@ function marks(j){
        + (j.pinned ? `<span class="tag" title="Pinned: never frozen or killed">📌</span>` : "");
 }
 
+const jobLabel = j => esc(`${j.label}: ${j.cmd}`);
+
 function killBtn(j){
   const key = "kill:" + j.id;
   return confirming(key)
-    ? `<button class="ib kill-confirm" data-act="kill" data-id="${j.id}" data-confirm="${key}">Kill?</button>`
-    : `<button class="ib" data-act="kill" data-id="${j.id}" data-confirm="${key}" title="Kill (click twice)">✕</button>`;
+    ? `<button class="ib kill-confirm" data-act="kill" data-id="${j.id}" data-confirm="${key}" aria-label="Confirm kill ${jobLabel(j)}">Kill?</button>`
+    : `<button class="ib" data-act="kill" data-id="${j.id}" data-confirm="${key}" aria-label="Kill ${jobLabel(j)}" title="Kill (click twice)">✕</button>`;
 }
 
 function renderRunning(j){
@@ -708,11 +747,11 @@ function renderRunning(j){
         ${j.tuned ? `<span class="meta" title="Started with fewer workers so it fits in memory; it runs slower">${j.tuned.workers}/${j.tuned.default} workers</span>` : ""}
         <span class="acts-i">
           ${frozen
-            ? `<button class="ib" data-act="resume" data-id="${j.id}" title="Resume">▶︎</button>`
-            : `<button class="ib" data-act="freeze" data-id="${j.id}" title="Pause (freeze)">⏸︎</button>`}
+            ? `<button class="ib" data-act="resume" data-id="${j.id}" aria-label="Resume ${jobLabel(j)}" title="Resume">▶︎</button>`
+            : `<button class="ib" data-act="freeze" data-id="${j.id}" aria-label="Pause ${jobLabel(j)}" title="Pause (freeze)">⏸︎</button>`}
           ${killBtn(j)}
           <button class="ib ${j.pinned ? "on" : ""}" data-act="pin" data-id="${j.id}" data-on="${j.pinned ? 0 : 1}"
-            title="${j.pinned ? "Unpin" : "Pin: never freeze or kill this job"}"><span class="emo">📌</span></button>
+            aria-label="Pin ${jobLabel(j)}" aria-pressed="${j.pinned}" title="${j.pinned ? "Unpin" : "Pin: never freeze or kill this job"}"><span class="emo">📌</span></button>
         </span>
       </div>
       ${UI.expanded.has(j.id) ? renderDetail(j) : ""}
@@ -730,12 +769,12 @@ function renderQueued(j, i, S){
         ${jobName(j)}${j.low ? marks({ low:true }) : ""}
         ${j.retry ? `<span class="tag" title="Requeued after a guard kill (retry ${j.retry}/1)">↻</span>` : ""}
         <span class="acts-i">
-          <button class="ib" data-act="top" data-id="${j.id}" title="Move to top" ${i === 0 ? "disabled" : ""}>⤒</button>
+          <button class="ib" data-act="top" data-id="${j.id}" aria-label="Move ${jobLabel(j)} to top of queue" title="Move to top" ${i === 0 ? "disabled" : ""}>⤒</button>
           <button class="ib ${j.pinned ? "on" : ""}" data-act="pin" data-id="${j.id}" data-on="${j.pinned ? 0 : 1}"
-            title="${j.pinned ? "Unpin" : "Pin: run next, skip the memory check"}"><span class="emo">📌</span></button>
+            aria-label="Pin ${jobLabel(j)}" aria-pressed="${j.pinned}" title="${j.pinned ? "Unpin" : "Pin: run next, skip the memory check"}"><span class="emo">📌</span></button>
           <button class="ib ${j.low ? "on" : ""}" data-act="low" data-id="${j.id}" data-on="${j.low ? 0 : 1}"
-            title="${j.low ? "Normal priority" : "Low: background CPU priority"}"><span class="emo">🐢</span></button>
-          <button class="ib" data-act="cancel" data-id="${j.id}" title="Cancel: the command exits without running">✕</button>
+            aria-label="Low priority for ${jobLabel(j)}" aria-pressed="${j.low}" title="${j.low ? "Normal priority" : "Low: background CPU priority"}"><span class="emo">🐢</span></button>
+          <button class="ib" data-act="cancel" data-id="${j.id}" aria-label="Cancel ${jobLabel(j)}" title="Cancel: the command exits without running">✕</button>
         </span>
         <span class="mem num two"><span>${estLabel(j)}</span><span title="Time in the queue so far">waiting ${dur(j.waited_s)}</span></span>
       </div>
@@ -771,7 +810,8 @@ function renderFoot(){
 }
 
 function pageHead(title, back = "main"){
-  return `<div class="pagehead"><button class="back" data-act="goto" data-page="${back}">‹ Back</button><h3>${title}</h3></div>`;
+  back = UI.trail[UI.trail.length - 1]?.page || back;
+  return `<div class="pagehead"><button class="back" data-act="goto" data-page="${back}" data-back="true">‹ Back</button><h1 id="page-title" tabindex="-1">${title}</h1></div>`;
 }
 
 function outcomeTag(r){
@@ -787,7 +827,7 @@ function outcomeTag(r){
 
 function renderHistory(S){
   return pageHead("History") + (S.history.length ? S.history.map(r => `
-    <div class="hrow" role="button" tabindex="0" data-act="profile" data-key="${esc(r.key)}">
+    <div class="hrow" role="button" tabindex="0" data-act="profile" data-key="${esc(r.key)}"${r.ended_at != null ? ` data-run="${esc(JSON.stringify([r.id, r.ended_at, r.guard?.action || null]))}"` : ""}>
       <div class="l1"><span class="name"><b>${esc(r.label)}</b> <span class="dim">· ${esc(r.cmd)}</span></span>${outcomeTag(r)}</div>
       <div class="l2 num">${dur(r.duration_s)} · peak ${gb(r.peak)} / est ${gb(r.estimate)} GB${r.tuned ? ` · ${r.tuned.workers}/${r.tuned.default} workers` : ""}${r.ahead_of ? ` · started ahead of ${esc(r.ahead_of)}` : ""} · ${ago(r.ended_ago_s)}
         ${r.guard && r.guard.why ? `<br>${esc(r.guard.why)}` : ""}</div>
@@ -809,8 +849,8 @@ function renderCommands(S){
   const wins = S.commands || [];
   const w = wins.find(x => x.days === UI.cmdDays) || wins[0];
   if (!w) return pageHead("Commands") + `<div class="empty">No runs yet</div>`;
-  const seg = (items, cur, act) => `<span class="seg">${items.map(([v, l]) =>
-    `<button class="${v === cur ? "on" : ""}" data-act="${act}" data-val="${v}">${l}</button>`).join("")}</span>`;
+  const seg = (items, cur, act) => `<span class="seg" role="group" aria-label="${act === "cmd_days" ? "Command history period" : "Sort commands by"}">${items.map(([v, l]) =>
+    `<button class="${v === cur ? "on" : ""}" data-act="${act}" data-val="${v}" aria-pressed="${v === cur}" aria-label="${act === "cmd_days" ? `Last ${v} days` : `Sort by ${l.toLowerCase()}`}">${l}</button>`).join("")}</span>`;
   const controls = `<div class="cmd-ctl">
     ${seg(wins.map(x => [x.days, `${x.days}d`]), w.days, "cmd_days")}
     ${seg(CMD_SORTS, UI.cmdSort, "cmd_sort")}
@@ -929,11 +969,11 @@ const KILL_MODES = [
   ["freeze_kill", "Freeze + kill", "Freeze first; if pressure stays critical, kill and requeue it once."],
 ];
 
-function stepper(key, value, step, fmt, min, max){
-  return `<span class="stepper num">
-    <button data-act="set" data-key="${key}" data-step="down" data-val="${Math.max(min, value - step)}" ${value <= min ? "disabled" : ""}>−</button>
+function stepper(key, label, value, step, fmt, min, max){
+  return `<span class="stepper num" role="group" aria-label="${label}">
+    <button data-act="set" data-key="${key}" data-step="down" aria-label="Decrease ${label.toLowerCase()}" data-val="${Math.max(min, value - step)}" ${value <= min ? "disabled" : ""}>−</button>
     <span>${fmt(value)}</span>
-    <button data-act="set" data-key="${key}" data-step="up" data-val="${Math.min(max, value + step)}" ${value >= max ? "disabled" : ""}>+</button>
+    <button data-act="set" data-key="${key}" data-step="up" aria-label="Increase ${label.toLowerCase()}" data-val="${Math.min(max, value + step)}" ${value >= max ? "disabled" : ""}>+</button>
   </span>`;
 }
 
@@ -951,36 +991,38 @@ function renderSettings(S){
     <div class="set">
       <div class="k">Headroom</div>
       <div class="h">Memory kept free before a new job may start.</div>
-      <div class="ctl">${stepper("headroom", c.headroom, 0.5 * GiB, b => gb(b) + " GB", 0, Math.max(16 * GiB, Math.floor(S.system.mem_total / GiB) * GiB / 2))}</div>
+      <div class="ctl">${stepper("headroom", "Headroom", c.headroom, 0.5 * GiB, b => gb(b) + " GB", 0, Math.max(16 * GiB, Math.floor(S.system.mem_total / GiB) * GiB / 2))}</div>
     </div>
     <div class="set">
       <div class="k">When memory runs out</div>
-      <div class="ctl"><span class="seg">${KILL_MODES.map(([k, l]) =>
-        `<button class="${k === c.kill_mode ? "on" : ""}" data-act="set" data-key="kill_mode" data-val="${k}">${l}</button>`).join("")}</span></div>
+      <div class="ctl"><span class="seg" role="group" aria-label="When memory runs out">${KILL_MODES.map(([k, l]) =>
+        `<button class="${k === c.kill_mode ? "on" : ""}" data-act="set" data-key="kill_mode" data-val="${k}" aria-pressed="${k === c.kill_mode}">${l}</button>`).join("")}</span></div>
       <div class="h" style="margin-top:6px">${mode[2]} Pinned jobs and other apps are never touched.</div>
     </div>
     <div class="set">
       <div class="k">Foreground wait limit</div>
       <div class="h">How long an agent's command waits in the queue before it's told to retry. Background commands wait as long as needed.</div>
-      <div class="ctl">${stepper("wait_cap_s", c.wait_cap_s, 60, s => Math.round(s / 60) + " min", 60, 540)}</div>
+      <div class="ctl">${stepper("wait_cap_s", "Foreground wait limit", c.wait_cap_s, 60, s => Math.round(s / 60) + " min", 60, 540)}</div>
     </div>
     <div class="set">
       <div class="k">Default estimate</div>
       <div class="h">Assumed for a command with no history yet.</div>
-      <div class="ctl">${stepper("default_estimate", c.default_estimate, 0.5 * GiB, b => gb(b) + " GB", 0.5 * GiB, 16 * GiB)}</div>
+      <div class="ctl">${stepper("default_estimate", "Default estimate", c.default_estimate, 0.5 * GiB, b => gb(b) + " GB", 0.5 * GiB, 16 * GiB)}</div>
     </div>
     <div class="set">
       <div class="k">Heavy commands</div>
       <div class="h">Commands matching these are queued. Dashed ones are long-lived and never queued.</div>
       <div class="pats mono">
-        ${c.patterns.map(p => `<span class="pat">${esc(p)}<button data-act="remove_pattern" data-pattern="${esc(p)}" title="Remove">✕</button></span>`).join("")}
+        ${c.patterns.map(p => `<span class="pat">${esc(p)}<button data-act="remove_pattern" data-pattern="${esc(p)}" aria-label="Remove pattern ${esc(p)}" title="Remove">✕</button></span>`).join("")}
         ${c.excluded.map(p => `<span class="pat excl" title="Long-lived: not queued">${esc(p)}</span>`).join("")}
       </div>
       <div class="ctl">
+        <label class="sr-only" for="patIn">New heavy command pattern</label>
         <input class="txt mono" id="patIn" placeholder="add pattern, e.g. bun test" value="${esc(UI.drafts.pattern)}" data-draft="pattern">
         <button class="chip-btn" data-act="add_pattern" ${UI.drafts.pattern.trim() ? "" : "disabled"}>Add</button>
       </div>
       <div class="ctl">
+        <label class="sr-only" for="testIn">Test a command</label>
         <input class="txt mono" id="testIn" placeholder="test a command: pnpm vitest run src/a.test.ts" value="${esc(UI.drafts.test)}" data-draft="test">
       </div>
       ${verdict}
@@ -1098,11 +1140,11 @@ $("pop").addEventListener("click", (e) => {
   if (d.confirm) UI.confirm = null;
 
   switch (d.act){
-    case "goto":    UI.page = d.page; $("view").scrollTop = 0; break;
+    case "goto":    navigate(d.page, t, d.back === "true"); return;
     case "expand":  UI.expanded.has(id) ? UI.expanded.delete(id) : UI.expanded.add(id); break;
     case "expand_app": UI.openApps.has(d.name) ? UI.openApps.delete(d.name) : UI.openApps.add(d.name); break;
     case "profile": UI.profileFrom = UI.page === "main" || UI.page === "commands" ? UI.page : "history";
-                    UI.page = "profile"; UI.profileKey = d.key; break;
+                    UI.profileKey = d.key; navigate("profile", t); return;
     case "snippet": UI.snippet = !UI.snippet; break;
     case "cmd_days": UI.cmdDays = Number(d.val); break;
     case "cmd_sort": UI.cmdSort = d.val; break;
@@ -1149,7 +1191,10 @@ $("pop").addEventListener("keydown", (e) => {
     const p = UI.drafts.pattern.trim();
     if (p){ UI.drafts.pattern = ""; send({ cmd:"add_pattern", pattern: p }); }
   }
-  if (e.key === "Escape" && UI.page !== "main"){ UI.page = "main"; render(); }
+  if (e.key === "Escape" && UI.page !== "main"){
+    e.preventDefault?.();
+    navigate(UI.page === "profile" ? UI.profileFrom || "history" : "main", null, true);
+  }
 });
 
 /* Drag to reorder. Pinned rows sit above every unpinned row, so a drop

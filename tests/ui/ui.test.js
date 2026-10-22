@@ -11,6 +11,7 @@ const failures = [];
 function test(name, fn) {
   ui.sent.length = 0;
   ui.UI.page = 'main';
+  ui.UI.trail.length = 0;
   ui.UI.cmdDays = 7;
   ui.UI.cmdSort = 'run_s';
   ui.UI.confirm = null;
@@ -87,6 +88,43 @@ test('state updates restore focus to replacement controls even when their next v
   }
 });
 
+test('refresh reveals a collapsed queued action before restoring its focus', () => {
+  const query = document.querySelectorAll;
+  const before = { dataset: { act: 'pin', id: busy.queued[0].id } };
+  const classes = new Set();
+  const row = { classList: { add: name => classes.add(name), remove: name => classes.delete(name) } };
+  const after = { dataset: before.dataset, closest: selector => selector === '.job.queued' ? row : null,
+    focus() {
+      if (!classes.has('restoring-focus')) throw new Error('queued action is display:none before focus');
+      document.activeElement = this;
+    } };
+  let queries = 0;
+  try {
+    document.activeElement = before;
+    document.querySelectorAll = () => [queries++ ? after : before];
+    ui.setState(busy);
+    eq(document.activeElement === after, true);
+    eq(classes.has('restoring-focus'), false, 'temporary visibility clears after focus');
+    has(ui.source(), '.job.queued.restoring-focus .acts-i');
+  } finally {
+    document.querySelectorAll = query;
+    document.activeElement = null;
+  }
+});
+
+test('return navigation keeps the same history run when another run appears first', () => {
+  const run = { ...history.history[0], ended_at: 1720000000 };
+  const first = { ...run, ended_at: 1720000001 };
+  ui.setState({ ...history, history: [first, run] });
+  ui.click({ act: 'goto', page: 'history' });
+  const source = ui.find({ act: 'profile' })[1];
+  ui.click({ act: 'profile', run: source.dataset.run });
+  ui.setState({ ...history, history: [{ ...run, ended_at: 1720000002 }, first, run] });
+  ui.key('Escape');
+  eq(document.activeElement.dataset.run, source.dataset.run);
+  eq(document.activeElement === ui.find({ act: 'profile' })[2], true);
+});
+
 test('job details and command profiles open from keyboard controls', () => {
   ui.setState(busy);
   const action = { act: 'expand', id: busy.running[0].id };
@@ -112,6 +150,143 @@ test('settings switches expose their names and current states', () => {
     const control = ui.find({ act: 'set', key })[0];
     eq([control.role, control.label, control.checked],
        ['switch', label, String(busy.settings[key])]);
+  }
+});
+
+
+test('navigation focuses the destination heading and returns to the source row and scroll', () => {
+  ui.setState(history);
+  ui.click({ act: 'goto', page: 'commands' });
+  const view = document.getElementById('view');
+  eq(document.activeElement.id, 'page-title');
+  has(ui.html(), '<h1 id="page-title" tabindex="-1">Commands</h1>');
+  const row = ui.find({ act: 'profile' })[1];
+  view.scrollTop = 175;
+  // Custom role buttons do not receive focus on a mouse click in WebKit.
+  document.activeElement = document.body;
+  ui.click({ act: 'profile', key: row.dataset.key });
+  eq(ui.UI.page, 'profile');
+  eq(view.scrollTop, 0);
+  eq(document.activeElement.id, 'page-title');
+  ui.setState(history);
+  eq(document.activeElement.id, 'page-title', 'one-second updates keep heading focus');
+  ui.key('Escape');
+  eq(ui.UI.page, 'commands');
+  eq(view.scrollTop, 175);
+  eq(document.activeElement.dataset, row.dataset);
+  ui.click({ act: 'profile', key: row.dataset.key });
+  ui.click({ act: 'goto', page: 'commands' });
+  eq(view.scrollTop, 175);
+  eq(document.activeElement.dataset, row.dataset);
+});
+
+test('return navigation restores the selected occurrence of repeated profile rows', () => {
+  const repeated = { ...history, history: [history.history[0], history.history[0]] };
+  ui.setState(repeated);
+  ui.click({ act: 'goto', page: 'history' });
+  ui.click({ act: 'profile' }, 1);
+  ui.key('Escape');
+  eq(document.activeElement === ui.find({ act: 'profile' })[1], true);
+});
+
+test('return navigation falls back to the heading if the originating job disappeared', () => {
+  ui.setState(busy);
+  ui.click({ act: 'expand', id: busy.running[0].id });
+  document.getElementById('view').scrollTop = 90;
+  ui.click({ act: 'profile', key: busy.running[0].key });
+  ui.setState({ ...busy, running: [] });
+  ui.key('Escape');
+  eq(ui.UI.page, 'main');
+  eq(document.activeElement.id, 'page-title');
+  eq(document.getElementById('view').scrollTop, 90);
+});
+
+test('Escape returns through a profile and its source list after opening header settings', () => {
+  ui.setState(history);
+  ui.click({ act: 'goto', page: 'commands' });
+  ui.click({ act: 'profile' }, 0);
+  ui.click({ act: 'goto', page: 'settings' });
+  ui.key('Escape');
+  eq(ui.UI.page, 'profile');
+  ui.key('Escape');
+  eq(ui.UI.page, 'commands');
+});
+
+test('job actions expose descriptive names and toggle states', () => {
+  ui.setState(busy);
+  for (const job of [...busy.running, ...busy.queued]) {
+    const name = `${job.label}: ${job.cmd}`;
+    const pin = ui.find({ act: 'pin', id: job.id })[0];
+    eq(pin.label, `Pin ${name}`);
+    eq(pin.pressed, String(job.pinned));
+    for (const action of ['freeze', 'kill', 'top', 'low', 'cancel']) {
+      const control = ui.find({ act: action, id: job.id })[0];
+      if (control) has(control.label, name);
+      if (control && action === 'low') eq(control.pressed, String(job.low));
+    }
+  }
+  eq(ui.find({ act: 'hold' })[0].pressed, 'false');
+  ui.setState(held);
+  eq(ui.find({ act: 'hold' })[0].pressed, 'true');
+  ui.setState(frozen);
+  for (const control of ui.find({ act: 'resume' })) has(control.label, 'headroom-hog');
+});
+
+test('settings expose named steppers, input labels, pattern removal, and selected segments', () => {
+  ui.setState(busy);
+  ui.click({ act: 'goto', page: 'settings' }, 0);
+  for (const [key, label] of [['headroom', 'headroom'], ['wait_cap_s', 'foreground wait limit'],
+    ['default_estimate', 'default estimate']]) {
+    const [minus, plus] = ui.find({ act: 'set', key });
+    eq([minus.label, plus.label], [`Decrease ${label}`, `Increase ${label}`]);
+  }
+  for (const control of ui.find({ act: 'set', key: 'kill_mode' })) {
+    eq(control.pressed, String(control.dataset.val === busy.settings.kill_mode));
+  }
+  eq(ui.find({ act: 'remove_pattern', pattern: 'vitest' })[0].label, 'Remove pattern vitest');
+  has(ui.html(), 'for="patIn">New heavy command pattern</label>');
+  has(ui.html(), 'for="testIn">Test a command</label>');
+});
+
+test('command period and sorting controls announce the current selection', () => {
+  ui.setState(history);
+  ui.click({ act: 'goto', page: 'commands' });
+  eq(ui.find({ act: 'cmd_days', val: '7' })[0].pressed, 'true');
+  eq(ui.find({ act: 'cmd_days', val: '30' })[0].pressed, 'false');
+  ui.click({ act: 'cmd_days', val: '30' });
+  eq(ui.find({ act: 'cmd_days', val: '30' })[0].pressed, 'true');
+  ui.click({ act: 'cmd_sort', val: 'runs' });
+  eq(ui.find({ act: 'cmd_sort', val: 'runs' })[0].pressed, 'true');
+  eq(ui.find({ act: 'cmd_sort', val: 'run_s' })[0].pressed, 'false');
+});
+
+test('the popover has a named main landmark, page navigation, and theme-aware native controls', () => {
+  has(ui.source(), '<main class="body" id="view" aria-labelledby="page-title">');
+  has(ui.source(), '<nav class="foot" id="foot" aria-label="Headroom pages">');
+  has(ui.source(), 'color-scheme: light dark;');
+  has(ui.source(), '@media (prefers-reduced-motion: reduce)');
+  lacks(ui.source(), 'color-mix(', 'theme tints work on the original macOS 13 WebKit');
+});
+
+test('small text and status labels meet 4.5:1 contrast in both themes', () => {
+  const luminance = hex => hex.slice(1).match(/../g).map(x => parseInt(x, 16) / 255)
+    .map(x => x <= .04045 ? x / 12.92 : ((x + .055) / 1.055) ** 2.4)
+    .reduce((sum, x, i) => sum + x * [.2126, .7152, .0722][i], 0);
+  const themes = [...ui.source().matchAll(/:root\{([\s\S]*?)\}/g)];
+  eq(themes.length, 2);
+  for (const [index, theme] of themes.entries()) {
+    const colors = Object.fromEntries([...theme[1].matchAll(/--([\w-]+):\s*(#[0-9a-f]{6})/g)]
+      .map(([, name, value]) => [name, luminance(value)]));
+    const pairs = ['text', 'text-dim', 'text-faint', 'accent', 'good', 'warn', 'bad', 'ice']
+      .flatMap(ink => ['bg', 'bg-elev', 'bg-sunk'].map(background => [ink, background]));
+    pairs.push(['good', 'good-tint'], ['bad', 'bad-tint'], ['accent', 'warn-tint'],
+      ['text-dim', 'warn-tint'], ['text-dim', 'bad-tint'], ['text-dim', 'ice-tint'],
+      ['on-status', 'warn'], ['on-status', 'bad']);
+    for (const [ink, background] of pairs) {
+      const [low, high] = [colors[ink], colors[background]].sort((a, b) => a - b);
+      const ratio = (high + .05) / (low + .05);
+      if (ratio < 4.5) throw new Error(`${index ? 'Dark' : 'Light'} ${ink} on ${background}: ${ratio.toFixed(2)}:1`);
+    }
   }
 });
 
