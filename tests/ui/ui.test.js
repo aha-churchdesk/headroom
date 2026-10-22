@@ -292,6 +292,108 @@ test('small text and status labels meet 4.5:1 contrast in both themes', () => {
 
 // ── the main view ─────────────────────────────────────────────────────────
 
+const GiB = 2 ** 30;
+function memoryJob(overrides = {}) {
+  return { ...busy.running[0], footprint: 3 * GiB, estimate: 6 * GiB,
+    memory_range: { lower: 2 * GiB, upper: 4 * GiB, samples: 8, workers: 4 }, ...overrides };
+}
+function showMemoryJob(job) {
+  ui.setState({ ...busy, running: [job], queued: [] });
+}
+function memoryGeometry() {
+  const html = ui.html();
+  const range = /class="range" style="left:([\d.]+)%;width:([\d.]+)%"/.exec(html);
+  return {
+    lower: range ? Number(range[1]) : null,
+    upper: range ? Number(range[1]) + Number(range[2]) : null,
+    live: Number(/class="f" style="width:([\d.]+)%"/.exec(html)[1]),
+    estimate: Number(/class="tick" style="left:([\d.]+)%"/.exec(html)[1]),
+  };
+}
+function near(got, want, what) {
+  if (Math.abs(got - want) > 0.000001) throw new Error(`${what}: got ${got}, want ${want}`);
+}
+
+test('past peaks have measured bounds and a distinct live fill and scheduling estimate', () => {
+  showMemoryJob(memoryJob());
+  has(ui.view(), 'Past peaks 2–4 GB · 8 runs');
+  has(ui.view(), 'RAM 3 GB');
+  const { lower, upper, live, estimate } = memoryGeometry();
+  near(lower / estimate, 2 / 6, 'lower bound on the same scale');
+  near(upper / estimate, 4 / 6, 'upper bound on the same scale');
+  near(live / estimate, 3 / 6, 'current usage on the same scale');
+  near(estimate, 100 / 1.15, 'the estimate leaves room to its right');
+  has(ui.html(), 'role="img" aria-label="Live memory 3 GB, shown by the fill. Conservative estimate 6 GB, shown by the vertical tick.');
+  has(ui.html(), '8 clean runs of this command with 4 workers, like this job.');
+  has(ui.html(), '10th to 90th percentile of past peak memory. Current usage can fall outside this range.');
+});
+
+test('a historical upper peak larger than live usage and the estimate fits on the chart', () => {
+  showMemoryJob(memoryJob({ footprint: GiB, estimate: 2 * GiB }));
+  const { lower, upper, live, estimate } = memoryGeometry();
+  near(upper, 100 / 1.15, 'historical upper peak sets the scale');
+  near(lower, upper / 2, 'lower peak');
+  near(live, upper / 4, 'current usage');
+  near(estimate, upper / 2, 'estimate');
+});
+
+test('live usage can exceed past peaks without clipping or moving their values', () => {
+  showMemoryJob(memoryJob({ footprint: 10 * GiB }));
+  const { lower, upper, live, estimate } = memoryGeometry();
+  near(live, 100 / 1.15, 'live usage sets the scale');
+  near(lower, live / 5, 'lower peak');
+  near(upper, live * .4, 'upper peak');
+  near(estimate, live * .6, 'estimate');
+  has(ui.view(), 'Past peaks 2–4 GB · 8 runs');
+  has(ui.view(), 'RAM 10 GB');
+});
+
+test('identical past peaks remain a single marked value without inventing a range', () => {
+  showMemoryJob(memoryJob({ memory_range: { lower: 2 * GiB, upper: 2 * GiB, samples: 3, workers: 1 } }));
+  const { lower, upper } = memoryGeometry();
+  near(lower, upper, 'equal bounds keep the same position');
+  has(ui.view(), 'Past peaks 2–2 GB · 3 runs');
+  has(ui.html(), '3 clean runs of this command with 1 worker, like this job.');
+  // CSS retains a visible marker when the numeric width is zero.
+  has(ui.source(), '.fp .range{ position:absolute; top:0; height:5px; min-width:2px;');
+});
+
+test('absent history never borrows a band from the estimate or profile', () => {
+  for (const memory_range of [null, undefined]) {
+    showMemoryJob(memoryJob({ memory_range }));
+    eq(memoryGeometry().lower, null);
+    lacks(ui.view(), 'Past peaks');
+    lacks(ui.html(), 'clean runs of this command');
+    has(ui.view(), 'RAM 3 GB');
+    has(ui.html(), 'Conservative estimate 6 GB');
+  }
+});
+
+test('history explains comparisons with unrecorded worker counts', () => {
+  showMemoryJob(memoryJob({ memory_range: { lower: GiB, upper: 2 * GiB, samples: 5, workers: null } }));
+  has(ui.html(), '5 clean runs of this command with no worker count recorded, like this job.');
+  lacks(ui.html(), 'null workers');
+});
+
+test('state updates refresh live usage, range, estimate, and explanation for the same job', () => {
+  const job = memoryJob();
+  showMemoryJob(job);
+  const before = memoryGeometry();
+  showMemoryJob({ ...job, footprint: 9 * GiB, estimate: 10 * GiB,
+    memory_range: { lower: 3 * GiB, upper: 7 * GiB, samples: 12, workers: 2 } });
+  const after = memoryGeometry();
+  eq(after.live > before.live, true);
+  near(after.upper / after.estimate, .7, 'updated range geometry');
+  has(ui.view(), 'Past peaks 3–7 GB · 12 runs');
+  has(ui.view(), 'RAM 9 GB');
+  has(ui.html(), 'Conservative estimate 10 GB');
+  has(ui.html(), '12 clean runs of this command with 2 workers, like this job.');
+  lacks(ui.html(), 'Past peaks 2–4 GB');
+  showMemoryJob({ ...job, memory_range: null });
+  eq(memoryGeometry().lower, null, 'removed history clears the old band');
+  lacks(ui.view(), 'Past peaks');
+});
+
 test('running and queued jobs are listed with why the queue waits', () => {
   ui.setState(busy);
   const v = ui.view();
