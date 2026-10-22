@@ -8,7 +8,7 @@ Status: early. Apple Silicon only, ad-hoc signed, used daily by one person.
 
 ## How it decides
 
-- **Memory, not job count.** Headroom records the peak memory of every run, per repository and command. A command's estimate is the p90 of its last 20 clean peaks. A queued job starts when its estimate fits in available memory, minus a reserve (2 GB by default), minus what the running jobs are still expected to grow into. A command with no history is assumed to need 1.5 GB. A job's memory is everything it starts, including tasks that turbo or a git hook's terminal move to a process group of their own.
+- **Memory, not job count.** Headroom records the peak memory of every run, per repository and command. A command's estimate is the p90 of successful, uninterrupted runs among its last 20 attempts, with failed or interrupted peaks retained as minimum memory requirements. A queued job starts when its estimate fits in available memory, minus a reserve (2 GB by default), minus what the running jobs are still expected to grow into. A command with no history is assumed to need 1.5 GB. A job's memory is everything it starts, including tasks that turbo or a git hook's terminal move to a process group of their own.
 - **Pressure.** Under normal memory pressure jobs start as above. Under warn, one job may start only when nothing else of ours is running. Under critical, nothing starts.
 - **Strict order.** If the head of the queue doesn't fit, nothing behind it starts, so a big e2e run can't be starved by a stream of small jobs. A job always starts when the queue is otherwise idle, so an estimate bigger than the machine can't block forever.
 - **Short jobs may go first.** While the head waits on memory, a later job may start if it fits now and its typical run time says it will be done before the head could start anyway (when the running jobs are expected to finish). A job with no history never goes first. The head is passed over at most 3 times or for 5 minutes; after that the queue waits for it. The popover shows `passed over 2× · strict in 3m`.
@@ -94,18 +94,22 @@ Claude Code note: the hook rewrites the command to `headroom run … --sh '<your
 
 Commands that match a pattern are queued: `* test`, `* build`, `* e2e`, `* typecheck`, `vitest`, `jest`, `mocha`, `playwright`, `tsc`, `eslint`, `nx`, `turbo`, `next build`, `xcodebuild`, `cargo clippy`, `gradle`, `pytest`. `*` stands for any program, so `* test` covers `pnpm test` and `cargo test`, and `test` also covers scripts like `test:unit` and `unit-test`. `corepack yarn …` is classified as the `yarn …` it runs. Long-lived commands are never queued, because they would hold a slot forever: `dev`, `serve`, `start`, `watch`, `preview`, `storybook`, anything with `--watch` or `--ui`, and `docker compose up`.
 
-A `git commit` or `git push` is queued when the repository has a pre-commit or pre-push hook (lefthook, husky or a plain script), because the hook runs the type checks and linters. It is profiled as `git commit` or `git push` for that repository, so a formatter-only hook stays cheap. `--no-verify`, `LEFTHOOK=0` and `HUSKY=0` skip the hook and the queue. `lefthook run <hook>` is always queued.
+A `git commit` or `git push` is queued when the repository has a pre-commit or pre-push hook (lefthook, husky or a plain script), because the hook runs the type checks and linters. Its command label is `git commit` or `git push`; its complete invocation determines the workload profile. `--no-verify`, `LEFTHOOK=0` and `HUSKY=0` skip the hook and the queue. `lefthook run <hook>` is always queued.
 
 Check one:
 
 ```sh
 $ headroom classify 'pnpm vitest run src/calendar'
-heavy: queued, profiled as `vitest run`
+heavy: queued, command type `vitest run`
 $ headroom classify 'pnpm dev'
 long-lived (dev): never queued
 ```
 
 Patterns are editable in the menu bar's Settings page.
+
+Profiles distinguish the complete invocation and its starting repository directory. Package filters, test files, build flags, inline environment settings, directory changes, and compound commands get separate history. Identical invocations share history across worktrees at the same repository subdirectory. Direct arguments and shell commands have separate profiles.
+
+Earlier broad profiles remain fallback estimates; each new workload collects its own measured peaks and durations. Old runs cannot be split reliably because they did not store their complete invocation. The identity does not track ambient environment, script/configuration contents, or cache state, so the same command can still vary. Different shell spelling or quoting also creates a separate profile.
 
 ## The menu bar
 
@@ -113,7 +117,7 @@ The icon is a four-bar memory gauge. It turns amber or red under memory pressure
 
 The popover lists running and queued jobs and why the queue is waiting (`next needs 4.2 GB, 2.9 GB free`). A running job shows its memory and CPU, and the largest process inside it when that isn't the command itself: `git commit`, then `↳ tsc --noEmit` while the hook runs.
 
-After at least three comparable clean measured runs at the same worker count, the popover also shows the historical p10–p90 band of peak memory. The conservative scheduling estimate stays separate. This band describes past runs; it is not a guarantee for the current run.
+After at least three successful, uninterrupted measured runs of the same workload at the same recorded worker count, the popover also shows the historical p10–p90 band of peak memory. The conservative scheduling estimate stays separate. This band describes past runs; it is not a guarantee for the current run. When the spread exceeds fourfold and 1 GB, the UI says “Memory varies widely” instead of drawing a band; the observed bounds remain in the explanation.
 
 From it you can:
 

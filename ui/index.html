@@ -471,8 +471,8 @@ function send(msg){
    ═══════════════════════════════════════════════════════════ */
 const GiB = 1024 ** 3;
 const gb = b => (b / GiB).toFixed(1).replace(/\.0$/, "");
-/** Profile keys are "repo path|subdir|command"; shown as "repo · subdir · command". */
-const keyLabel = k => String(k ?? "").split("|").map((p, i) => i === 0 ? p.split("/").filter(Boolean).pop() || p : p).join(" · ");
+/** Keep the workload fingerprint out of the human-readable command label. */
+const keyLabel = k => String(k ?? "").split("|").filter(p => !/^v2:[a-f0-9]{64}$/.test(p)).map((p, i) => i === 0 ? p.split("/").filter(Boolean).pop() || p : p).join(" · ");
 const esc = s => String(s ?? "").replace(/[&<>"']/g,
   c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
 
@@ -786,30 +786,34 @@ function renderBanner(b){
 
 function fpBar(j){
   const range = j.memory_range;
+  // A wide historical spread is evidence of variability, not a useful band
+  // predicting this run. Keep its numbers in the explanation, not the rail.
+  const variable = range && range.upper > range.lower * 4 && range.upper - range.lower >= GiB;
+  const showBand = range && !variable;
   const scale = Math.max(j.footprint, j.estimate, range?.upper || 0, 1) * 1.15;
   const cls = j.state === "frozen" ? "frozen"
             : j.footprint > j.runaway_at ? "runaway"
             : j.footprint > j.estimate ? "over" : "";
   const past = range ? `Past peaks ${gb(range.lower)}–${gb(range.upper)} GB` : "";
   const comparable = range && (range.workers == null
-    ? "with no worker count recorded, like this job"
+    ? "with no worker count recorded"
     : `with ${range.workers} worker${range.workers === 1 ? "" : "s"}, like this job`);
-  const explanation = range ? `${range.samples} clean runs of this command ${comparable}. The band shows the 10th to 90th percentile of past peak memory. Current usage can fall outside this range.` : "";
+  const explanation = range ? `${range.samples} successful, uninterrupted runs of this workload ${comparable}. ${variable ? `${past}. Memory varies too widely to show a useful expected band. Cached work and changing inputs can still differ for the same command.` : "The band shows the 10th to 90th percentile of past peak memory. Current usage can fall outside this range."}` : "";
   const description = `Live memory ${gb(j.footprint)} GB, shown by the fill. Conservative estimate ${gb(j.estimate)} GB, shown by the vertical tick. Runaway above ${gb(j.runaway_at)} GB.${range ? ` ${past}. ${explanation}` : ""}`;
   return `
     <div class="memory">
-      <div class="fp ${cls}${range ? " has-range" : ""}" role="img" aria-label="${esc(description)}" title="${esc(description)}">
-        ${range ? `<div class="range" style="left:${range.lower / scale * 100}%;width:${(range.upper - range.lower) / scale * 100}%"></div>` : ""}
+      <div class="fp ${cls}${showBand ? " has-range" : ""}" role="img" aria-label="${esc(description)}" title="${esc(description)}">
+        ${showBand ? `<div class="range" style="left:${range.lower / scale * 100}%;width:${(range.upper - range.lower) / scale * 100}%"></div>` : ""}
         <div class="f" style="width:${j.footprint / scale * 100}%"></div>
         <div class="tick" style="left:${j.estimate / scale * 100}%"></div>
       </div>
-      ${range ? `<span class="past-peaks num" data-tip="${esc(explanation)}">${past} · ${range.samples} runs</span>` : ""}
+      ${range ? `<span class="past-peaks num" data-tip="${esc(explanation)}">${variable ? "Memory varies widely" : past} · ${range.samples} runs</span>` : ""}
     </div>`;
 }
 
 function estLabel(j){
   return j.samples === 0
-    ? `<span class="new" title="No profile yet: default estimate">new</span>est ${gb(j.estimate)} GB`
+    ? `<span class="new" title="No successful measured runs of this workload yet. Estimate uses broader history or the default, and retains observed failed or interrupted peaks as a minimum.">new</span>est ${gb(j.estimate)} GB`
     : `est ${gb(j.estimate)} GB`;
 }
 
@@ -933,7 +937,7 @@ function renderDetail(j){
       <span class="k">session</span><span class="v mono">${esc(j.session || "—")}</span>
       <span class="k">profile</span><span class="v">${esc(keyLabel(j.key))} · ${j.samples} run${j.samples === 1 ? "" : "s"}</span>
       <span class="k">queue wait</span><span class="v num">${dur(j.waited_s)} ${j.state === "queued" ? "so far" : "before this attempt"}</span>
-      <span class="k">usual runtime</span><span class="v num" title="The scheduler's estimate for this attempt, from previous uninterrupted runs of this command at the same worker count. ${runtimeUse} It is not a guaranteed finish time.">${j.runtime_estimate_s == null ? "Unknown for this worker count" : dur(j.runtime_estimate_s)}</span>
+      <span class="k">usual runtime</span><span class="v num" title="The scheduler's estimate for this attempt, from previous successful, uninterrupted runs of this workload at the same recorded worker count. ${runtimeUse} It is not a guaranteed finish time.">${j.runtime_estimate_s == null ? "Unknown for this worker count" : dur(j.runtime_estimate_s)}</span>
       <span class="k">scheduling</span><span class="v">${esc(schedulingText(j))}</span>
       ${queueIndex >= 0 ? `<span class="k">queue</span><span class="v">${queueIndex === 0 && STATE.queue_reason ? esc(reasonText(STATE.queue_reason)) : `Position ${queueIndex + 1}`}</span>` : ""}
       ${j.state !== "queued" ? `
@@ -1052,13 +1056,13 @@ function renderProfile(S){
     <div class="prof">
       <div class="key mono" title="${esc(UI.profileKey)}">${esc(keyLabel(UI.profileKey))}</div>
       ${p.peaks.length ? sparkline(p.peaks, p.p90) : ""}
-      <div class="faint" style="font-size:10.5px">Measured peaks from ${p.peaks.length} clean run${p.peaks.length === 1 ? "" : "s"} · dashed line = historical estimate</div>
+      <div class="faint" style="font-size:10.5px">Measured peaks from ${p.peaks.length} successful run${p.peaks.length === 1 ? "" : "s"} · dashed line = historical estimate</div>
       <div class="stats num">
         <div class="stat"><div class="k">historical estimate</div><div class="v">${gb(p.p90)} GB</div></div>
-        <div class="stat"><div class="k">median time</div><div class="v">${dur(p.median_s)}</div></div>
+        <div class="stat"><div class="k">median time</div><div class="v">${p.median_s == null ? "Unknown" : dur(p.median_s)}</div></div>
         <div class="stat"><div class="k">measured runs</div><div class="v">${p.samples}</div></div>
       </div>
-      <div class="faint" style="font-size:10.5px">Based on measured peaks and the default estimate, with interrupted runs as a lower bound. Scheduling may reserve more for the command's default worker count.</div>
+      <div class="faint" style="font-size:10.5px">Based on successful measured peaks and the default estimate, with failed or interrupted runs as a lower bound. Scheduling may reserve more for the command's default worker count.</div>
       ${(p.parts || []).length ? `
       <div class="parts">
         <div class="k">Runs inside it</div>
@@ -1072,7 +1076,7 @@ function renderProfile(S){
         <button class="chip-btn ${confirming(key) ? "confirm" : "danger"}" data-act="reset_profile"
           data-key="${esc(UI.profileKey)}" data-confirm="${esc(key)}">
           ${confirming(key) ? "Reset? Click again" : "Reset profile"}</button>
-        <span class="faint" style="font-size:11px;margin-left:6px">Next run starts from the default estimate.</span>
+        <span class="faint" style="font-size:11px;margin-left:6px">Next run uses broader history or the default estimate.</span>
       </div>
     </div>`;
 }
@@ -1133,7 +1137,7 @@ function renderSettings(S){
   const v = S.classify && S.classify.text === UI.drafts.test ? S.classify : null;
   const verdict = !UI.drafts.test ? ""
     : !v ? `<div class="verdict no">…</div>`
-    : v.result === "heavy" ? `<div class="verdict yes">✓ gated, profiled as <span class="mono">${esc(v.key)}</span></div>`
+    : v.result === "heavy" ? `<div class="verdict yes">✓ gated, command type <span class="mono">${esc(v.key)}</span></div>`
     : v.result === "excluded" ? `<div class="verdict excl">long-lived (${esc(v.why)}), so not gated; counts as baseline load</div>`
     : `<div class="verdict no">not gated, runs immediately</div>`;
   return pageHead("Settings") + `

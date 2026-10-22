@@ -324,7 +324,7 @@ test('past peaks have measured bounds and a distinct live fill and scheduling es
   near(live / estimate, 3 / 6, 'current usage on the same scale');
   near(estimate, 100 / 1.15, 'the estimate leaves room to its right');
   has(ui.html(), 'role="img" aria-label="Live memory 3 GB, shown by the fill. Conservative estimate 6 GB, shown by the vertical tick.');
-  has(ui.html(), '8 clean runs of this command with 4 workers, like this job.');
+  has(ui.html(), '8 successful, uninterrupted runs of this workload with 4 workers, like this job.');
   has(ui.html(), '10th to 90th percentile of past peak memory. Current usage can fall outside this range.');
 });
 
@@ -335,6 +335,26 @@ test('a historical upper peak larger than live usage and the estimate fits on th
   near(lower, upper / 2, 'lower peak');
   near(live, upper / 4, 'current usage');
   near(estimate, upper / 2, 'estimate');
+});
+
+test('widely varying history explains uncertainty instead of drawing a prediction band', () => {
+  showMemoryJob(memoryJob({ estimate: 8 * GiB,
+    memory_range: { lower: .3 * GiB, upper: 7.8 * GiB, samples: 13, workers: 10 } }));
+  has(ui.view(), 'Memory varies widely · 13 runs');
+  lacks(ui.view(), 'Past peaks 0.3–7.8 GB');
+  eq(memoryGeometry().lower, null);
+  has(ui.html(), 'Past peaks 0.3–7.8 GB');
+  has(ui.html(), 'Memory varies too widely to show a useful expected band.');
+  has(ui.html(), 'Conservative estimate 8 GB');
+  showMemoryJob(memoryJob());
+  has(ui.view(), 'Past peaks 2–4 GB · 8 runs');
+  lacks(ui.view(), 'Memory varies widely');
+});
+
+test('new workload estimates disclose broader history instead of claiming a default', () => {
+  showMemoryJob(memoryJob({ samples: 0, memory_range: null }));
+  has(ui.html(), 'Estimate uses broader history or the default, and retains observed failed or interrupted peaks as a minimum.');
+  lacks(ui.html(), 'No profile yet: default estimate');
 });
 
 test('live usage can exceed past peaks without clipping or moving their values', () => {
@@ -353,7 +373,7 @@ test('identical past peaks remain a single marked value without inventing a rang
   const { lower, upper } = memoryGeometry();
   near(lower, upper, 'equal bounds keep the same position');
   has(ui.view(), 'Past peaks 2–2 GB · 3 runs');
-  has(ui.html(), '3 clean runs of this command with 1 worker, like this job.');
+  has(ui.html(), '3 successful, uninterrupted runs of this workload with 1 worker, like this job.');
   // CSS retains a visible marker when the numeric width is zero.
   has(ui.source(), '.fp .range{ position:absolute; top:0; height:5px; min-width:2px;');
 });
@@ -363,7 +383,7 @@ test('absent history never borrows a band from the estimate or profile', () => {
     showMemoryJob(memoryJob({ memory_range }));
     eq(memoryGeometry().lower, null);
     lacks(ui.view(), 'Past peaks');
-    lacks(ui.html(), 'clean runs of this command');
+    lacks(ui.html(), 'successful, uninterrupted runs of this workload');
     has(ui.view(), '3 / new est 6 GB');
     has(ui.html(), 'Conservative estimate 6 GB');
   }
@@ -371,7 +391,7 @@ test('absent history never borrows a band from the estimate or profile', () => {
 
 test('history explains comparisons with unrecorded worker counts', () => {
   showMemoryJob(memoryJob({ memory_range: { lower: GiB, upper: 2 * GiB, samples: 5, workers: null } }));
-  has(ui.html(), '5 clean runs of this command with no worker count recorded, like this job.');
+  has(ui.html(), '5 successful, uninterrupted runs of this workload with no worker count recorded.');
   lacks(ui.html(), 'null workers');
 });
 
@@ -387,7 +407,7 @@ test('state updates refresh live usage, range, estimate, and explanation for the
   has(ui.view(), 'Past peaks 3–7 GB · 12 runs');
   has(ui.view(), '9 / new est 10 GB');
   has(ui.html(), 'Conservative estimate 10 GB');
-  has(ui.html(), '12 clean runs of this command with 2 workers, like this job.');
+  has(ui.html(), '12 successful, uninterrupted runs of this workload with 2 workers, like this job.');
   lacks(ui.html(), 'Past peaks 2–4 GB');
   showMemoryJob({ ...job, memory_range: null });
   eq(memoryGeometry().lower, null, 'removed history clears the old band');
@@ -924,14 +944,16 @@ test('a profile separates measured runs and historical estimates from scheduling
   ui.UI.page = 'profile';
   ui.UI.profileKey = key;
   ui.setState({ ...history, profiles: { [key]: profile } });
-  has(ui.view(), 'Measured peaks from 1 clean run · dashed line = historical estimate');
+  has(ui.view(), 'Measured peaks from 1 successful run · dashed line = historical estimate');
   has(ui.view(), 'historical estimate 3 GB median time 12s measured runs 1');
   has(ui.view(), "Scheduling may reserve more for the command's default worker count.");
   lacks(ui.view(), 'estimate (p90)');
   eq((ui.html().match(/<circle /g) || []).length, 1, 'only measured peaks are charted');
 
-  ui.setState({ ...history, profiles: { [key]: { ...profile, peaks: [], samples: 0 } } });
+  ui.setState({ ...history, profiles: { [key]: { ...profile, peaks: [], samples: 0, median_s: null } } });
   has(ui.view(), 'measured runs 0');
+  has(ui.view(), 'median time Unknown');
+  lacks(ui.view(), 'median time 0s');
   lacks(ui.html(), '<svg');
 });
 
@@ -1011,10 +1033,10 @@ test('the test box asks Rust and shows only the answer for what is typed', () =>
   eq(ui.sent, [{ cmd: 'classify', text: 'pnpm vitest run' }]);
   has(ui.view(), '…');
   ui.setState({ ...busy, classify: { text: 'pnpm vitest run', result: 'heavy', key: 'vitest run' } });
-  has(ui.view(), 'gated, profiled as vitest run');
+  has(ui.view(), 'gated, command type vitest run');
   // A late answer for an older draft is not shown against the new one.
   ui.type('test', 'pnpm dev');
-  lacks(ui.view(), 'profiled as vitest run');
+  lacks(ui.view(), 'command type vitest run');
   ui.type('test', '   ');
   eq(ui.sent.length, 2, 'whitespace is not sent');
 });
@@ -1140,6 +1162,8 @@ test('quit is sent as an intent', () => {
 
 test('profile keys lose the repository path but keep subdir and command', () => {
   eq(ui.keyLabel('/Users/me/Projects/web|apps/site|vitest run'), 'web · apps/site · vitest run');
+  eq(ui.keyLabel(`/Users/me/Projects/web|apps/site|v2:${'a'.repeat(64)}|vitest run`), 'web · apps/site · vitest run');
+  eq(ui.keyLabel(`/Users/me/Projects/web|v2:${'b'.repeat(64)}|tsc`), 'web · tsc');
   eq(ui.keyLabel('/Users/me/Projects/web|pnpm'), 'web · pnpm');
   eq(ui.keyLabel('web'), 'web');
   eq(ui.keyLabel('/|sh'), '/ · sh');
