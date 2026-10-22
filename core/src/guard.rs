@@ -8,6 +8,8 @@
 //! 2. **Kill** it (SIGTERM, then SIGKILL) if pressure stays critical, which
 //!    actually frees memory, and requeue it once.
 //! 3. **Thaw** guard-frozen jobs, newest first, once pressure is back to normal.
+//!    At stable warning pressure, resume one non-runaway if no job is running
+//!    and available memory covers headroom plus its expected remaining growth.
 //!
 //! Only jobs Headroom started are ever touched, and never pinned ones, nor
 //! one the user resumed from a guard freeze until memory is normal again.
@@ -20,6 +22,7 @@ use crate::model::{FrozenBy, Job, JobId, JobState, Millis, Pressure, Snapshot};
 pub struct GuardState {
     critical_since: Option<Millis>,
     normal_since: Option<Millis>,
+    warn_since: Option<Millis>,
     last_step: Option<Millis>,
 }
 
@@ -47,26 +50,32 @@ fn secs(ms: Millis) -> Millis {
     ms / 1000
 }
 
-/// Advance the guard by one sample. `jobs` are the running and frozen jobs.
+/// Advance the guard by one sample. `jobs` are signalable running and frozen
+/// jobs. `has_running` also includes admitted or terminating jobs omitted from
+/// that slice, so recovery never overlaps work that the guard cannot act on.
 pub fn step(
     gs: &mut GuardState,
     now: Millis,
     snap: &Snapshot,
     jobs: &[&Job],
+    has_running: bool,
     cfg: &Config,
 ) -> Vec<Action> {
     match snap.pressure {
         Pressure::Critical => {
             gs.critical_since.get_or_insert(now);
             gs.normal_since = None;
+            gs.warn_since = None;
         }
         Pressure::Normal => {
             gs.normal_since.get_or_insert(now);
             gs.critical_since = None;
+            gs.warn_since = None;
         }
         Pressure::Warn => {
             gs.critical_since = None;
             gs.normal_since = None;
+            gs.warn_since.get_or_insert(now);
         }
     }
     let guard_frozen =
@@ -180,6 +189,27 @@ pub fn step(
     {
         gs.last_step = Some(now);
         out.push(Action::Thaw { id: j.id });
+    } else if gs
+        .warn_since
+        .is_some_and(|t| now.saturating_sub(t) >= cfg.thaw_after_s * 1000)
+        && !has_running
+        && let Some(free) = snap.mem_available.checked_sub(cfg.headroom)
+        && let Some(j) = jobs
+            .iter()
+            .filter(guard_frozen)
+            .filter(|j| !runaway(j))
+            .filter(|j| {
+                cfg.kill_mode != KillMode::FreezeKill
+                    || snap.swap_used.saturating_sub(j.swap_at_start) <= cfg.swap_kill_growth
+            })
+            .filter(|j| j.estimate.max(j.peak).saturating_sub(j.footprint) <= free)
+            .max_by_key(|j| j.frozen_at)
+    {
+        // A pause retains RAM, which is already reflected in available memory.
+        // Budget only the remaining growth, including any underestimated peak.
+        // One resumed job can finish and free RAM while macOS remains at warn.
+        gs.last_step = Some(now);
+        out.push(Action::Thaw { id: j.id });
     }
     out
 }
@@ -188,6 +218,23 @@ pub fn step(
 mod tests {
     use super::*;
     use crate::model::{GIB, JobSpec};
+
+    fn step(
+        gs: &mut GuardState,
+        now: Millis,
+        snap: &Snapshot,
+        jobs: &[&Job],
+        cfg: &Config,
+    ) -> Vec<Action> {
+        super::step(
+            gs,
+            now,
+            snap,
+            jobs,
+            jobs.iter().any(|j| j.state == JobState::Running),
+            cfg,
+        )
+    }
 
     fn snap(p: Pressure) -> Snapshot {
         Snapshot {
@@ -325,6 +372,158 @@ mod tests {
             &cfg,
         );
         assert!(acts.iter().all(|(_, a)| !matches!(a, Action::Kill { .. })));
+    }
+
+    #[test]
+    fn warn_recovery_waits_then_thaws_only_the_newest_eligible_guard_pause() {
+        for mode in [KillMode::Freeze, KillMode::FreezeKill] {
+            let cfg = Config {
+                kill_mode: mode,
+                ..Config::default()
+            };
+            let mut gs = GuardState::default();
+            let older = frozen(1, 0);
+            let newer = frozen(2, 1);
+            let mut too_large = frozen(3, 2);
+            too_large.peak = 5 * GIB;
+            let mut manual = frozen(4, 3);
+            manual.frozen_by = Some(FrozenBy::User);
+            let jobs = [&older, &newer, &too_large, &manual];
+            let s = Snapshot {
+                mem_available: cfg.headroom + GIB,
+                ..snap(Pressure::Warn)
+            };
+            assert!(step(&mut gs, 0, &s, &jobs, &cfg).is_empty());
+            assert!(step(&mut gs, cfg.thaw_after_s * 1000 - 1, &s, &jobs, &cfg).is_empty());
+            assert_eq!(
+                step(&mut gs, cfg.thaw_after_s * 1000, &s, &jobs, &cfg),
+                vec![Action::Thaw { id: 2 }]
+            );
+            assert!(step(&mut gs, cfg.thaw_after_s * 1000 + 1, &s, &jobs, &cfg).is_empty());
+        }
+    }
+
+    #[test]
+    fn warn_recovery_budgets_observed_peak_and_keeps_headroom_even_without_growth() {
+        let cfg = Config::default();
+        let mut j = frozen(1, 0);
+        j.peak = 4 * GIB;
+        for (footprint, available, thaw) in [
+            (GIB, cfg.headroom + 3 * GIB - 1, false),
+            (GIB, cfg.headroom + 3 * GIB, true),
+            (4 * GIB, cfg.headroom - 1, false),
+            (4 * GIB, cfg.headroom, true),
+        ] {
+            j.footprint = footprint;
+            let s = Snapshot {
+                mem_available: available,
+                ..snap(Pressure::Warn)
+            };
+            let mut gs = GuardState::default();
+            step(&mut gs, 0, &s, &[&j], &cfg);
+            let acts = step(&mut gs, cfg.thaw_after_s * 1000, &s, &[&j], &cfg);
+            assert_eq!(
+                acts,
+                if thaw {
+                    vec![Action::Thaw { id: 1 }]
+                } else {
+                    vec![]
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn warn_recovery_never_overlaps_running_work_or_resumes_manual_pauses() {
+        let cfg = Config::default();
+        let s = Snapshot {
+            mem_available: 20 * GIB,
+            ..snap(Pressure::Warn)
+        };
+        let j = frozen(1, 0);
+        for (pinned, spared) in [(false, false), (true, false), (false, true)] {
+            let mut r = running(2, 0);
+            r.pinned = pinned;
+            r.spared = spared;
+            let mut gs = GuardState::default();
+            step(&mut gs, 0, &s, &[&j, &r], &cfg);
+            assert!(step(&mut gs, 60_000, &s, &[&j, &r], &cfg).is_empty());
+        }
+        let mut manual = j.clone();
+        manual.frozen_by = Some(FrozenBy::User);
+        let mut gs = GuardState::default();
+        step(&mut gs, 0, &s, &[&manual], &cfg);
+        assert!(step(&mut gs, 60_000, &s, &[&manual], &cfg).is_empty());
+        // The scheduler can report admitted work absent from the signalable slice.
+        assert!(super::step(&mut gs, 61_000, &s, &[&j], true, &cfg).is_empty());
+    }
+
+    #[test]
+    fn warn_recovery_requires_unbroken_warning_and_respects_cooldown() {
+        let cfg = Config::default();
+        let j = frozen(1, 0);
+        let warn = Snapshot {
+            mem_available: 20 * GIB,
+            ..snap(Pressure::Warn)
+        };
+        let mut gs = GuardState::default();
+        step(&mut gs, 0, &warn, &[&j], &cfg);
+        step(&mut gs, 14_000, &snap(Pressure::Normal), &[&j], &cfg);
+        step(&mut gs, 15_000, &warn, &[&j], &cfg);
+        assert!(step(&mut gs, 29_000, &warn, &[&j], &cfg).is_empty());
+        // Freeze mode isolates recovery from the unchanged critical kill rule.
+        let freeze = Config {
+            kill_mode: KillMode::Freeze,
+            ..cfg.clone()
+        };
+        assert!(step(&mut gs, 30_000, &snap(Pressure::Critical), &[&j], &freeze).is_empty());
+        step(&mut gs, 31_000, &warn, &[&j], &cfg);
+        assert!(step(&mut gs, 45_000, &warn, &[&j], &cfg).is_empty());
+        gs.last_step = Some(45_000);
+        assert!(step(&mut gs, 46_000, &warn, &[&j], &cfg).is_empty());
+        assert_eq!(
+            step(&mut gs, 55_000, &warn, &[&j], &cfg),
+            vec![Action::Thaw { id: 1 }]
+        );
+    }
+
+    #[test]
+    fn warn_recovery_does_not_thaw_runaways_or_jobs_that_would_immediately_be_swap_killed() {
+        for mode in [KillMode::Freeze, KillMode::FreezeKill] {
+            let cfg = Config {
+                kill_mode: mode,
+                ..Config::default()
+            };
+            let mut j = frozen(1, 0);
+            j.footprint = j.runaway_at(cfg.runaway_factor, cfg.runaway_cap) + 1;
+            let s = Snapshot {
+                mem_available: 20 * GIB,
+                ..snap(Pressure::Warn)
+            };
+            let mut gs = GuardState::default();
+            step(&mut gs, 0, &s, &[&j], &cfg);
+            assert!(step(&mut gs, 15_000, &s, &[&j], &cfg).is_empty());
+
+            let j = frozen(2, 0);
+            for extra_swap in [0, 1] {
+                let s = Snapshot {
+                    swap_used: cfg.swap_kill_growth + extra_swap,
+                    ..s.clone()
+                };
+                let mut gs = GuardState::default();
+                step(&mut gs, 0, &s, &[&j], &cfg);
+                let acts = step(&mut gs, 15_000, &s, &[&j], &cfg);
+                let may_thaw = mode == KillMode::Freeze || extra_swap == 0;
+                assert_eq!(
+                    acts,
+                    if may_thaw {
+                        vec![Action::Thaw { id: 2 }]
+                    } else {
+                        vec![]
+                    }
+                );
+            }
+        }
     }
 
     #[test]

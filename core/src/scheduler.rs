@@ -558,7 +558,20 @@ impl Scheduler {
             .filter(|e| e.job.pgid.is_some() && e.fate.is_none() && e.job.state != JobState::Queued)
             .map(|e| &e.job)
             .collect();
-        let actions = guard::step(&mut self.guard, now, &self.snap, &watched, &self.cfg);
+        // Termination continues frozen processes so they can handle SIGTERM.
+        // They still occupy a recovery slot until their exit is acknowledged.
+        let has_running = self.jobs.values().any(|e| {
+            e.job.state == JobState::Running
+                || (e.job.state != JobState::Queued && e.fate.is_some())
+        });
+        let actions = guard::step(
+            &mut self.guard,
+            now,
+            &self.snap,
+            &watched,
+            has_running,
+            &self.cfg,
+        );
         for a in actions {
             fx.extend(self.apply_guard(a, now));
         }
@@ -2118,6 +2131,66 @@ mod tests {
         );
         assert!(fx.contains(&Effect::SaveConfig));
         assert_eq!(s.cfg, cfg);
+    }
+
+    #[test]
+    fn warn_recovery_waits_for_unwatched_running_work_then_resumes_and_remains_guarded() {
+        for terminating in [None, Some(JobState::Running), Some(JobState::Frozen)] {
+            let mut s = sched(20);
+            s.enqueue(1, spec("a"), 0);
+            s.started(1, 100);
+            s.enqueue(2, spec("b"), 0);
+            // Job 2 has an admission grant but has not reported its process group.
+            assert_eq!(s.jobs[&2].job.state, JobState::Running);
+            assert_eq!(s.jobs[&2].job.pgid, None);
+            let critical = Snapshot {
+                pressure: Pressure::Critical,
+                ..snap(1)
+            };
+            for t in 0..=10 {
+                s.tick(critical.clone(), &usage(100, 1.0), t * 1000);
+            }
+            assert_eq!(s.jobs[&1].job.frozen_by, Some(FrozenBy::Guard));
+            if let Some(state) = terminating {
+                s.started(2, 200);
+                if state == JobState::Frozen {
+                    s.control(9, Control::Freeze { id: 2 }, 11_000, 0);
+                }
+                s.control(9, Control::Kill { id: 2 }, 11_000, 0);
+                assert!(s.jobs[&2].fate.is_some());
+                assert_eq!(s.jobs[&2].job.state, state);
+            }
+            let baseline = s.jobs[&1].job.swap_at_start;
+            let warn = Snapshot {
+                pressure: Pressure::Warn,
+                ..snap(20)
+            };
+            for t in 11..=40 {
+                let fx = s.tick(warn.clone(), &usage(100, 1.0), t * 1000);
+                assert!(!signals(&fx).contains(&(100, Sig::Cont)));
+                assert!(!sent(&fx, 1).contains(&&DaemonMsg::Thawed));
+            }
+            assert_eq!(s.jobs[&1].job.state, JobState::Frozen);
+            s.exited(2, None, Some(15), 41_000, 0);
+            let fx = s.tick(warn, &usage(100, 1.0), 42_000);
+            assert_eq!(signals(&fx), vec![(100, Sig::Cont)]);
+            assert!(sent(&fx, 1).contains(&&DaemonMsg::Thawed));
+            let job = &s.jobs[&1].job;
+            assert_eq!(job.state, JobState::Running);
+            assert_eq!(job.frozen_by, None);
+            assert_eq!(job.frozen_at, None);
+            assert_eq!(job.guard_note, None);
+            assert_eq!(job.swap_at_start, baseline);
+            assert!(!job.spared);
+            assert!(job.was_frozen);
+            // Automatic recovery does not grant the user's manual-resume immunity.
+            let mut fx = Vec::new();
+            for t in 43..=53 {
+                fx.extend(s.tick(critical.clone(), &usage(100, 1.0), t * 1000));
+            }
+            assert!(signals(&fx).contains(&(100, Sig::Stop)));
+            assert_eq!(s.jobs[&1].job.frozen_by, Some(FrozenBy::Guard));
+        }
     }
 
     #[test]
