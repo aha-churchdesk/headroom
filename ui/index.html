@@ -247,7 +247,7 @@ button:disabled{ cursor:default; opacity:.4; }
 .job-title b{ flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; }
 .job-origin{ flex:0 1 auto; max-width:50%; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:9.5px; font-weight:500; color:var(--text-dim); background:var(--bg-sunk); border-radius:4px; padding:0 4px; }
 .job .name.two .cmd{ font-size:11.5px; }
-.job .name.two .now{ font-size:11px; color:var(--text-faint); font-family:ui-monospace, "SF Mono", Menlo, monospace; }
+.job .now{ margin-top:1px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:11px; color:var(--text-faint); font-family:ui-monospace, "SF Mono", Menlo, monospace; }
 /* Queued rows: the estimate, then how long it has waited, beside the two-line name. */
 .job .mem.two{ display:flex; flex-direction:column; align-items:flex-end; gap:1px; }
 .job .name .cmd{ color:var(--text-dim); }
@@ -832,8 +832,7 @@ function originLabel(agent){
 function jobName(j){
   const origin = originLabel(j.agent);
   return `<span class="name two" role="button" tabindex="0" aria-expanded="${UI.expanded.has(j.id)}" data-act="expand" data-id="${j.id}" title="${esc(j.full_cmd)}">
-    <span class="job-title"><b>${esc(j.label)}</b>${origin ? `<span class="job-origin" title="Started by ${esc(origin)}">${esc(origin)}</span>` : ""}</span><span class="cmd">${esc(j.cmd)}</span>${
-    j.now ? `<span class="now" title="The largest process running inside it now">↳ ${esc(j.now)}</span>` : ""}</span>`;
+    <span class="job-title"><b>${esc(j.label)}</b>${origin ? `<span class="job-origin" title="Started by ${esc(origin)}">${esc(origin)}</span>` : ""}</span><span class="cmd">${esc(j.cmd)}</span></span>`;
 }
 
 function marks(j){
@@ -858,6 +857,7 @@ function renderRunning(j){
         ${jobName(j)}${marks(j)}
         <span class="mem num"><b>${gb(j.footprint)}</b> / ${estLabel(j)}</span>
       </div>
+      ${j.now ? `<div class="now" title="Largest subprocess: ${esc(j.now)}">↳ ${esc(j.now)}</div>` : ""}
       ${fpBar(j)}
       <div class="l2 num">
         <span class="meta" title="Time since this attempt was admitted to run, including pauses">Elapsed ${dur(j.elapsed_s)}</span>
