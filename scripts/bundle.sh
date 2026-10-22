@@ -48,17 +48,8 @@ codesign --force --sign - "$APP"
 echo "built $APP $VERSION  ($(du -sh "$APP" | cut -f1))"
 
 if [ "${1:-}" = "--install" ]; then
-  DEST="/Applications/Headroom.app"
-  pkill -f 'Headroom.app/Contents/MacOS/headroomd' 2>/dev/null || true
-  sleep 1
-  rm -rf "$DEST"
-  cp -R "$APP" "$DEST"
-  # codesign records the path it sealed, so sign the copy too.
-  codesign --force --sign - "$DEST/Contents/MacOS/headroom"
-  codesign --force --sign - "$DEST"
-  echo "installed $DEST"
-  echo "open with: open -a Headroom"
+  ./scripts/install-bundle.sh "$APP"
 else
   echo "run with:  open $APP"
 fi
-echo "stop with: Quit in the popover's Settings, or pkill -f Headroom.app"
+echo "stop with: Quit in the popover's Settings"

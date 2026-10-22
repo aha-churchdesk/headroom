@@ -63,6 +63,9 @@ fi
 step ui
 node tests/ui/ui.test.js || status=1
 
+step installer
+bash tests/install.test.sh || status=1
+
 echo
 if [ $status -eq 0 ]; then echo "all suites passed"; else echo "FAILURES"; fi
 exit $status

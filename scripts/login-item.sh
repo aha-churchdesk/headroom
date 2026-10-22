@@ -8,11 +8,12 @@
 #
 #   ./scripts/login-item.sh install | uninstall | status
 set -uo pipefail
+source "$(dirname "$0")/install-common.sh"
 
 LABEL="dev.headroom"
-PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-APP="/Applications/Headroom.app/Contents/MacOS/headroomd"
-DOMAIN="gui/$(id -u)"
+PLIST="$HR_PLIST"
+APP="$HR_APP/Contents/MacOS/headroomd"
+DOMAIN="$HR_DOMAIN"
 
 case "${1:-status}" in
   install)
@@ -25,7 +26,16 @@ case "${1:-status}" in
       echo "brew services already starts Headroom at login; use that, or 'brew services stop headroom' first"
       exit 1
     fi
+    # Existing registration/configuration belongs to the user. Enabling it
+    # again need not overwrite the plist or disconnect its live queue.
+    if launchctl print "$HR_SERVICE" >/dev/null 2>&1; then
+      launchctl kickstart "$HR_SERVICE" || exit 1
+      echo "already registered: $PLIST"
+      exit 0
+    fi
+    hr_stop || exit 1
     mkdir -p "$(dirname "$PLIST")"
+    if [ ! -f "$PLIST" ]; then
     cat > "$PLIST" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -39,16 +49,15 @@ case "${1:-status}" in
 </dict>
 </plist>
 PL
+    fi
     # Not KeepAlive: Quit should stay quit. Interactive: it draws a menu bar item.
-    launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null
-    pkill -f 'Headroom.app/Contents/MacOS/headroomd' 2>/dev/null
-    sleep 1
     launchctl bootstrap "$DOMAIN" "$PLIST" || { echo "bootstrap failed"; exit 1; }
     echo "installed $PLIST"
     echo "starts at login, and has been started now"
     ;;
 
   uninstall)
+    hr_stop || exit 1
     launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null
     rm -f "$PLIST"
     echo "removed $PLIST: it will no longer start at login"
@@ -63,7 +72,8 @@ PL
     else
       echo "launchd: not registered"
     fi
-    pgrep -fl 'Headroom.app' | sed 's/^/running: /' || echo "running: no"
+    pids=$(hr_pids) || exit 1
+    if [ -n "$pids" ]; then printf '%s\n' "$pids" | sed 's/^/running: /'; else echo "running: no"; fi
     ;;
 
   *) echo "usage: $0 install|uninstall|status"; exit 1 ;;

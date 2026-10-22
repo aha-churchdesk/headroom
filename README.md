@@ -43,6 +43,8 @@ cd headroom
 
 That builds `Headroom.app` into `/Applications`, links the CLI to `~/.local/bin/headroom` (`--bin DIR` for elsewhere), starts the app now and at login, and installs the agent hooks. Leave out `--login` or `--hooks` to do those yourself later. It never edits your shell config; if the bin directory isn't on your PATH it prints the line to add. Run it again after `git pull` to upgrade. `./scripts/install.sh --uninstall` removes the hooks, the login item, the link and the app, and keeps your learned profiles.
 
+To install a bundle you have already built and tested, run `./scripts/install.sh --bundle ./Headroom.app`. Updates stage and verify the replacement before stopping the installed app, refuse to restart a busy queue, and preserve the existing login registration. If replacement fails, the previous bundle is restored. The idle check happens immediately before shutdown; a new job arriving between those steps can still lose its queue connection and run directly.
+
 Homebrew:
 
 ```sh
@@ -165,5 +167,13 @@ Everything lives in `~/Library/Application Support/dev.headroom/` (or `$HEADROOM
 ./scripts/test.sh             # fmt, clippy, Rust tests, UI tests
 ./scripts/test.sh --coverage  # the same, with the core coverage gate (90% lines)
 ```
+
+With Headroom installed and running, queue the entire suite explicitly:
+
+```sh
+headroom run --label headroom-full-suite -- ./scripts/test.sh --coverage
+```
+
+This lets the live daemon schedule and measure the suite. The integration tests still use isolated daemons and temporary data directories.
 
 The scheduling policy lives in `core/` with no platform calls, so the queue and the guard are tested with scripted memory readings. `headroom/tests/e2e.rs` runs a real daemon against real processes (`headroom-hog GB SECS` allocates memory on demand). The popover is a single HTML file, `ui/index.html`; opened in a browser it shows design scenarios, and `tests/ui/` renders it under node from states captured in real runs.

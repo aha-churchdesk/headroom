@@ -6,36 +6,44 @@
 #   ./scripts/install.sh --login         ...and start it at login
 #   ./scripts/install.sh --hooks         ...and route agents' heavy commands through it
 #   ./scripts/install.sh --bin DIR       put the CLI link in DIR (default ~/.local/bin)
+#   ./scripts/install.sh --bundle PATH   install an already-built Headroom.app
 #   ./scripts/install.sh --uninstall     remove the app, the link, the login item and the hooks
 #
 # Your shell config is never edited; if DIR isn't on PATH you get the line to add.
 set -euo pipefail
+INVOKING_DIR="$PWD"
 cd "$(dirname "$0")/.."
 
 BIN_DIR="$HOME/.local/bin"
 LOGIN=0 HOOKS=0 UNINSTALL=0
+BUNDLE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --login) LOGIN=1 ;;
     --hooks) HOOKS=1 ;;
     --uninstall) UNINSTALL=1 ;;
     --bin) BIN_DIR="${2:?--bin needs a directory}"; shift ;;
-    -h|--help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --bundle)
+      BUNDLE="${2:?--bundle needs a bundle path}"
+      case "$BUNDLE" in /*) ;; *) BUNDLE="$INVOKING_DIR/$BUNDLE" ;; esac
+      shift ;;
+    -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1 (see --help)"; exit 2 ;;
   esac
   shift
 done
 
-APP="/Applications/Headroom.app"
+source ./scripts/install-common.sh
+APP="$HR_APP"
 CLI="$APP/Contents/MacOS/headroom"
 LINK="$BIN_DIR/headroom"
 
 if [ $UNINSTALL -eq 1 ]; then
+  hr_stop
   # Hooks first, while the CLI that removes them is still there: a hook
   # pointing at a missing binary would fail on every shell command.
   if [ -x "$CLI" ]; then "$CLI" hook uninstall; fi
   ./scripts/login-item.sh uninstall >/dev/null
-  pkill -f 'Headroom.app/Contents/MacOS/headroomd' 2>/dev/null || true
   rm -rf "$APP"
   # Only our own link: never a headroom that something else put there.
   if [ -L "$LINK" ] && [ "$(readlink "$LINK")" = "$CLI" ]; then rm "$LINK"; fi
@@ -50,12 +58,15 @@ if command -v brew >/dev/null 2>&1 && brew list --formula headroom >/dev/null 2>
   exit 1
 fi
 
-./scripts/bundle.sh --install
-
-mkdir -p "$BIN_DIR"
 if [ -e "$LINK" ] && ! [ -L "$LINK" ]; then
   echo "$LINK exists and isn't a link; leaving it. Remove it, or pass --bin DIR."
   exit 1
+fi
+mkdir -p "$BIN_DIR"
+if [ -n "$BUNDLE" ]; then
+  ./scripts/install-bundle.sh "$BUNDLE"
+else
+  ./scripts/bundle.sh --install
 fi
 ln -sfn "$CLI" "$LINK"
 echo "linked $LINK -> $CLI"
@@ -69,7 +80,6 @@ if [ $LOGIN -eq 1 ]; then
   # Starts it now too.
   ./scripts/login-item.sh install
 else
-  open -a "$APP"
   echo "started Headroom; ./scripts/install.sh --login starts it at login"
 fi
 
