@@ -57,15 +57,8 @@ pub struct Config {
     /// subcommand or script name such as `dev` or `dev:web`.
     pub excluded: Vec<String>,
     pub start_at_login: bool,
-    /// Start a job that doesn't fit with fewer workers, when its tool allows.
-    pub tune: bool,
-    /// Never tune below this many workers: one worker can change how a
-    /// test suite behaves, not just how fast it runs.
-    pub tune_floor: u32,
-    /// Tools (`vitest`, `turbo`, `cargo`) or repository paths never tuned.
-    pub tune_off: Vec<String>,
-    /// Let a short job start ahead of a head that waits on memory, when it
-    /// fits now and should finish before the head could start anyway.
+    /// Let fitting jobs pass a head waiting on memory within the skip/time
+    /// limits. When runtimes are known, they must fit its predicted wait.
     pub backfill: bool,
     /// After this many jobs started ahead of it, or this long since the
     /// first one did, the head is waited for strictly.
@@ -162,9 +155,6 @@ impl Default for Config {
             .map(String::from)
             .to_vec(),
             start_at_login: true,
-            tune: true,
-            tune_floor: 2,
-            tune_off: Vec::new(),
             backfill: true,
             backfill_skips: 3,
             backfill_wait_s: 300,
@@ -218,6 +208,23 @@ mod tests {
         assert_eq!(c.headroom, GIB);
         assert_eq!(c.kill_mode, KillMode::FreezeKill);
         assert_eq!(c.patterns, Config::default().patterns);
+    }
+
+    #[test]
+    fn legacy_worker_tuning_settings_are_ignored_and_not_saved_again() {
+        let old = serde_json::json!({
+            "headroom": GIB,
+            "tune": true,
+            "tune_floor": 1,
+            "tune_off": ["vitest"]
+        });
+        let c: Config = serde_json::from_value(old).unwrap();
+        assert_eq!(c.headroom, GIB);
+        assert!(c.backfill);
+        let saved = serde_json::to_value(c).unwrap();
+        for removed in ["tune", "tune_floor", "tune_off"] {
+            assert!(saved.get(removed).is_none());
+        }
     }
 
     #[test]

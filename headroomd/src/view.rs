@@ -427,7 +427,6 @@ pub fn state(l: &Listing, x: &Extras) -> Value {
             "wait_cap_s": cfg.wait_cap_s,
             "default_estimate": cfg.default_estimate,
             "start_at_login": x.login != Login::Off,
-            "tune": cfg.tune,
             "backfill": cfg.backfill,
             "backfill_skips": cfg.backfill_skips,
             "backfill_wait_s": cfg.backfill_wait_s,

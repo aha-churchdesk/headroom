@@ -5,16 +5,14 @@
 //! available, minus the headroom kept free, minus what the running jobs are
 //! still expected to grow into.
 //!
-//! The queue is strict head-of-line: if the head doesn't fit, nothing behind
-//! it starts, so a big job can't be starved by a stream of small ones.
+//! The queue gives its head first claim on memory. Later jobs can pass a
+//! waiting head only within the backfill limits below.
 //!
-//! A head that doesn't fit may still start with fewer workers, when its tool
-//! can be told so and its profile says how memory scales with workers.
-//!
-//! Or a later job may start first, if it fits now and its profile says it
-//! will be done before the head could start anyway (EASY backfilling). The
-//! head is passed over a bounded number of times, for a bounded time; then
-//! the queue is strict again until it starts.
+//! A later job may start first if it fits now. When runtimes are known,
+//! it must finish before the head could start anyway (EASY backfilling).
+//! Without a predicted runtime or release window, fitting jobs may still
+//! pass opportunistically, which can delay the head. Every pass counts
+//! toward the same bounded number and time; then the queue is strict again.
 
 use serde::{Deserialize, Serialize};
 
@@ -50,8 +48,6 @@ impl Blocked {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Decision {
     pub admit: Vec<JobId>,
-    /// Admitted jobs that start with fewer workers: (id, workers, estimate).
-    pub tuned: Vec<(JobId, u32, Bytes)>,
     /// Admitted jobs that start ahead of `skipped`, the head waiting on memory.
     pub backfilled: Vec<JobId>,
     pub skipped: Option<JobId>,
@@ -108,19 +104,6 @@ fn strict(head: &Job, cfg: &Config, now: Millis) -> bool {
         || head
             .skipped_since
             .is_some_and(|t| now.saturating_sub(t) >= cfg.backfill_wait_s * 1000)
-}
-
-/// The most workers, below the tool's default and not below the floor, at
-/// which the job's estimate fits in `free`, and that estimate.
-pub fn shrink(job: &Job, free: Bytes, cfg: &Config) -> Option<(u32, Bytes)> {
-    if !cfg.tune || job.pinned {
-        return None;
-    }
-    let (scaling, tune) = (job.scaling?, job.spec.tune?);
-    (cfg.tune_floor.max(1)..tune.default_workers)
-        .rev()
-        .map(|n| (n, scaling.at(n)))
-        .find(|&(_, est)| est <= free)
 }
 
 /// Memory the running jobs are still expected to take on top of what they
@@ -182,8 +165,7 @@ pub fn decide(
             .saturating_sub(cfg.headroom)
             .saturating_sub(growth);
         let fits = idle || job.pinned || job.estimate <= free;
-        let tuned = if fits { None } else { shrink(job, free, cfg) };
-        if !fits && tuned.is_none() {
+        if !fits {
             d.blocked = Some(Blocked::Memory {
                 need: job.estimate,
                 free,
@@ -200,18 +182,8 @@ pub fn decide(
             break;
         }
         d.admit.push(job.id);
-        let est = match tuned {
-            Some((n, est)) => {
-                d.tuned.push((job.id, n, est));
-                est
-            }
-            None => job.estimate,
-        };
-        growth += est;
-        // A newly chosen worker count invalidates the queued runtime.
-        // Settle looks up its matching history after this decision; until
-        // then this round cannot promise when the tuned job will finish.
-        admitted.push((if tuned.is_some() { None } else { job.median_ms }, est));
+        growth += job.estimate;
+        admitted.push((job.median_ms, job.estimate));
         load += 1.0;
     }
 
@@ -222,20 +194,22 @@ pub fn decide(
     if strict(head, cfg, now) {
         return d;
     }
-    let Some(head_starts_in) = shadow(running, &admitted, head.estimate, free, now) else {
-        return d;
-    };
+    let head_starts_in = shadow(running, &admitted, head.estimate, free, now);
     let remaining = cfg.backfill_skips.saturating_sub(head.skipped) as usize;
     for job in &queue[i + 1..] {
         if d.backfilled.len() >= remaining {
             break;
         }
-        // A job with no history makes no promise about when it ends.
-        let Some(takes) = job.median_ms.filter(|_| job.samples > 0) else {
-            continue;
+        // Preserve the finish window whenever both sides are known. A
+        // successful run can supply runtime even if its memory was unmeasured.
+        // Otherwise use the remaining skip allowance without promising that
+        // the head will not be delayed.
+        let time_ok = match (job.median_ms, head_starts_in) {
+            (Some(takes), Some(window)) => takes <= window,
+            _ => true,
         };
         let cpu_ok = job.low() || snap.cores == 0 || load < cpu_limit;
-        if takes <= head_starts_in && job.estimate <= free && cpu_ok {
+        if time_ok && job.estimate <= free && cpu_ok {
             d.admit.push(job.id);
             d.backfilled.push(job.id);
             free -= job.estimate;
@@ -252,8 +226,6 @@ pub fn decide(
 mod tests {
     use super::*;
     use crate::model::{GIB, JobSpec};
-    use crate::profile::Scaling;
-    use crate::tweaks::{Tool, Tunable};
 
     fn snap(avail_gb: f64) -> Snapshot {
         Snapshot {
@@ -283,157 +255,6 @@ mod tests {
         let r: Vec<&Job> = r.iter().collect();
         let q: Vec<&Job> = q.iter().collect();
         decide(s, &r, &q, held, &Config::default(), 0)
-    }
-
-    /// A vitest job estimated at 6 GB, needing 1 GB plus 0.5 GB a worker.
-    fn tunable(id: JobId) -> Job {
-        let mut j = job(id, 6.0);
-        j.spec.tune = Some(Tunable {
-            tool: Tool::Vitest,
-            default_workers: 10,
-            npm: false,
-        });
-        j.scaling = Some(Scaling {
-            base: GIB,
-            per_worker: GIB / 2,
-        });
-        j
-    }
-
-    /// Something of ours running, so the idle rule doesn't admit everything.
-    fn busy() -> Vec<Job> {
-        vec![running(9, 0.0, 0.0)]
-    }
-
-    #[test]
-    fn a_job_that_does_not_fit_starts_with_the_most_workers_that_do() {
-        // 6 GB available − 2 headroom = 4 GB: 1 + 0.5 × 6 = 4 GB fits exactly.
-        let d = run(&snap(6.0), &busy(), &[tunable(1), job(2, 0.5)], false);
-        assert_eq!(d.admit, vec![1]);
-        assert_eq!(d.tuned, vec![(1, 6, 4 * GIB)]);
-        // The tuned estimate is what it reserves: nothing is left for job 2.
-        assert_eq!(
-            d.blocked,
-            Some(Blocked::Memory {
-                need: GIB / 2,
-                free: 0
-            })
-        );
-        // One byte less and it takes one worker fewer.
-        let d = run(&snap(6.0 - 1.0 / GIB as f64), &busy(), &[tunable(1)], false);
-        assert_eq!(d.tuned.first().map(|t| t.1), Some(5));
-    }
-
-    #[test]
-    fn below_the_floor_it_waits_as_before() {
-        // The floor, 2 workers, needs 2 GB: 4 GB available leaves exactly that.
-        let d = run(&snap(4.0), &busy(), &[tunable(1)], false);
-        assert_eq!(d.tuned, vec![(1, 2, 2 * GIB)]);
-        let d = run(&snap(3.9), &busy(), &[tunable(1)], false);
-        assert!(d.admit.is_empty());
-        assert_eq!(
-            d.blocked,
-            Some(Blocked::Memory {
-                need: 6 * GIB,
-                free: (1.9 * GIB as f64) as Bytes
-            })
-        );
-    }
-
-    #[test]
-    fn shrinking_respects_the_peak_of_an_interrupted_tuned_run() {
-        use crate::profile::{Profiles, Run};
-
-        let mut profiles = Profiles::default();
-        for _ in 0..3 {
-            profiles.record(
-                "k",
-                "k",
-                Run {
-                    peak: 8 * GIB,
-                    duration_ms: 1000,
-                    exit: Some(0),
-                    flagged: false,
-                    at: 0,
-                    workers: Some(8),
-                    parts: Vec::new(),
-                },
-            );
-        }
-        profiles.record(
-            "k",
-            "k",
-            Run {
-                peak: 7 * GIB,
-                duration_ms: 100,
-                exit: None,
-                flagged: true,
-                at: 0,
-                workers: Some(2),
-                parts: Vec::new(),
-            },
-        );
-        let est = profiles.estimate_for_workers("k", "k", GIB, Some(8));
-        let mut job = Job::queued(
-            1,
-            JobSpec {
-                tune: Some(Tunable {
-                    tool: Tool::Vitest,
-                    default_workers: 8,
-                    npm: false,
-                }),
-                ..JobSpec::default()
-            },
-            est.bytes,
-            est.samples,
-            0,
-        );
-        job.scaling = profiles.get("k").unwrap().scaling();
-        assert_eq!(shrink(&job, 7 * GIB / 2, &Config::default()), None);
-        assert_eq!(
-            shrink(&job, 7 * GIB, &Config::default()),
-            Some((2, 7 * GIB))
-        );
-        assert!(run(&snap(5.5), &busy(), &[job], false).admit.is_empty());
-    }
-
-    #[test]
-    fn no_tuning_without_a_profile_a_tool_or_permission() {
-        let mut no_profile = tunable(1);
-        no_profile.scaling = None;
-        let mut no_tool = tunable(1);
-        no_tool.spec.tune = None;
-        let mut pinned = tunable(1);
-        pinned.pinned = true;
-        for j in [no_profile, no_tool] {
-            assert!(run(&snap(5.0), &busy(), &[j], false).admit.is_empty());
-        }
-        let off = Config {
-            tune: false,
-            ..Config::default()
-        };
-        let d = decide(&snap(5.0), &[&busy()[0]], &[&tunable(1)], false, &off, 0);
-        assert!(d.admit.is_empty());
-        // Pinned jobs skip the memory check, so they start untouched.
-        let d = run(&snap(5.0), &busy(), &[pinned], false);
-        assert_eq!((d.admit, d.tuned), (vec![1], vec![]));
-    }
-
-    #[test]
-    fn a_job_that_fits_is_never_tuned() {
-        let d = run(&snap(9.0), &busy(), &[tunable(1)], false);
-        assert_eq!((d.admit, d.tuned), (vec![1], vec![]));
-    }
-
-    #[test]
-    fn a_default_at_or_below_the_floor_leaves_nothing_to_try() {
-        let mut j = tunable(1);
-        j.spec.tune = Some(Tunable {
-            tool: Tool::Vitest,
-            default_workers: 2,
-            npm: false,
-        });
-        assert!(run(&snap(3.0), &busy(), &[j], false).admit.is_empty());
     }
 
     /// 6 GB available, 2 kept free; a 3 GB job running that is done in 60 s.
@@ -539,52 +360,185 @@ mod tests {
     }
 
     #[test]
-    fn no_promise_no_backfill() {
+    fn missing_runtime_on_either_side_allows_bounded_backfill() {
         let (s, r, head) = backfill_case(0, None);
-        // A new command has no run time to go by.
-        let mut new = short(2, 1.0, 1_000);
-        new.samples = 0;
-        assert!(
-            at(&s, std::slice::from_ref(&r), &[head.clone(), new], 0)
-                .admit
-                .is_empty()
-        );
-        // Nor can it be planned if a running job's end is unknown.
-        let mut unknown = r.clone();
-        unknown.median_ms = None;
-        let q = [head.clone(), short(2, 1.0, 1_000)];
-        assert!(at(&s, &[unknown], &q, 0).admit.is_empty());
-        // A frozen job won't end by itself: the head has no start to plan for.
+        for running_runtime in [Some(60_000), None] {
+            for candidate_runtime in [Some(60_000), Some(60_001), None] {
+                let mut running = r.clone();
+                running.median_ms = running_runtime;
+                let mut candidate = job(2, 1.0);
+                candidate.median_ms = candidate_runtime;
+                // Even without a memory sample, a known runtime must obey
+                // a known release window. A successful quick run can have
+                // elapsed time but finish between memory samples.
+                candidate.samples = 0;
+                let d = at(&s, &[running], &[head.clone(), candidate], 0);
+                let expected = match (running_runtime, candidate_runtime) {
+                    (Some(window), Some(takes)) => takes <= window,
+                    _ => true,
+                };
+                assert_eq!(!d.backfilled.is_empty(), expected);
+                assert_eq!(d.skipped, expected.then_some(head.id));
+            }
+        }
+        // Frozen memory has no predicted release, but smaller jobs can still
+        // use available memory within the same starvation limits.
         let mut frozen = r;
         frozen.state = JobState::Frozen;
-        assert!(at(&s, &[frozen], &q, 0).admit.is_empty());
+        let q = [head, short(2, 1.0, 600_000)];
+        assert_eq!(at(&s, &[frozen], &q, 0).backfilled, vec![2]);
     }
 
     #[test]
-    fn newly_tuned_jobs_cannot_supply_their_queued_runtime_to_backfill() {
-        let mut first = short(1, 8.0, 120_000);
-        first.spec.tune = Some(Tunable {
-            tool: Tool::Vitest,
-            default_workers: 8,
-            npm: false,
-        });
-        first.scaling = Some(Scaling {
-            base: 2 * GIB,
-            per_worker: GIB,
-        });
-        let mut blocker = running(9, 2.0, 2.0);
-        blocker.median_ms = Some(30_000);
-        // 4.5 GB free: the first job shrinks to 2 workers / 4 GB.
-        // The head needs that job to finish, whose 2-worker time is unknown.
+    fn opportunistic_jobs_share_the_remaining_memory_and_skip_budget() {
+        let mut r = running(9, 2.0, 2.0);
+        r.median_ms = None;
+        // 8.5 GB available minus 2 GB headroom leaves 6.5 GB. The 8 GB
+        // head waits, while later unknown-duration jobs share that budget.
+        let q = [
+            job(1, 8.0),
+            job(2, 3.0),
+            job(3, 4.0),
+            job(4, 3.5),
+            job(5, 0.1),
+        ];
+        let d = at(&snap(8.5), &[r], &q, 0);
+        assert_eq!(d.admit, vec![2, 4]);
+        assert_eq!(d.backfilled, vec![2, 4]);
+        assert_eq!(d.skipped, Some(1));
+        assert_eq!(
+            d.blocked,
+            Some(Blocked::Memory {
+                need: 8 * GIB,
+                free: 13 * GIB / 2
+            })
+        );
+
+        for skipped in 0..=3 {
+            let (s, mut r, mut head) = backfill_case(skipped, Some(0));
+            r.median_ms = None;
+            let mut q = vec![head.clone()];
+            q.extend((2..12).map(|id| job(id, 0.1)));
+            assert_eq!(
+                at(&s, std::slice::from_ref(&r), &q, 299_999)
+                    .backfilled
+                    .len(),
+                (3 - skipped) as usize
+            );
+            assert!(
+                at(&s, std::slice::from_ref(&r), &q, 300_000)
+                    .admit
+                    .is_empty()
+            );
+            // A later decision sees the passes recorded by settle and must
+            // not gain a fresh allowance just because runtime is unknown.
+            head.skipped = 3;
+            q[0] = head;
+            assert!(at(&s, &[r], &q, 0).admit.is_empty());
+        }
+    }
+
+    #[test]
+    fn opportunistic_backfill_keeps_hold_pressure_cpu_and_setting_gates() {
+        let (mut s, mut r, head) = backfill_case(0, None);
+        r.median_ms = None;
+        let later = job(2, 1.0);
+        let cfg = Config::default();
+        for pressure in [Pressure::Warn, Pressure::Critical] {
+            s.pressure = pressure;
+            assert!(
+                decide(&s, &[&r], &[&head, &later], false, &cfg, 0)
+                    .admit
+                    .is_empty()
+            );
+        }
+        s.pressure = Pressure::Normal;
+        assert!(
+            decide(&s, &[&r], &[&head, &later], true, &cfg, 0)
+                .admit
+                .is_empty()
+        );
+        let off = Config {
+            backfill: false,
+            ..cfg.clone()
+        };
+        assert!(
+            decide(&s, &[&r], &[&head, &later], false, &off, 0)
+                .admit
+                .is_empty()
+        );
+        s.load1 = s.cores as f64 * cfg.cpu_factor;
+        assert!(
+            decide(&s, &[&r], &[&head, &later], false, &cfg, 0)
+                .admit
+                .is_empty()
+        );
+        s.load1 -= 1.0;
+        let another = job(3, 1.0);
+        assert_eq!(
+            decide(&s, &[&r], &[&head, &later, &another], false, &cfg, 0).admit,
+            vec![2]
+        );
+        // Low-priority work keeps its existing CPU exception.
+        let mut low = another;
+        low.spec.low = true;
+        assert_eq!(
+            decide(&s, &[&r], &[&head, &later, &low], false, &cfg, 0).admit,
+            vec![2, 3]
+        );
+        // A CPU-blocked pinned head is never passed by this memory-only path.
+        let mut pinned = head;
+        pinned.pinned = true;
+        s.load1 += 1.0;
+        assert!(
+            decide(&s, &[&r], &[&pinned, &low], false, &cfg, 0)
+                .admit
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn opportunistic_backfill_respects_running_growth() {
+        // 8 GB minus 2 GB headroom minus 3 GB pending growth leaves 3 GB.
+        let r = running(9, 4.0, 1.0);
         let d = at(
-            &snap(6.5),
-            &[blocker],
-            &[first, job(2, 4.0), short(3, 0.5, 60_000)],
+            &snap(8.0),
+            std::slice::from_ref(&r),
+            &[job(1, 4.0), job(2, 3.0), job(3, 0.1)],
             0,
         );
-        assert_eq!(d.admit, vec![1]);
-        assert_eq!(d.tuned, vec![(1, 2, 4 * GIB)]);
-        assert!(d.backfilled.is_empty());
+        assert_eq!(d.admit, vec![2]);
+    }
+
+    #[test]
+    fn jobs_admitted_this_round_reserve_their_full_estimate_and_runtime() {
+        let mut running = short(9, 2.0, 30_000);
+        running.state = JobState::Running;
+        running.footprint = 2 * GIB;
+        for first_runtime in [Some(120_000), None] {
+            let mut first = short(1, 4.0, 120_000);
+            first.median_ms = first_runtime;
+            for candidate_runtime in [120_000, 120_001] {
+                // 6 GB usable before the first admission, 2 GB afterward.
+                // The 5 GB head needs the first job's 4 GB to be released.
+                let d = at(
+                    &snap(8.0),
+                    std::slice::from_ref(&running),
+                    &[first.clone(), job(2, 5.0), short(3, 1.0, candidate_runtime)],
+                    0,
+                );
+                let may_pass = first_runtime.is_none() || candidate_runtime <= 120_000;
+                assert_eq!(d.admit, if may_pass { vec![1, 3] } else { vec![1] });
+                assert_eq!(d.skipped, may_pass.then_some(2));
+                assert_eq!(
+                    d.blocked,
+                    Some(Blocked::Memory {
+                        need: 5 * GIB,
+                        free: 2 * GIB
+                    })
+                );
+            }
+        }
     }
 
     #[test]
@@ -630,7 +584,7 @@ mod tests {
     }
 
     #[test]
-    fn stops_at_the_first_job_that_does_not_fit() {
+    fn passes_a_memory_blocked_head_with_a_fitting_unknown_duration_job() {
         let d = run(
             &snap(8.0),
             &[],
@@ -638,7 +592,9 @@ mod tests {
             false,
         );
         // 6 GB usable: job 1 takes 3, job 2 needs 4 of the remaining 3.
-        assert_eq!(d.admit, vec![1]);
+        assert_eq!(d.admit, vec![1, 3]);
+        assert_eq!(d.backfilled, vec![3]);
+        assert_eq!(d.skipped, Some(2));
         assert_eq!(
             d.blocked,
             Some(Blocked::Memory {

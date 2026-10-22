@@ -1,22 +1,7 @@
-//! Shrinking a job to fit instead of making it wait.
+//! Read-only detection of default worker counts for historical comparisons.
 //!
-//! Test runners and build tools start one worker per core by default, and
-//! peak memory grows with the worker count. When the head of the queue
-//! doesn't fit, admission may start it with fewer workers instead (see
-//! `admission`); this module knows which tools can be told so, how, and
-//! when the user has already decided for them.
-//!
-//! Only tools whose knob was checked against an installed version are here:
-//!
-//! | Tool   | Knob                         | Default workers                 |
-//! |--------|------------------------------|---------------------------------|
-//! | vitest | `VITEST_MAX_WORKERS` env     | cores - 1 (vitest 5.0.1 source) |
-//! | turbo  | `--concurrency=N` argument   | 10 (turbo docs; not in --help)  |
-//! | cargo  | `CARGO_BUILD_JOBS` env       | cores (cargo docs)              |
-//!
-//! vitest applies `VITEST_MAX_WORKERS` after its config and CLI flags, so it
-//! would override a `maxWorkers` the user set. That is why a setting in the
-//! command, the npm script or a vitest/vite config file turns tuning off.
+//! Explicit flags, environment settings and ambiguous configurations leave
+//! the worker count unknown. This module never rewrites a command.
 
 use serde::{Deserialize, Serialize};
 
@@ -115,39 +100,14 @@ impl Tool {
     }
 }
 
-/// A job that can run with fewer workers, and how many it would use untouched.
+/// Read-only default worker metadata. The name is retained for wire compatibility.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tunable {
     pub tool: Tool,
     pub default_workers: u32,
-    /// The turbo argument goes after an npm script name: npm needs `--` first.
+    /// Legacy forwarding metadata retained for existing serialized values.
     #[serde(default)]
     pub npm: bool,
-}
-
-/// How a granted worker count is passed to the command.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Knob {
-    Env(&'static str, String),
-    /// Appended to the command line, or to argv.
-    Args(Vec<String>),
-}
-
-impl Tunable {
-    pub fn knob(&self, workers: u32) -> Knob {
-        match self.tool {
-            Tool::Vitest => Knob::Env("VITEST_MAX_WORKERS", workers.to_string()),
-            Tool::Cargo => Knob::Env("CARGO_BUILD_JOBS", workers.to_string()),
-            Tool::Turbo => {
-                let arg = format!("--concurrency={workers}");
-                Knob::Args(if self.npm {
-                    vec!["--".into(), arg]
-                } else {
-                    vec![arg]
-                })
-            }
-        }
-    }
 }
 
 const PACKAGE_MANAGERS: [&str; 4] = ["pnpm", "npm", "yarn", "bun"];
@@ -342,8 +302,8 @@ fn turbo_task_passthrough(line: &str, script: Option<&str>) -> bool {
     !npm_separator
 }
 
-/// Whether to tune at all, and how. `None` when the tool isn't one we know,
-/// the user already set a worker count, or the line can't safely be edited.
+/// Default worker metadata, when the tool and its configuration are known.
+/// Explicit worker settings and ambiguous wrappers leave the count unknown.
 pub fn detect(p: &Probe) -> Option<Tunable> {
     let text = format!("{} ; {}", p.line, p.script.unwrap_or(""));
     if simple_commands(&text)
@@ -408,15 +368,6 @@ pub fn detect(p: &Probe) -> Option<Tunable> {
         default_workers: tool.default_workers(p.cores),
         npm: npm && tool == Tool::Turbo,
     })
-}
-
-/// The command line with turbo's argument appended; other tools use the
-/// environment and leave the line alone.
-pub fn apply_line(line: &str, knob: &Knob) -> String {
-    match knob {
-        Knob::Env(..) => line.to_string(),
-        Knob::Args(a) => format!("{} {}", line.trim_end(), a.join(" ")),
-    }
 }
 
 #[cfg(test)]
@@ -595,7 +546,7 @@ mod tests {
         }
         for line in ["npm exec -- vitest run", "pnpm exec -- vitest run"] {
             let tunable = probe(line, None, "", &[]).unwrap();
-            assert_eq!(apply_line(line, &tunable.knob(2)), line);
+            assert_eq!(tunable.tool, Tool::Vitest);
         }
     }
 
@@ -697,38 +648,8 @@ mod tests {
         ] {
             let t = probe(line, Some("turbo run build"), "", &[]).unwrap();
             assert!(!t.npm, "{line}");
-            assert_eq!(
-                apply_line(line, &t.knob(2)),
-                format!("{line} --concurrency=2")
-            );
+            assert_eq!(t.tool, Tool::Turbo);
         }
-    }
-
-    #[test]
-    fn knobs_and_line_edits() {
-        let v = Tunable {
-            tool: Tool::Vitest,
-            default_workers: 11,
-            npm: false,
-        };
-        assert_eq!(v.knob(3), Knob::Env("VITEST_MAX_WORKERS", "3".into()));
-        assert_eq!(apply_line("pnpm test", &v.knob(3)), "pnpm test");
-        let t = probe("turbo run build  ", None, "", &[]).unwrap();
-        assert_eq!(
-            apply_line("turbo run build  ", &t.knob(4)),
-            "turbo run build --concurrency=4"
-        );
-        let npm = probe("npm run build", Some("turbo run build"), "", &[]).unwrap();
-        assert!(npm.npm);
-        assert_eq!(
-            apply_line("npm run build", &npm.knob(4)),
-            "npm run build -- --concurrency=4"
-        );
-        let pnpm = probe("pnpm build", Some("turbo run build"), "", &[]).unwrap();
-        assert_eq!(
-            apply_line("pnpm build", &pnpm.knob(4)),
-            "pnpm build --concurrency=4"
-        );
     }
 
     #[test]

@@ -655,7 +655,7 @@ mod tests {
     }
 
     #[test]
-    fn estimates_use_script_worker_metadata_even_when_tuning_is_disabled() {
+    fn estimates_use_read_only_script_worker_metadata() {
         let (s, cwd) = store("estimate-workers");
         std::fs::write(
             cwd.join("package.json"),
@@ -697,26 +697,16 @@ mod tests {
             .unwrap()
             .at(tune.default_workers);
         assert!(expected > 2 * GIB);
-        for disabled in ["neither", "all", "vitest"] {
-            let mut cfg = s.load_config();
-            cfg.tune = disabled != "all";
-            cfg.tune_off = if disabled == "vitest" {
-                vec!["vitest".into()]
-            } else {
-                vec![]
-            };
-            s.save_config(&cfg).unwrap();
-            let result = tool(&s, &cwd, "estimate_command", json!({ "command": command }));
-            let content = &result["structuredContent"];
-            assert_eq!(content["estimate_gb"], gb(expected), "{disabled}");
-            assert_eq!(content["profiled_runs"], 20);
-            assert!(
-                content["basis"]
-                    .as_str()
-                    .unwrap()
-                    .contains("default worker count")
-            );
-        }
+        let result = tool(&s, &cwd, "estimate_command", json!({ "command": command }));
+        let content = &result["structuredContent"];
+        assert_eq!(content["estimate_gb"], gb(expected));
+        assert_eq!(content["profiled_runs"], 20);
+        assert!(
+            content["basis"]
+                .as_str()
+                .unwrap()
+                .contains("default worker count")
+        );
         // User-owned worker settings also disable metadata in the run path.
         std::fs::write(
             cwd.join("package.json"),

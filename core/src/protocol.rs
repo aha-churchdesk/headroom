@@ -96,9 +96,6 @@ pub enum DaemonMsg {
         id: JobId,
         retry: u8,
         low: bool,
-        /// Run with this many workers instead of the tool's default.
-        #[serde(default)]
-        workers: Option<u32>,
     },
     Frozen {
         by: FrozenBy,
@@ -167,6 +164,27 @@ pub fn request(socket: &std::path::Path, msg: &ClientMsg) -> Result<DaemonMsg, S
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn legacy_worker_grants_are_read_but_never_reissued() {
+        let grant: DaemonMsg =
+            serde_json::from_str(r#"{"t":"granted","id":1,"retry":0,"low":false,"workers":2}"#)
+                .unwrap();
+        assert_eq!(
+            grant,
+            DaemonMsg::Granted {
+                id: 1,
+                retry: 0,
+                low: false
+            }
+        );
+        assert!(
+            serde_json::to_value(grant)
+                .unwrap()
+                .get("workers")
+                .is_none()
+        );
+    }
 
     #[test]
     fn messages_round_trip_one_per_line() {

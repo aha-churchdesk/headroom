@@ -2,7 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::profile::Scaling;
 use crate::tweaks::Tunable;
 
 pub type JobId = u64;
@@ -107,8 +106,10 @@ pub struct JobSpec {
     pub agent: Option<String>,
     pub low: bool,
     pub background: bool,
-    /// Set when the command can be told to use fewer workers.
-    #[serde(default)]
+    /// Read-only default worker metadata used to compare historical runs.
+    /// Old clients' `tune` is accepted as metadata only. New clients send
+    /// `worker_hint` so an older daemon cannot treat it as rewrite consent.
+    #[serde(default, rename = "worker_hint", alias = "tune")]
     pub tune: Option<Tunable>,
     /// The asking process. One inside a running job's processes runs
     /// directly: it is part of that job, even when the tools between them
@@ -137,6 +138,10 @@ pub struct Job {
     pub estimate: Bytes,
     /// Clean runs behind the estimate; zero means the default was used.
     pub samples: u32,
+    /// Preserve a running attempt's guard threshold when its learned data
+    /// is cleared. Reset on retry; clearing history must not make it runaway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runaway_floor: Option<Bytes>,
     pub footprint: Bytes,
     pub peak: Bytes,
     pub cpu_pct: f64,
@@ -158,9 +163,6 @@ pub struct Job {
     #[serde(default)]
     pub spared: bool,
     pub pgid: Option<i32>,
-    /// How its peak grows with workers, while it may be tuned.
-    #[serde(default)]
-    pub scaling: Option<Scaling>,
     /// The worker count it was started with, if admission lowered it.
     #[serde(default)]
     pub tuned: Option<Tuned>,
@@ -195,6 +197,7 @@ impl Job {
             frozen_by: None,
             estimate,
             samples,
+            runaway_floor: None,
             footprint: 0,
             peak: 0,
             cpu_pct: 0.0,
@@ -208,7 +211,6 @@ impl Job {
             guard_note: None,
             spared: false,
             pgid: None,
-            scaling: None,
             tuned: None,
             median_ms: None,
             skipped: 0,
@@ -223,14 +225,11 @@ impl Job {
         self.spec.low
     }
 
-    /// Footprint above which this job counts as a runaway. A job with no
-    /// history has no estimate worth doubling, so only the cap applies.
+    /// Footprint above which this job counts as a runaway. The admission
+    /// estimate includes useful fallback history even without own samples.
     pub fn runaway_at(&self, factor: f64, cap: Bytes) -> Bytes {
-        if self.samples == 0 {
-            cap
-        } else {
-            cap.max((self.estimate as f64 * factor) as Bytes)
-        }
+        let threshold = cap.max((self.estimate as f64 * factor) as Bytes);
+        threshold.max(self.runaway_floor.unwrap_or(0))
     }
 }
 
@@ -292,6 +291,53 @@ impl HistoryEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_metadata_cannot_enable_tuning_in_an_older_daemon() {
+        use crate::tweaks::Tool;
+        let spec = JobSpec {
+            tune: Some(Tunable {
+                tool: Tool::Vitest,
+                default_workers: 8,
+                npm: false,
+            }),
+            ..JobSpec::default()
+        };
+        let mut wire = serde_json::to_value(&spec).unwrap();
+        assert!(wire.get("tune").is_none());
+        assert_eq!(wire["worker_hint"]["default_workers"], 8);
+        #[derive(Deserialize)]
+        struct OldJobSpec {
+            #[serde(default)]
+            tune: Option<Tunable>,
+        }
+        let old: OldJobSpec = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(
+            old.tune, None,
+            "old daemon receives no permission to shrink"
+        );
+        let hint = wire.as_object_mut().unwrap().remove("worker_hint").unwrap();
+        wire["tune"] = hint;
+        assert_eq!(
+            serde_json::from_value::<JobSpec>(wire).unwrap(),
+            spec,
+            "new daemons still read old metadata"
+        );
+    }
+
+    #[test]
+    fn fallback_estimates_protect_new_workloads_from_false_runaways() {
+        let estimate = 94 * GIB / 10;
+        let mut j = Job::queued(1, JobSpec::default(), estimate, 0, 0);
+        j.footprint = 10 * GIB;
+        let threshold = j.runaway_at(2.0, 8 * GIB);
+        assert_eq!(threshold, 2 * estimate);
+        assert!(j.footprint < threshold);
+        j.footprint = threshold + 1;
+        assert!(j.footprint > j.runaway_at(2.0, 8 * GIB));
+        j.runaway_floor = Some(24 * GIB);
+        assert_eq!(j.runaway_at(2.0, 8 * GIB), 24 * GIB);
+    }
 
     #[test]
     fn history_start_metadata_round_trips_and_old_history_still_loads() {

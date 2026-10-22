@@ -299,8 +299,8 @@ impl Profiles {
     }
 
     /// Reserve for the command's default workers, since observed peaks may
-    /// come from runs with fewer workers. This floor also applies when worker
-    /// tuning is disabled; the command then starts with its default count.
+    /// come from older runs with fewer workers. New commands keep their
+    /// original worker settings, so reserve for their default count.
     pub fn estimate_for_workers(
         &self,
         key: &str,

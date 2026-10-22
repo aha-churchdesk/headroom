@@ -13,9 +13,9 @@ use crate::config::Config;
 use crate::guard::{self, Action, GuardState};
 use crate::model::{
     Bytes, FrozenBy, HistoryEntry, Job, JobId, JobSpec, JobState, Millis, Outcome, Part, Pressure,
-    Snapshot, Tuned, merge_parts,
+    Snapshot, merge_parts,
 };
-use crate::profile::{Estimate, Profiles, Run, Scaling};
+use crate::profile::{Estimate, Profiles, Run};
 use crate::protocol::{Control, DaemonMsg, Listing};
 use crate::tally::Tally;
 
@@ -174,10 +174,9 @@ impl Scheduler {
         let est = self.estimate_for(&spec);
         let id = self.next_id;
         self.next_id += 1;
-        let scaling = self.scaling_for(&spec);
         let median = self.median_for(&spec);
         let mut job = Job::queued(id, spec, est.bytes, est.samples, now);
-        (job.scaling, job.median_ms) = (scaling, median);
+        job.median_ms = median;
         self.jobs.insert(
             id,
             Entry {
@@ -661,18 +660,8 @@ impl Scheduler {
         fx
     }
 
-    /// How a job's memory scales with workers, if it may be tuned at all.
-    fn scaling_for(&self, spec: &JobSpec) -> Option<Scaling> {
-        let tune = spec.tune?;
-        let off = |s: &String| *s == tune.tool.name() || spec.key.starts_with(&format!("{s}|"));
-        if !self.cfg.tune || self.cfg.tune_off.iter().any(off) {
-            return None;
-        }
-        self.profiles.get(&spec.key)?.scaling()
-    }
-
-    /// Recorded peaks include runs with fewer workers. Starting untouched
-    /// reserves the model's memory at the default count, even with tuning off.
+    /// Historical peaks may include runs from versions that reduced workers.
+    /// Reserve for the untouched command's default count when known.
     fn estimate_for(&self, spec: &JobSpec) -> Estimate {
         self.profiles.estimate_for_workers(
             &spec.key,
@@ -700,10 +689,9 @@ impl Scheduler {
         for id in ids {
             let spec = self.jobs[&id].job.spec.clone();
             let est = self.estimate_for(&spec);
-            let scaling = self.scaling_for(&spec);
             let median = self.median_for(&spec);
             let j = &mut self.jobs.get_mut(&id).expect("queued").job;
-            (j.estimate, j.samples, j.scaling) = (est.bytes, est.samples, scaling);
+            (j.estimate, j.samples) = (est.bytes, est.samples);
             j.median_ms = median;
             self.jobs.get_mut(&id).expect("queued").told = None;
         }
@@ -711,15 +699,15 @@ impl Scheduler {
 
     fn requeue(&mut self, mut e: Entry, now: Millis) {
         let est = self.estimate_for(&e.job.spec);
-        let scaling = self.scaling_for(&e.job.spec);
         let median = self.median_for(&e.job.spec);
         let j = &mut e.job;
+        j.runaway_floor = None;
         (j.median_ms, j.ahead_of) = (median, None);
         j.state = JobState::Queued;
         j.retry += 1;
         j.estimate = est.bytes;
         j.samples = est.samples;
-        (j.scaling, j.tuned) = (scaling, None);
+        j.tuned = None;
         (j.footprint, j.peak, j.cpu_pct, j.procs) = (0, 0, 0.0, 0);
         j.now = None;
         j.parts.clear();
@@ -867,22 +855,12 @@ impl Scheduler {
             e.job.state = JobState::Running;
             e.job.started_at = Some(now);
             e.job.swap_at_start = swap;
-            if let Some(&(_, workers, est)) = d.tuned.iter().find(|t| t.0 == id) {
-                let default = e.job.spec.tune.map_or(workers, |t| t.default_workers);
-                e.job.tuned = Some(Tuned { workers, default });
-                e.job.estimate = est;
-                e.job.median_ms = self
-                    .profiles
-                    .get(&e.job.spec.key)
-                    .and_then(|p| p.median_ms_for_workers(Some(workers)));
-            }
             fx.push(Effect::Send(
                 e.conn,
                 DaemonMsg::Granted {
                     id,
                     retry: e.job.retry,
                     low: e.job.spec.low,
-                    workers: e.job.tuned.map(|t| t.workers),
                 },
             ));
         }
@@ -1045,8 +1023,8 @@ mod tests {
         assert!(granted(&fx, 3));
     }
 
-    /// `vitest run`, tunable from 9 workers, with three clean 9 GB runs at 9.
-    fn tunable_sched(avail_gb: u64) -> (Scheduler, JobSpec) {
+    /// `vitest run` with three clean 9 GB runs at its default 9 workers.
+    fn worker_profile_sched(avail_gb: u64) -> (Scheduler, JobSpec) {
         let mut s = sched(avail_gb);
         let mut sp = spec("vitest run");
         // Its own fallback, so the blocker's estimate stays the default.
@@ -1075,53 +1053,13 @@ mod tests {
     }
 
     #[test]
-    fn a_job_that_does_not_fit_is_granted_with_fewer_workers_and_remembers_it() {
-        // 12 − 2 headroom − 3 still to grow = 7 GB: 2.25 + 0.75 × 6 = 6.75 fits.
-        let (mut s, sp) = tunable_sched(12);
+    fn a_run_records_the_tools_default_workers() {
+        let (mut s, sp) = worker_profile_sched(30);
         let fx = s.enqueue(1, sp.clone(), 0);
         assert!(sent(&fx, 1).contains(&&DaemonMsg::Granted {
             id: 2,
             retry: 0,
             low: false,
-            workers: Some(6),
-        }));
-        let job = &s
-            .list()
-            .running
-            .iter()
-            .find(|j| j.id == 2)
-            .cloned()
-            .unwrap();
-        assert_eq!(
-            job.tuned,
-            Some(Tuned {
-                workers: 6,
-                default: 9
-            })
-        );
-        assert_eq!(job.estimate, 27 * GIB / 4);
-        s.started(1, 100);
-        s.tick(snap(12), &usage(100, 5.0), 1_000);
-        s.exited(1, Some(0), None, 2_000, 7);
-        assert_eq!(s.profiles.get(&sp.key).unwrap().runs[3].workers, Some(6));
-        assert_eq!(
-            s.history[0].tuned,
-            Some(Tuned {
-                workers: 6,
-                default: 9
-            })
-        );
-    }
-
-    #[test]
-    fn an_untuned_run_records_the_tools_default_workers() {
-        let (mut s, sp) = tunable_sched(30);
-        let fx = s.enqueue(1, sp.clone(), 0);
-        assert!(sent(&fx, 1).contains(&&DaemonMsg::Granted {
-            id: 2,
-            retry: 0,
-            low: false,
-            workers: None,
         }));
         s.started(1, 100);
         s.exited(1, Some(0), None, 1_000, 7);
@@ -1173,80 +1111,22 @@ mod tests {
     }
 
     #[test]
-    fn tuned_runtime_uses_matching_history_or_stays_unknown() {
-        for matching in [false, true] {
-            let (mut s, sp) = tunable_sched(12);
-            if matching {
-                s.profiles.record(
-                    &sp.key,
-                    &sp.fallback_key,
-                    Run {
-                        peak: 27 * GIB / 4,
-                        duration_ms: 30_000,
-                        exit: Some(0),
-                        flagged: false,
-                        at: 0,
-                        workers: Some(6),
-                        parts: vec![],
-                    },
-                );
-            }
-            assert!(granted(&s.enqueue(1, sp, 0), 1));
-            let job = s.list().running.into_iter().find(|j| j.id == 2).unwrap();
-            assert_eq!(job.tuned.unwrap().workers, 6);
-            assert_eq!(job.median_ms, matching.then_some(30_000));
-        }
-    }
-
-    #[test]
-    fn tuned_history_reserves_the_default_worker_count_before_admission() {
-        for tune in [true, false] {
-            let mut s = sched(8);
-            s.cfg.tune = tune;
-            let mut sp = own("vitest run");
-            sp.tune = Some(Tunable {
-                tool: Tool::Vitest,
-                default_workers: 10,
-                npm: false,
-            });
-            for i in 0..20 {
-                s.profiles.record(
-                    &sp.key,
-                    &sp.fallback_key,
-                    Run {
-                        peak: if i < 2 { 8 * GIB } else { 2 * GIB },
-                        workers: Some(if i < 2 { 10 } else { 2 }),
-                        duration_ms: 60_000,
-                        exit: Some(0),
-                        flagged: false,
-                        at: 0,
-                        parts: vec![],
-                    },
-                );
-            }
-            assert_eq!(s.profiles.get(&sp.key).unwrap().p90(), Some(2 * GIB));
-            s.enqueue(9, spec("blocker"), 0);
-            let fx = s.enqueue(1, sp.clone(), 0);
-            if tune {
-                assert!(sent(&fx, 1).iter().any(|m| {
-                    matches!(
-                        m,
-                        DaemonMsg::Granted {
-                            workers: Some(_),
-                            ..
-                        }
-                    )
-                }));
-            } else {
-                assert!(!granted(&fx, 1));
-                assert!(s.list().queued[0].estimate >= 8 * GIB);
-            }
-            // Reconfiguration must also preserve the default-count estimate.
-            s.held = true;
-            s.enqueue(2, sp, 0);
-            s.reestimate(None);
-            assert!(s.list().queued.iter().all(|j| j.estimate >= 8 * GIB));
-        }
+    fn historical_worker_data_never_shrinks_a_new_job_to_fit() {
+        let (mut s, sp) = worker_profile_sched(12);
+        let expected = s.estimate_for(&sp).bytes;
+        let fx = s.enqueue(1, sp.clone(), 0);
+        assert!(!granted(&fx, 1));
+        let queued = &s.list().queued[0];
+        assert_eq!(queued.estimate, expected);
+        assert_eq!(queued.spec, sp);
+        assert_eq!(queued.tuned, None);
+        // Once the original estimate fits, its original worker metadata stays.
+        let fx = s.tick(snap(30), &HashMap::new(), 1000);
+        assert!(granted(&fx, 1));
+        let active = s.list().running.into_iter().find(|j| j.id == 2).unwrap();
+        assert_eq!(active.spec, sp);
+        assert_eq!(active.estimate, expected);
+        assert_eq!(active.tuned, None);
     }
 
     #[test]
@@ -1287,62 +1167,6 @@ mod tests {
         let q = s.list().queued;
         assert_eq!(q[0].estimate, 12 * GIB);
         assert_eq!(q[1].estimate, 3 * GIB);
-    }
-
-    #[test]
-    fn turning_tuning_off_globally_per_tool_or_per_repo_keeps_it_waiting() {
-        for off in [
-            Config {
-                tune: false,
-                ..s_cfg()
-            },
-            Config {
-                tune_off: vec!["vitest".into()],
-                ..s_cfg()
-            },
-            Config {
-                tune_off: vec!["/r".into()],
-                ..s_cfg()
-            },
-        ] {
-            let (mut s, sp) = tunable_sched(12);
-            s.control(
-                5,
-                Control::Configure {
-                    config: Box::new(off.clone()),
-                },
-                0,
-                0,
-            );
-            let fx = s.enqueue(1, sp, 0);
-            assert!(!granted(&fx, 1), "{off:?}");
-        }
-        // And turning it back on re-plans the job already waiting.
-        let (mut s, sp) = tunable_sched(12);
-        let off = Config {
-            tune: false,
-            ..s_cfg()
-        };
-        s.control(
-            5,
-            Control::Configure {
-                config: Box::new(off),
-            },
-            0,
-            0,
-        );
-        assert!(!granted(&s.enqueue(1, sp, 0), 1));
-        let fx = s.control(
-            5,
-            Control::Configure {
-                config: Box::new(s_cfg()),
-            },
-            0,
-            0,
-        );
-        assert!(fx.contains(&Effect::SaveConfig));
-        let later = s.tick(snap(12), &HashMap::new(), 1_000);
-        assert!(granted(&fx, 1) || granted(&later, 1));
     }
 
     /// Three clean runs of `cmd`, each `gb` GB for `secs` seconds.
@@ -1413,13 +1237,6 @@ mod tests {
         // Another settle cannot spend the same allowance again.
         s.tick(snap(8), &usage(100, 6.0), 2_000);
         assert_eq!(s.list().running.len(), 4);
-    }
-
-    fn s_cfg() -> Config {
-        Config {
-            default_estimate: 3 * GIB,
-            ..Config::default()
-        }
     }
 
     #[test]
@@ -1834,7 +1651,6 @@ mod tests {
             id: 1,
             retry: 1,
             low: false,
-            workers: None,
         }));
         // The second run's wait counts from the requeue, not the first enqueue.
         s.started(1, 100);

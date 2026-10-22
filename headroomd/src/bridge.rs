@@ -97,7 +97,6 @@ pub fn translate(cmd: UiCmd, cfg: &Config) -> Result<Do, String> {
                 "headroom" => c.headroom = num()?,
                 "default_estimate" => c.default_estimate = num()?,
                 "wait_cap_s" => c.wait_cap_s = num()?,
-                "tune" => c.tune = value.as_bool().ok_or("tune needs true or false")?,
                 "backfill" => c.backfill = value.as_bool().ok_or("backfill needs true or false")?,
                 "kill_mode" => {
                     c.kill_mode = serde_json::from_value::<KillMode>(value.clone())
@@ -181,9 +180,7 @@ mod tests {
         );
         let c = config_of(t(r#"{"cmd":"set","key":"kill_mode","value":"freeze"}"#));
         assert_eq!(c.kill_mode, KillMode::Freeze);
-        let c = config_of(t(r#"{"cmd":"set","key":"tune","value":false}"#));
-        assert!(!c.tune);
-        assert!(t(r#"{"cmd":"set","key":"tune","value":0}"#).is_err());
+        assert!(t(r#"{"cmd":"set","key":"tune","value":false}"#).is_err());
         let c = config_of(t(r#"{"cmd":"set","key":"backfill","value":false}"#));
         assert!(!c.backfill);
         assert_eq!(

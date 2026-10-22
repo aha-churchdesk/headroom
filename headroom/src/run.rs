@@ -19,7 +19,6 @@ use headroom_core::model::JobSpec;
 use headroom_core::protocol::{ClientMsg, DaemonMsg, read_msg, write_msg};
 use headroom_core::shell;
 use headroom_core::store::Store;
-use headroom_core::tweaks::{self, Knob, Tunable};
 
 use crate::context::{git_context, git_hook_installed, tunable};
 
@@ -113,8 +112,8 @@ impl RunOpts {
         self.sh.clone().unwrap_or_else(|| shell::join(&self.argv))
     }
 
-    fn command(&self, low: bool, knob: Option<&Knob>) -> Command {
-        let (prog, mut args): (String, Vec<String>) = match &self.sh {
+    fn command(&self, low: bool) -> Command {
+        let (prog, args): (String, Vec<String>) = match &self.sh {
             Some(line) => {
                 let shell = self
                     .shell
@@ -122,15 +121,11 @@ impl RunOpts {
                     .or_else(|| std::env::var("SHELL").ok())
                     .filter(|s| !s.is_empty())
                     .unwrap_or("/bin/zsh".into());
-                let line = knob.map_or_else(|| line.clone(), |k| tweaks::apply_line(line, k));
-                (shell, vec!["-c".into(), line])
+                (shell, vec!["-c".into(), line.clone()])
             }
             None => (self.argv[0].clone(), self.argv[1..].to_vec()),
         };
-        if let (None, Some(Knob::Args(extra))) = (&self.sh, knob) {
-            args.extend(extra.iter().cloned());
-        }
-        let mut c = if low {
+        if low {
             // Background QoS clamp: inherited by every child of the job.
             let mut c = Command::new("/usr/sbin/taskpolicy");
             c.args(["-c", "background"]).arg(prog).args(args);
@@ -139,17 +134,13 @@ impl RunOpts {
             let mut c = Command::new(prog);
             c.args(args);
             c
-        };
-        if let Some(Knob::Env(var, value)) = knob {
-            c.env(var, value);
         }
-        c
     }
 }
 
 /// Run without the queue, in our own process group, as if Headroom weren't there.
 fn direct(o: &RunOpts) -> i32 {
-    match o.command(false, None).status() {
+    match o.command(false).status() {
         Ok(s) => code_of(s),
         Err(e) => {
             note(&format!("can't start: {e}"));
@@ -199,7 +190,7 @@ pub fn run(o: RunOpts) -> i32 {
     };
     let wait_cap = (!o.background).then(|| o.wait_cap.unwrap_or(cfg.wait_cap_s));
     match Session::open(stream, spec) {
-        Some(s) => s.drive(&o, wait_cap, tune),
+        Some(s) => s.drive(&o, wait_cap),
         None => {
             note("scheduler didn't answer; running directly");
             direct(&o)
@@ -257,7 +248,7 @@ impl Session {
         let _ = write_msg(&mut self.writer, m);
     }
 
-    fn drive(mut self, o: &RunOpts, wait_cap: Option<u64>, tune: Option<Tunable>) -> i32 {
+    fn drive(mut self, o: &RunOpts, wait_cap: Option<u64>) -> i32 {
         for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
             unsafe {
                 libc::signal(
@@ -313,9 +304,7 @@ impl Session {
                             note(&line);
                         }
                     }
-                    Ok(Some(DaemonMsg::Granted {
-                        id, low, workers, ..
-                    })) => break (id, low, workers),
+                    Ok(Some(DaemonMsg::Granted { id, low, .. })) => break (id, low),
                     Ok(Some(DaemonMsg::Cancelled)) => {
                         note("cancelled from the queue. Nothing ran.");
                         return EXIT_CANCELLED;
@@ -347,16 +336,8 @@ impl Session {
             }
 
             // ── running ──
-            let (id, low, workers) = grant;
-            let knob = workers.zip(tune).map(|(n, t)| {
-                note(&format!(
-                    "starting with {n} {} workers instead of {} so it fits in memory",
-                    t.tool.name(),
-                    t.default_workers
-                ));
-                t.knob(n)
-            });
-            let mut cmd = o.command(low, knob.as_ref());
+            let (id, low) = grant;
+            let mut cmd = o.command(low);
             cmd.process_group(0).env(JOB_ENV, id.to_string());
             let mut child = match cmd.spawn() {
                 Ok(c) => c,
@@ -396,7 +377,7 @@ impl Session {
     /// supervisor to forward wrapper-targeted signals and manage the terminal.
     fn direct_supervised(&mut self, o: &RunOpts) -> i32 {
         let _ = self.writer.shutdown(std::net::Shutdown::Both);
-        let mut cmd = o.command(false, None);
+        let mut cmd = o.command(false);
         cmd.process_group(0);
         let mut child = match cmd.spawn() {
             Ok(child) => child,
@@ -653,64 +634,62 @@ mod tests {
             shell: Some("/bin/bash".into()),
             ..RunOpts::default()
         };
-        let output = options.command(false, None).output().unwrap();
+        let output = options.command(false).output().unwrap();
         assert!(output.status.success());
         assert_eq!(output.stdout, b"first");
     }
 
     #[test]
-    fn advertised_worker_limits_reach_the_child_in_shell_and_argv_modes() {
+    fn launch_preserves_original_arguments_shell_text_and_worker_environment() {
         use std::os::unix::fs::PermissionsExt;
-
-        let dir = std::env::temp_dir().join(format!("hr-worker-child-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("hr-original-command-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let vitest = dir.join("vitest");
-        std::fs::write(&vitest, "#!/bin/sh\nprintf '%s' \"$VITEST_MAX_WORKERS\"\n").unwrap();
-        std::fs::set_permissions(&vitest, std::fs::Permissions::from_mode(0o755)).unwrap();
-        for prefix in [
-            vec![],
-            vec!["env", "FOO=bar"],
-            vec!["env", "-u", "OTHER"],
-            vec!["env", "-u", "VITEST_MAX_WORKERS"],
-            vec!["env", "-i"],
-        ] {
-            let expected_tunable =
-                !prefix.contains(&"VITEST_MAX_WORKERS") && !prefix.contains(&"-i");
-            let mut argv: Vec<String> = prefix.into_iter().map(String::from).collect();
-            argv.extend([vitest.to_string_lossy().into_owned(), "run".into()]);
-            let line = shell::join(&argv);
-            let tune = tweaks::detect(&tweaks::Probe {
-                line: &line,
-                script: None,
-                configs: &|_| String::new(),
-                env_set: &|_| false,
-                cores: 8,
-            });
-            assert_eq!(tune.is_some(), expected_tunable, "{line}");
-            let knob = tune.map(|t| t.knob(2));
-            for as_shell in [false, true] {
-                let options = RunOpts {
-                    sh: as_shell.then(|| line.clone()),
-                    shell: Some("/bin/sh".into()),
-                    argv: argv.clone(),
-                    ..RunOpts::default()
-                };
-                let mut command = options.command(false, knob.as_ref());
-                if knob.is_none() {
-                    command.env_remove("VITEST_MAX_WORKERS");
+        let program = dir.join("vitest");
+        std::fs::write(&program, "#!/bin/sh\nprintf '%s\n' \"${VITEST_MAX_WORKERS-unset}\" \"${CARGO_BUILD_JOBS-unset}\" \"$@\"\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let argv = vec![
+            program.display().to_string(),
+            "run".into(),
+            "--maxWorkers=7".into(),
+            "two words".into(),
+            "$literal".into(),
+            "".into(),
+        ];
+        let line = shell::join(&argv);
+        for as_shell in [false, true] {
+            let options = RunOpts {
+                sh: as_shell.then(|| line.clone()),
+                shell: Some("/bin/sh".into()),
+                argv: argv.clone(),
+                ..RunOpts::default()
+            };
+            let mut command = options.command(false);
+            let args: Vec<_> = command
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(
+                args,
+                if as_shell {
+                    vec!["-c".into(), line.clone()]
+                } else {
+                    argv[1..].to_vec()
                 }
-                let output = command.output().unwrap();
-                assert!(output.status.success(), "{line}: {:?}", output.stderr);
-                assert_eq!(
-                    output.stdout,
-                    if expected_tunable {
-                        b"2".as_slice()
-                    } else {
-                        b""
-                    },
-                    "{line}, shell={as_shell}"
-                );
-            }
+            );
+            assert_eq!(
+                command.get_envs().count(),
+                0,
+                "launch adds no worker environment"
+            );
+            command
+                .env("VITEST_MAX_WORKERS", "7")
+                .env("CARGO_BUILD_JOBS", "5");
+            let output = command.output().unwrap();
+            assert!(output.status.success());
+            assert_eq!(
+                output.stdout,
+                b"7\n5\nrun\n--maxWorkers=7\ntwo words\n$literal\n\n"
+            );
         }
         std::fs::remove_dir_all(dir).unwrap();
     }

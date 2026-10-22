@@ -284,9 +284,9 @@ fn command_configs(
     Some(configs.join("\n"))
 }
 
-/// Can this command be told to use fewer workers? Reads the npm script it
-/// runs and the tool's config files. Cargo also reads above the checkout and
-/// from its global home.
+/// Detect default worker counts for comparisons with historical runs. Reads
+/// the npm script and tool config; Cargo also reads parent and global config.
+/// This metadata never changes the command or its environment.
 pub fn tunable(line: &str, cwd: &Path) -> Option<Tunable> {
     tunable_with_env(line, cwd, &|v| std::env::var_os(v))
 }

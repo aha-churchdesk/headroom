@@ -856,7 +856,6 @@ fn losing_the_daemon_resumes_frozen_descendant_groups() {
             id: 1,
             retry: 0,
             low: false,
-            workers: None,
         },
     )
     .unwrap();
@@ -1299,70 +1298,6 @@ fn the_mcp_server_reports_and_reorders_the_real_queue() {
 }
 
 #[test]
-fn a_job_that_does_not_fit_runs_with_fewer_workers() {
-    let cores = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
-    let default = cores - 1;
-    // Stands in for vitest: says what it was told, then takes real memory.
-    let bin = tmp("tune-bin");
-    let vitest = bin.join("vitest");
-    std::fs::write(
-        &vitest,
-        format!("#!/bin/sh\necho \"workers=${{VITEST_MAX_WORKERS:-unset}}\"\nexec {HOG} 0.5 1\n"),
-    )
-    .unwrap();
-    std::fs::set_permissions(&vitest, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    let line = format!("{} run", vitest.display());
-
-    // 48 GB available, 1.5 GB reserved by the job blocking the queue, 0.4 GB left.
-    let d = Daemon::start(
-        "tune",
-        Config {
-            headroom: 48 * GIB - 3 * GIB / 2 - 2 * GIB / 5,
-            tune_floor: 1,
-            ..Config::default()
-        },
-    );
-    let run = |args: &[&str]| {
-        d.cmd(args)
-            .env_remove("VITEST_MAX_WORKERS")
-            .output()
-            .unwrap()
-    };
-
-    // First run: the queue is idle, so it starts untouched and is profiled
-    // at the tool's default worker count.
-    let first = run(&["run", "--sh", &line]);
-    assert_eq!(text(&first.stdout).lines().next(), Some("workers=unset"));
-
-    // Second run, behind a running job: ~1.2 GB estimated, 0.4 GB free.
-    let blocker = d.spawn(&["run", "--background", "--sh", "sleep 30"]);
-    d.running();
-    let second = run(&["run", "--sh", &line]);
-    let (out, err) = (text(&second.stdout), text(&second.stderr));
-    assert_eq!(second.status.code(), Some(0), "{err}");
-    let n: u32 = out
-        .lines()
-        .next()
-        .and_then(|l| l.strip_prefix("workers="))
-        .and_then(|n| n.parse().ok())
-        .unwrap_or_else(|| panic!("not tuned: {out} {err}"));
-    assert!((1..default).contains(&n), "{n} of {default}");
-    assert!(
-        err.contains(&format!(
-            "starting with {n} vitest workers instead of {default}"
-        )),
-        "{err}"
-    );
-    let h = wait_for("history", 5, || {
-        d.ls().history.into_iter().find(|h| h.tuned.is_some())
-    });
-    assert_eq!(h.tuned.map(|t| (t.workers, t.default)), Some((n, default)));
-
-    d.output(&["kill", &d.ls().running[0].id.to_string()]);
-    finish(blocker);
-}
-
-#[test]
 fn a_quick_job_starts_ahead_while_the_running_one_overruns() {
     // The same 1 GB job takes 1 s three times, then runs on. Past its usual
     // second it is expected to take as long again, so a known small job
@@ -1583,58 +1518,8 @@ fn capture_ui_states() {
     save(&mut app, "history");
     drop(d);
 
-    // A job started with fewer workers, as in
-    // a_job_that_does_not_fit_runs_with_fewer_workers.
-    let bin = tmp("ui-tune-bin");
-    let vitest = bin.join("vitest");
-    std::fs::write(&vitest, format!("#!/bin/sh\nexec {HOG} 0.5 4\n")).unwrap();
-    std::fs::set_permissions(&vitest, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    let line = format!("{} run", vitest.display());
-    let d = Daemon::start(
-        "ui-tune",
-        Config {
-            headroom: 48 * GIB - 3 * GIB / 2 - 2 * GIB / 5,
-            tune_floor: 1,
-            ..Config::default()
-        },
-    );
-    let mut app = app_for(&d, "ui-tune", false);
-    d.cmd(&["run", "--label", "sc-49123", "--sh", &line])
-        .env_remove("VITEST_MAX_WORKERS")
-        .output()
-        .unwrap();
-    let blocker = d.spawn(&[
-        "run",
-        "--background",
-        "--label",
-        "fix-main",
-        "--sh",
-        "sleep 30",
-    ]);
-    d.running();
-    let tuned = d.spawn(&["run", "--label", "sc-49123", "--sh", &line]);
-    wait_for("tuned job", 10, || {
-        d.ls()
-            .running
-            .iter()
-            .any(|j| j.tuned.is_some() && j.footprint > 0)
-            .then_some(())
-    });
-    save(&mut app, "tuned");
-    finish(tuned);
-    // The wrapper exits as soon as it has reported; the daemon may not have
-    // recorded the run yet.
-    wait_for("tuned run in history", 10, || {
-        d.ls()
-            .history
-            .iter()
-            .any(|h| h.tuned.is_some())
-            .then_some(())
-    });
-    save(&mut app, "tuned-history");
-    d.output(&["kill", &d.ls().running[0].id.to_string()]);
-    finish(blocker);
-    drop(d);
+    // The checked-in tuned fixtures describe historical versions. New
+    // runs no longer rewrite worker settings, so leave those fixtures intact.
 
     // Backfill: a 1 GB, 3 s job runs; another waits on memory; a quick one
     // starts ahead of it. Each has three runs behind it first.
