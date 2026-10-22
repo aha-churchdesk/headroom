@@ -8,6 +8,7 @@
 
 pub mod admission;
 pub mod classify;
+mod codex_hooks;
 pub mod config;
 pub mod guard;
 pub mod hookio;

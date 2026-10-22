@@ -7,4 +7,5 @@ edition.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 directories.workspace = true
+libc.workspace = true
 toml_edit = { version = "0.25.17", default-features = false, features = ["parse"] }

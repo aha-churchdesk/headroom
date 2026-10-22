@@ -327,6 +327,126 @@ pub fn status(agent: Agent, path: &Path, exe: &str) -> Result<Status, String> {
     }
 }
 
+/// Check Codex's effective hook metadata with a bounded, read-only app-server
+/// request. Call this off the UI thread; `status` remains a file-only check.
+pub fn verified_status(agent: Agent, path: &Path, exe: &str) -> Result<Status, String> {
+    verified_status_with(agent, path, exe, crate::codex_hooks::query)
+}
+
+/// Verify the exact hook/config bytes captured by a background caller. A
+/// different snapshot must not inherit the trust result from this query.
+pub fn verified_status_for_snapshot(
+    agent: Agent,
+    path: &Path,
+    exe: &str,
+    expected_hooks: &[u8],
+    expected_config: Option<&[u8]>,
+) -> Result<Status, String> {
+    verified_status_with_snapshot(
+        agent,
+        path,
+        exe,
+        Some((expected_hooks, expected_config)),
+        crate::codex_hooks::query,
+    )
+}
+
+fn verified_status_with(
+    agent: Agent,
+    path: &Path,
+    exe: &str,
+    query: impl FnOnce(&Path) -> Option<Value>,
+) -> Result<Status, String> {
+    verified_status_with_snapshot(agent, path, exe, None, query)
+}
+
+fn verified_status_with_snapshot(
+    agent: Agent,
+    path: &Path,
+    exe: &str,
+    expected: Option<(&[u8], Option<&[u8]>)>,
+    query: impl FnOnce(&Path) -> Option<Value>,
+) -> Result<Status, String> {
+    let before = read_opt(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let base = status(agent, path, exe)?;
+    let eligible = agent == Agent::Codex
+        && matches!(
+            base,
+            Status::NeedsReview | Status::ReviewStatusUnknown | Status::Disabled
+        );
+    if expected.is_none() && !eligible {
+        return Ok(base);
+    }
+    let config_path = path.with_file_name("config.toml");
+    let config_before =
+        read_opt(&config_path).map_err(|e| format!("{}: {e}", config_path.display()))?;
+    if let Some((expected_hooks, expected_config)) = expected
+        && (before.as_deref().map(str::as_bytes) != Some(expected_hooks)
+            || config_before.as_deref().map(str::as_bytes) != expected_config)
+    {
+        return Err("Codex hook configuration changed while checking status".to_owned());
+    }
+    if !eligible {
+        return Ok(base);
+    }
+    let root = parse_json(path, before.as_deref())?;
+    let result = query(path);
+    // A hook edited while Codex was answering needs a new check. Do not attach
+    // a previous definition's approval to the replacement file.
+    if read_opt(path).ok() != Some(before) || read_opt(&config_path).ok() != Some(config_before) {
+        return status(agent, path, exe);
+    }
+    Ok(result
+        .as_ref()
+        .and_then(|metadata| verified_codex_metadata(&root, path, metadata))
+        .unwrap_or(base))
+}
+
+fn verified_codex_metadata(root: &Value, path: &Path, metadata: &Value) -> Option<Status> {
+    if !metadata["hooksEnabled"].as_bool()? {
+        return Some(Status::Disabled);
+    }
+    let source = crate::codex_hooks::absolute_normalized(path)?;
+    let pre = pre_tool_use(root)?;
+    let found = our_hooks(pre, Agent::Codex);
+    let hooks = metadata["hooks"].as_array()?;
+    let mut review = false;
+    let mut disabled = false;
+    for (group, handler, _) in found {
+        let key = format!("{}:pre_tool_use:{group}:{handler}", source.display());
+        let command = pre[group]["hooks"][handler]["command"].as_str()?;
+        let mut matching = hooks.iter().filter(|hook| {
+            hook["source"] == "user"
+                && hook["sourcePath"].as_str() == source.to_str()
+                && hook["key"] == key
+                && hook["eventName"] == "preToolUse"
+                && hook["handlerType"] == "command"
+                && hook["command"] == command
+                && hook["command"]
+                    .as_str()
+                    .and_then(|c| ours(c, Agent::Codex))
+                    .is_some()
+        });
+        let hook = matching.next()?;
+        if matching.next().is_some() || hook["currentHash"].as_str()?.is_empty() {
+            return None;
+        }
+        match (hook["enabled"].as_bool()?, hook["trustStatus"].as_str()?) {
+            (false, "trusted" | "modified" | "untrusted") => disabled = true,
+            (true, "trusted") => return Some(Status::Installed),
+            (true, "modified" | "untrusted") => review = true,
+            _ => return None,
+        }
+    }
+    if review {
+        Some(Status::NeedsReview)
+    } else if disabled {
+        Some(Status::Disabled)
+    } else {
+        None
+    }
+}
+
 /// Read only the user configuration next to hooks.json. Codex's /hooks view
 /// remains authoritative: profiles, project/managed overrides and invocation
 /// flags may change the effective state. The fingerprint format is not a
@@ -505,6 +625,223 @@ mod tests {
     use super::*;
 
     const EXE: &str = "/opt/homebrew/bin/headroom";
+
+    fn metadata(path: &Path, trust: &str, enabled: bool) -> Value {
+        json!({"hooksEnabled": true, "hooks": [{
+            "source": "user", "sourcePath": path, "key": format!("{}:pre_tool_use:0:0", path.display()),
+            "eventName": "preToolUse", "handlerType": "command",
+            "command": hook_command(EXE, Agent::Codex), "currentHash": "current-definition",
+            "trustStatus": trust, "enabled": enabled
+        }]})
+    }
+
+    #[test]
+    fn verified_codex_uses_authoritative_trust_without_changing_configuration() {
+        let d = tmpdir("verified-trust");
+        let path = d.join("hooks.json");
+        install(Agent::Codex, &path, EXE, false).unwrap();
+        let original = fs::read(&path).unwrap();
+        let config_path = d.join("config.toml");
+        let config = format!(
+            "[hooks.state.\"{}:pre_tool_use:0:0\"]\ntrusted_hash = \"old\"\n",
+            path.display()
+        );
+        fs::write(&config_path, &config).unwrap();
+        for (trust, enabled, expected) in [
+            ("trusted", true, Status::Installed),
+            ("modified", true, Status::NeedsReview),
+            ("untrusted", true, Status::NeedsReview),
+            ("trusted", false, Status::Disabled),
+            ("managed", true, Status::ReviewStatusUnknown),
+        ] {
+            let actual = verified_status_with(Agent::Codex, &path, EXE, |_| {
+                Some(metadata(&path, trust, enabled))
+            })
+            .unwrap();
+            assert_eq!(actual, expected);
+        }
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), config);
+        assert_eq!(fs::read_dir(&d).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn verified_codex_never_borrows_another_hooks_trust_or_accepts_bad_metadata() {
+        let d = tmpdir("verified-matching");
+        let path = d.join("hooks.json");
+        install(Agent::Codex, &path, EXE, false).unwrap();
+        let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        for (field, value) in [
+            ("sourcePath", json!("/other/hooks.json")),
+            ("key", json!(format!("{}:pre_tool_use:1:0", path.display()))),
+            ("source", json!("project")),
+            ("eventName", json!("postToolUse")),
+            ("handlerType", json!("prompt")),
+            ("command", json!("/other/headroom hook --agent codex")),
+            (
+                "command",
+                json!(format!("{} && echo extra", hook_command(EXE, Agent::Codex))),
+            ),
+            ("currentHash", json!("")),
+            ("enabled", Value::Null),
+            ("trustStatus", json!("future-value")),
+        ] {
+            let mut response = metadata(&path, "trusted", true);
+            response["hooks"][0][field] = value;
+            assert_eq!(
+                verified_codex_metadata(&root, &path, &response),
+                None,
+                "{field}"
+            );
+        }
+        let mut duplicate = metadata(&path, "trusted", true);
+        let hook = duplicate["hooks"][0].clone();
+        duplicate["hooks"].as_array_mut().unwrap().push(hook);
+        assert_eq!(verified_codex_metadata(&root, &path, &duplicate), None);
+        let mut disabled = metadata(&path, "trusted", true);
+        disabled["hooksEnabled"] = json!(false);
+        assert_eq!(
+            verified_codex_metadata(&root, &path, &disabled),
+            Some(Status::Disabled)
+        );
+    }
+
+    #[test]
+    fn verified_codex_preserves_fallback_and_ignores_racing_approvals() {
+        let d = tmpdir("verified-fallback");
+        let path = d.join("hooks.json");
+        install(Agent::Codex, &path, EXE, false).unwrap();
+        assert_eq!(
+            verified_status_with(Agent::Codex, &path, EXE, |_| None),
+            Ok(Status::NeedsReview)
+        );
+        let config_path = d.join("config.toml");
+        let config = format!(
+            "[hooks.state.\"{}:pre_tool_use:0:0\"]\ntrusted_hash = \"old\"\n",
+            path.display()
+        );
+        fs::write(&config_path, &config).unwrap();
+        assert_eq!(
+            verified_status_with(Agent::Codex, &path, EXE, |_| None),
+            Ok(Status::ReviewStatusUnknown)
+        );
+        assert_eq!(
+            verified_status_with(Agent::Codex, &path, EXE, |_| {
+                fs::write(&config_path, "[features]\nhooks = false\n").unwrap();
+                Some(metadata(&path, "trusted", true))
+            }),
+            Ok(Status::Disabled)
+        );
+        fs::write(&config_path, config).unwrap();
+        assert_eq!(
+            verified_status_with(Agent::Codex, &path, EXE, |_| {
+                fs::write(&path, "{}").unwrap();
+                Some(metadata(&path, "trusted", true))
+            }),
+            Ok(Status::NotInstalled)
+        );
+    }
+
+    #[test]
+    fn verified_status_skips_subprocesses_for_other_agents_and_absent_or_stale_hooks() {
+        let d = tmpdir("verified-skip");
+        let path = d.join("hooks.json");
+        assert_eq!(
+            verified_status_with(Agent::Codex, &path, EXE, |_| panic!("must not probe")),
+            Ok(Status::NotInstalled)
+        );
+        install(Agent::Codex, &path, "/missing/headroom", false).unwrap();
+        assert!(matches!(
+            verified_status_with(Agent::Codex, &path, EXE, |_| panic!("must not probe")),
+            Ok(Status::Stale { .. })
+        ));
+        assert_eq!(
+            verified_status_with(Agent::Claude, &path, EXE, |_| panic!("must not probe")),
+            Ok(Status::NotInstalled)
+        );
+    }
+
+    #[test]
+    fn verified_codex_effective_metadata_overrides_file_disabled_but_preserves_fallback() {
+        let d = tmpdir("verified-disabled-overrides");
+        let path = d.join("hooks.json");
+        install(Agent::Codex, &path, EXE, false).unwrap();
+        let config_path = d.join("config.toml");
+        for config in [
+            "profile = \"active\"\n[features]\nhooks = false\n[profiles.active.features]\nhooks = true\n".to_owned(),
+            "[features]\ncodex_hooks = false\n".to_owned(),
+            "allow_managed_hooks_only = true\n".to_owned(),
+            format!("[hooks.state.\"{}:pre_tool_use:0:0\"]\nenabled = false\n", path.display()),
+        ] {
+            fs::write(&config_path, &config).unwrap();
+            assert_eq!(status(Agent::Codex, &path, EXE), Ok(Status::Disabled));
+            assert_eq!(verified_status_with(Agent::Codex, &path, EXE, |_| None), Ok(Status::Disabled));
+            assert_eq!(verified_status_with(Agent::Codex, &path, EXE, |_| Some(json!({"hooksEnabled": true, "hooks": []}))), Ok(Status::Disabled));
+            assert_eq!(verified_status_with(Agent::Codex, &path, EXE, |_| Some(metadata(&path, "trusted", true))), Ok(Status::Installed));
+            assert_eq!(verified_status_with(Agent::Codex, &path, EXE, |_| Some(metadata(&path, "trusted", false))), Ok(Status::Disabled));
+            assert_eq!(fs::read_to_string(&config_path).unwrap(), config);
+        }
+    }
+
+    #[test]
+    fn verified_codex_snapshot_mismatch_never_queries_or_borrows_approval() {
+        let d = tmpdir("verified-snapshot");
+        let path = d.join("hooks.json");
+        install(Agent::Codex, &path, EXE, false).unwrap();
+        let expected_hooks = fs::read(&path).unwrap();
+        let config_path = d.join("config.toml");
+        let expected_config = b"# config A\n";
+        fs::write(&config_path, expected_config).unwrap();
+        let expected = Some((expected_hooks.as_slice(), Some(expected_config.as_slice())));
+        fs::write(&config_path, "# config B\n").unwrap();
+        assert!(
+            verified_status_with_snapshot(Agent::Codex, &path, EXE, expected, |_| panic!(
+                "mismatch must not probe"
+            ))
+            .is_err()
+        );
+        fs::write(&config_path, expected_config).unwrap();
+        let mut changed_hooks: Value = serde_json::from_slice(&expected_hooks).unwrap();
+        changed_hooks["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"] = json!(20);
+        fs::write(&path, changed_hooks.to_string()).unwrap();
+        assert!(
+            verified_status_with_snapshot(Agent::Codex, &path, EXE, expected, |_| panic!(
+                "mismatch must not probe"
+            ))
+            .is_err()
+        );
+        fs::write(&path, "{}").unwrap();
+        assert!(
+            verified_status_with_snapshot(Agent::Codex, &path, EXE, expected, |_| panic!(
+                "mismatch must not probe"
+            ))
+            .is_err()
+        );
+        fs::write(&path, &expected_hooks).unwrap();
+        assert_eq!(
+            verified_status_with_snapshot(Agent::Codex, &path, EXE, expected, |_| Some(metadata(
+                &path, "trusted", true
+            ))),
+            Ok(Status::Installed)
+        );
+        fs::remove_file(&config_path).unwrap();
+        assert!(
+            verified_status_with_snapshot(Agent::Codex, &path, EXE, expected, |_| panic!(
+                "mismatch must not probe"
+            ))
+            .is_err()
+        );
+        assert_eq!(
+            verified_status_with_snapshot(
+                Agent::Codex,
+                &path,
+                EXE,
+                Some((&expected_hooks, None)),
+                |_| Some(metadata(&path, "trusted", true))
+            ),
+            Ok(Status::Installed)
+        );
+    }
 
     /// Shaped like a real ~/.codex/hooks.json: other tools' entries with no
     /// matcher, and keys in a deliberate order.
