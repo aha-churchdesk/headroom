@@ -854,7 +854,7 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "headroom"
-version = "0.4.5"
+version = "0.4.6"
 dependencies = [
  "headroom-core",
  "headroomd",
@@ -864,7 +864,7 @@ dependencies = [
 
 [[package]]
 name = "headroom-core"
-version = "0.4.5"
+version = "0.4.6"
 dependencies = [
  "directories",
  "libc",
@@ -876,7 +876,7 @@ dependencies = [
 
 [[package]]
 name = "headroomd"
-version = "0.4.5"
+version = "0.4.6"
 dependencies = [
  "headroom-core",
  "libc",
