@@ -1,7 +1,7 @@
 name: Release
 
-# Push a tag like v0.1.0 to build, publish a GitHub Release, and bump the
-# Homebrew formula in the tap named by the TAP_REPO repository variable.
+# Push a tag like v0.1.0 to build and publish a GitHub Release. The
+# Homebrew tap picks the release up by itself within the hour.
 on:
   push:
     tags: ["v*"]
@@ -56,28 +56,3 @@ jobs:
             "dist/${{ steps.pkg.outputs.name }}.tar.gz" \
             "dist/${{ steps.pkg.outputs.name }}.tar.gz.sha256" \
             --title "Headroom ${{ steps.pkg.outputs.ver }}" --generate-notes
-
-      - name: Bump the Homebrew formula
-        if: vars.TAP_REPO != ''
-        env:
-          # Fine-grained token with contents: write on the tap repo only.
-          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-        run: |
-          # A token pasted into the secret can carry a trailing newline, which
-          # git rejects. Send it as a header so it never lands in a URL.
-          token=$(printf %s "$GH_TOKEN" | tr -d '[:space:]')
-          auth=$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')
-          echo "::add-mask::$auth"
-          git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic $auth"
-          git clone "https://github.com/${{ vars.TAP_REPO }}.git" tap
-          mkdir -p tap/Formula
-          sed -e "s|@OWNER_REPO@|${GITHUB_REPOSITORY}|g" \
-              -e "s|@VERSION@|${{ steps.pkg.outputs.ver }}|g" \
-              -e "s|@SHA256@|${{ steps.pkg.outputs.sha }}|g" \
-              packaging/headroom.rb.in > tap/Formula/headroom.rb
-          cd tap
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/headroom.rb
-          git commit -m "headroom ${{ steps.pkg.outputs.ver }}"
-          git push
