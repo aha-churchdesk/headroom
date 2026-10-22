@@ -1,10 +1,13 @@
 # Headroom
 
-Headroom is a macOS menu bar app and CLI that schedules heavy commands from Codex, Claude Code, pi, and other development tools. It uses memory availability, system pressure, CPU load, and learned workload history to decide when jobs can start.
+Headroom is a macOS menu bar app and CLI that schedules heavy development commands so parallel coding agents can share your Mac.
 
-See what is running, which agent started it, elapsed time, usual runtime, and how each job affects the queue. Profiles distinguish complete invocations, so a single-file test and a full test suite learn separately. Estimates remain explicit about missing history and variable memory use.
-
-Agent hooks route tests, builds, e2e runs, and type checks through `headroom run`. Headroom can reduce worker counts for supported tools when a job would otherwise wait for memory, while respecting explicit worker settings. Other commands run as before.
+- **Agent integration.** Routes tests, builds, e2e runs, and type checks from Codex, Claude Code, and pi through one queue. Other tools can use the CLI.
+- **Live job overview.** Shows the agent behind each job, memory and CPU use, subprocesses, elapsed time, and usual runtime when known.
+- **Workload-specific estimates.** Learns memory and runtime separately for complete invocations, including package filters, test files, and build flags. Shows when history is missing or memory use varies widely.
+- **Scheduling explanations.** Shows why jobs wait and how memory availability, system pressure, CPU load, and runtime estimates affect the queue.
+- **Worker adjustment.** Can reduce parallel workers in supported tools to fit a job into available memory, while respecting explicit worker settings.
+- **Queue controls.** Hold, reorder, pin, pause, resume, or stop jobs from the menu bar. Inspect past runs and the memory used by other apps.
 
 Status: early. Apple Silicon only, ad-hoc signed, used daily by one person.
 
