@@ -1,6 +1,6 @@
 # Headroom
 
-Headroom is a macOS menu bar app and CLI that schedules heavy development commands so parallel coding agents can share your Mac.
+Headroom is a macOS menu bar app and CLI that schedules heavy development commands so parallel coding agents can share your Mac without freezing it.
 
 - **Agent integration.** Routes tests, builds, e2e runs, and type checks from Codex, Claude Code, and pi through one queue. Other tools can use the CLI.
 - **Live job overview.** Shows the agent behind each job, memory and CPU use, subprocesses, elapsed time, and usual runtime when known.
