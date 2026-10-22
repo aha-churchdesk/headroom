@@ -1,10 +1,11 @@
-//! Is this command heavy, and what is it, for profiling purposes?
+//! Is this command heavy, and which earlier executions describe its workload?
 //!
-//! Two jobs. The hook asks "should this go through the queue?", and the
-//! profile asks "which earlier runs predict this one?". Both need the same
-//! reduction of a command line to the part that decides its workload:
-//! `cd web && FOO=1 pnpm --filter app vitest run src/a.test.ts` is
-//! `vitest run`, the same workload as yesterday's `npx vitest run src/b.test.ts`.
+//! Classification and display use a short name such as `vitest run`.
+//! Profiles additionally fingerprint the complete execution input: test
+//! paths, package filters, flags, shell operators and inline environment
+//! settings can all change how much work runs.
+
+use sha2::{Digest, Sha256};
 
 use crate::config::Config;
 use crate::shell::simple_commands;
@@ -601,13 +602,41 @@ pub fn describe_in(line: &str, cfg: &Config, hooked: HookProbe) -> (String, Stri
     (short, "sh".to_string())
 }
 
-/// Profile keys. Worktrees of one repository share `repo` (the main
-/// checkout), so a fresh worktree starts with its siblings' history.
-pub fn profile_keys(repo: &str, subdir: &str, cmd: &str, program: &str) -> (String, String) {
+/// Execution input before classification removes workload selectors.
+/// Direct arguments retain their boundaries and differ from shell text:
+/// a literal `$NAME` argument is not a shell expansion.
+#[derive(Clone, Copy)]
+pub enum ProfileCommand<'a> {
+    Shell(&'a str),
+    Argv(&'a [String]),
+}
+
+/// Exact workload and coarse prior keys. Worktrees share `repo` and the
+/// starting `subdir`, so identical executions share history across them.
+///
+/// The v2 segment keeps old mixed histories out of exact observations.
+/// Legacy program profiles remain priors only. The digest avoids copying
+/// command arguments or inline environment values into persistent keys.
+/// The last segment remains the readable command for existing consumers.
+/// Shell text is kept exact; this does not interpret expansions, ambient
+/// environment, package scripts or changing configuration files.
+pub fn profile_keys(
+    repo: &str,
+    subdir: &str,
+    cmd: &str,
+    program: &str,
+    execution: ProfileCommand<'_>,
+) -> (String, String) {
+    let input = match execution {
+        ProfileCommand::Shell(line) => serde_json::to_vec(&("shell", line)),
+        ProfileCommand::Argv(args) => serde_json::to_vec(&("argv", args)),
+    }
+    .expect("strings serialize");
+    let digest = format!("{:x}", Sha256::digest(input));
     let key = if subdir.is_empty() {
-        format!("{repo}|{cmd}")
+        format!("{repo}|v2:{digest}|{cmd}")
     } else {
-        format!("{repo}|{subdir}|{cmd}")
+        format!("{repo}|{subdir}|v2:{digest}|{cmd}")
     };
     (key, format!("{repo}|{program}"))
 }
@@ -1084,10 +1113,92 @@ mod tests {
 
     #[test]
     fn worktrees_share_keys_through_the_repo() {
-        let (k, f) = profile_keys("/r/browser", "", "vitest run", "vitest");
-        assert_eq!(k, "/r/browser|vitest run");
+        let execution = ProfileCommand::Shell("vitest run");
+        let (k, f) = profile_keys("/r/browser", "", "vitest run", "vitest", execution);
+        assert!(k.starts_with("/r/browser|v2:"));
+        assert!(k.ends_with("|vitest run"));
         assert_eq!(f, "/r/browser|vitest");
-        let (k, _) = profile_keys("/r/browser", "apps/web", "vitest run", "vitest");
-        assert_eq!(k, "/r/browser|apps/web|vitest run");
+        // The two checkout paths are deliberately absent: git_context has
+        // already resolved both worktrees to this common repo and subdir.
+        let a = profile_keys("/r/browser", "apps/web", "vitest run", "vitest", execution);
+        let b = profile_keys("/r/browser", "apps/web", "vitest run", "vitest", execution);
+        assert_eq!(a, b);
+        assert!(a.0.starts_with("/r/browser|apps/web|v2:"));
+        assert_ne!(a.0, k);
+    }
+
+    #[test]
+    fn exact_workloads_keep_selectors_that_classification_drops() {
+        for (a, b) in [
+            ("vitest run", "vitest run src/a.test.ts"),
+            ("vitest run src/a.test.ts", "vitest run src/b.test.ts"),
+            ("vitest run", "vitest run --coverage"),
+            ("vitest run --maxWorkers=2", "vitest run --maxWorkers=8"),
+            ("jest", "jest auth --runInBand"),
+            ("cargo test --workspace", "cargo test -p core one_test"),
+            ("cargo build", "cargo build --release"),
+            ("pnpm --filter web test", "pnpm --filter api test"),
+            ("tsc -p apps/web", "tsc -p apps/api"),
+            ("playwright test", "playwright test --project=chromium"),
+            ("cd apps/web && pnpm test", "cd apps/api && pnpm test"),
+            ("cargo test", "cargo test && cargo build"),
+            ("cargo test && cargo build", "cargo test | cargo build"),
+            ("CI=1 pnpm test", "CI=0 pnpm test"),
+            ("env -C web cargo test", "env -C api cargo test"),
+            ("uv run --project web pytest", "uv run --project api pytest"),
+        ] {
+            let (cmd, program) = describe(a, &Config::default());
+            assert_eq!(
+                (cmd.clone(), program.clone()),
+                describe(b, &Config::default()),
+                "classification remains broad: {a} / {b}"
+            );
+            let a_key = profile_keys("/r", "", &cmd, &program, ProfileCommand::Shell(a));
+            let b_key = profile_keys("/r", "", &cmd, &program, ProfileCommand::Shell(b));
+            assert_ne!(a_key.0, b_key.0, "{a} / {b}");
+            assert_eq!(a_key.1, b_key.1, "coarse priors still share a program");
+        }
+    }
+
+    #[test]
+    fn exact_profile_namespace_cannot_be_the_program_fallback() {
+        let root = profile_keys("/r", "", "jest", "jest", ProfileCommand::Shell("jest"));
+        let child = profile_keys(
+            "/r",
+            "apps/web",
+            "jest",
+            "jest",
+            ProfileCommand::Shell("jest"),
+        );
+        assert_eq!(root.1, "/r|jest", "legacy data remains a prior");
+        assert_eq!(root.1, child.1);
+        assert_ne!(root.0, root.1);
+        assert_ne!(root.0, child.1);
+        assert_ne!(root.0, child.0);
+    }
+
+    #[test]
+    fn execution_fingerprints_keep_argument_boundaries_and_hide_values() {
+        let single = vec!["jest".into(), "one two".into()];
+        let separate = vec!["jest".into(), "one".into(), "two".into()];
+        let key = |input| profile_keys("/r", "", "jest", "jest", input).0;
+        assert_ne!(
+            key(ProfileCommand::Argv(&single)),
+            key(ProfileCommand::Argv(&separate))
+        );
+        assert_ne!(
+            key(ProfileCommand::Argv(&single)),
+            key(ProfileCommand::Shell("jest 'one two'"))
+        );
+        let secret = key(ProfileCommand::Shell("TOKEN=private-value jest"));
+        assert!(!secret.contains("private-value"));
+        let fingerprint = secret
+            .split('|')
+            .nth(1)
+            .unwrap()
+            .strip_prefix("v2:")
+            .unwrap();
+        assert_eq!(fingerprint.len(), 64);
+        assert!(fingerprint.bytes().all(|c| c.is_ascii_hexdigit()));
     }
 }

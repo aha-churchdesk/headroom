@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use headroom_core::classify::{describe_in, profile_keys};
+use headroom_core::classify::{ProfileCommand, describe_in, profile_keys};
 use headroom_core::model::JobSpec;
 use headroom_core::protocol::{ClientMsg, DaemonMsg, read_msg, write_msg};
 use headroom_core::shell;
@@ -102,6 +102,13 @@ fn code_of(status: ExitStatus) -> i32 {
 }
 
 impl RunOpts {
+    pub(crate) fn profile_command(&self) -> ProfileCommand<'_> {
+        match &self.sh {
+            Some(line) => ProfileCommand::Shell(line),
+            None => ProfileCommand::Argv(&self.argv),
+        }
+    }
+
     fn line(&self) -> String {
         self.sh.clone().unwrap_or_else(|| shell::join(&self.argv))
     }
@@ -173,7 +180,8 @@ pub fn run(o: RunOpts) -> i32 {
     let cwd = std::env::current_dir().unwrap_or_default();
     let git = git_context(&cwd);
     let (cmd, program) = describe_in(&line, &cfg, &|d, h| git_hook_installed(&cwd, d, h));
-    let (key, fallback_key) = profile_keys(&git.repo, &git.subdir, &cmd, &program);
+    let (key, fallback_key) =
+        profile_keys(&git.repo, &git.subdir, &cmd, &program, o.profile_command());
     let tune = tunable(&line, &cwd);
     let spec = JobSpec {
         full_cmd: line,

@@ -9,7 +9,7 @@
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
-use headroom_core::classify::{Class, classify_in, describe_in, profile_keys};
+use headroom_core::classify::{Class, ProfileCommand, classify_in, describe_in, profile_keys};
 use headroom_core::model::{Bytes, GIB, Job, JobState};
 use headroom_core::protocol::{ClientMsg, Control, DaemonMsg, Listing, request};
 use headroom_core::store::Store;
@@ -44,14 +44,15 @@ fn tools() -> Value {
         },
         {
             "name": "estimate_command",
-            "description": "Whether a shell command would be queued, and how much memory it is expected to peak at, from past runs in this repository.",
+            "description": "Whether a command would be queued, and how much memory it is expected to peak at. Supply command for shell execution or argv for direct execution.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "command": { "type": "string", "description": "The shell command, as you would run it" },
+                    "argv": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Program and arguments for direct execution, matching headroom run -- CMD ARGS" },
                     "cwd": { "type": "string", "description": "Directory it would run in; defaults to the server's" }
                 },
-                "required": ["command"]
+                "oneOf": [{ "required": ["command"] }, { "required": ["argv"] }]
             }
         },
         {
@@ -140,6 +141,15 @@ fn jobs(l: &Listing) -> Value {
 }
 
 fn estimate(store: &Store, command: &str, cwd: &Path) -> Value {
+    estimate_execution(store, command, cwd, ProfileCommand::Shell(command))
+}
+
+fn estimate_execution(
+    store: &Store,
+    command: &str,
+    cwd: &Path,
+    execution: ProfileCommand<'_>,
+) -> Value {
     let cfg = store.load_config();
     let hooked = |d: Option<&str>, h: &str| git_hook_installed(cwd, d, h);
     match classify_in(command, &cfg, &hooked) {
@@ -154,7 +164,7 @@ fn estimate(store: &Store, command: &str, cwd: &Path) -> Value {
         Class::Heavy { .. } => {
             let git = git_context(cwd);
             let (cmd, program) = describe_in(command, &cfg, &hooked);
-            let (key, fallback) = profile_keys(&git.repo, &git.subdir, &cmd, &program);
+            let (key, fallback) = profile_keys(&git.repo, &git.subdir, &cmd, &program, execution);
             let profiles = store.load_profiles();
             let workers = tunable(command, cwd).map(|t| t.default_workers);
             let observed = profiles.estimate(&key, &fallback, cfg.default_estimate);
@@ -167,9 +177,9 @@ fn estimate(store: &Store, command: &str, cwd: &Path) -> Value {
                 "basis": if e.bytes > observed.bytes {
                     "past peaks raised to the memory model at the command's default worker count"
                 } else if e.samples == 0 {
-                    "no measured runs of its own yet: the repository's or the default estimate, with interrupted runs as a lower bound"
+                    "no measured runs of its own yet: the repository's or the default estimate, with failed or interrupted runs as a lower bound"
                 } else {
-                    "p90 of measured past peaks, blended with the repository's or default estimate until three runs; interrupted runs set a lower bound"
+                    "p90 of measured past peaks, blended with the repository's or default estimate until three runs; failed or interrupted runs set a lower bound"
                 },
             })
         }
@@ -187,15 +197,40 @@ fn call(store: &Store, cwd: &Path, name: &str, args: &Map<String, Value>) -> Res
         "system_status" => listing(store).map(|l| status(&l)),
         "list_jobs" => listing(store).map(|l| jobs(&l)),
         "estimate_command" => {
+            let dir = args
+                .get("cwd")
+                .and_then(Value::as_str)
+                .map_or_else(|| cwd.to_path_buf(), PathBuf::from);
+            if let Some(argv) = args.get("argv") {
+                if args.contains_key("command") {
+                    return Err("supply command or argv, not both".into());
+                }
+                let argv: Vec<String> = argv
+                    .as_array()
+                    .ok_or("argv must be an array of strings")?
+                    .iter()
+                    .map(|arg| {
+                        arg.as_str()
+                            .map(str::to_owned)
+                            .ok_or("argv must contain strings")
+                    })
+                    .collect::<Result<_, _>>()?;
+                if argv.first().is_none_or(String::is_empty) {
+                    return Err("argv must start with a program".into());
+                }
+                let line = headroom_core::shell::join(&argv);
+                return Ok(estimate_execution(
+                    store,
+                    &line,
+                    &dir,
+                    ProfileCommand::Argv(&argv),
+                ));
+            }
             let command = args
                 .get("command")
                 .and_then(Value::as_str)
                 .filter(|c| !c.trim().is_empty())
                 .ok_or("command is required")?;
-            let dir = args
-                .get("cwd")
-                .and_then(Value::as_str)
-                .map_or_else(|| cwd.to_path_buf(), PathBuf::from);
             Ok(estimate(store, command, &dir))
         }
         "move_job" => {
@@ -464,6 +499,101 @@ mod tests {
                 r["content"][0]["text"].as_str().unwrap().contains(says),
                 "{name} {args}: {r}"
             );
+        }
+    }
+
+    #[test]
+    fn exact_estimates_match_cli_shell_and_direct_execution_inputs() {
+        use crate::run::RunOpts;
+        let (s, cwd) = store("estimate-identity");
+        let git = git_context(&cwd);
+        let argv = vec!["cargo".into(), "test".into(), "one two".into()];
+        for options in [
+            RunOpts {
+                sh: Some("cargo test 'one two'".into()),
+                ..RunOpts::default()
+            },
+            RunOpts {
+                argv: argv.clone(),
+                ..RunOpts::default()
+            },
+        ] {
+            let line = options
+                .sh
+                .clone()
+                .unwrap_or_else(|| headroom_core::shell::join(&options.argv));
+            let (cmd, program) = describe_in(&line, &s.load_config(), &|_, _| false);
+            let expected = profile_keys(
+                &git.repo,
+                &git.subdir,
+                &cmd,
+                &program,
+                options.profile_command(),
+            )
+            .0;
+            let input = match options.sh {
+                Some(command) => json!({ "command": command }),
+                None => json!({ "argv": options.argv }),
+            };
+            let result = tool(&s, &cwd, "estimate_command", input);
+            assert_eq!(result["structuredContent"]["profile"], expected);
+        }
+        let shell = tool(
+            &s,
+            &cwd,
+            "estimate_command",
+            json!({ "command": "cargo test 'one two'" }),
+        );
+        let direct = tool(&s, &cwd, "estimate_command", json!({ "argv": argv }));
+        assert_ne!(
+            shell["structuredContent"]["profile"],
+            direct["structuredContent"]["profile"]
+        );
+    }
+
+    #[test]
+    fn estimate_argv_rejects_ambiguous_or_invalid_inputs() {
+        let (s, cwd) = store("estimate-invalid-argv");
+        for input in [
+            json!({ "argv": [], "command": "cargo test" }),
+            json!({ "argv": [] }),
+            json!({ "argv": [""] }),
+            json!({ "argv": "cargo test" }),
+            json!({ "argv": ["cargo", 2] }),
+        ] {
+            let result = tool(&s, &cwd, "estimate_command", input.clone());
+            assert_eq!(result["isError"], true, "{input}");
+        }
+    }
+
+    #[test]
+    fn legacy_profiles_only_supply_a_prior_for_new_exact_workloads() {
+        let (s, cwd) = store("estimate-legacy");
+        let git = git_context(&cwd);
+        let mut profiles = Profiles::default();
+        let legacy = format!("{}|jest", git.repo);
+        for _ in 0..3 {
+            profiles.record(
+                &legacy,
+                &legacy,
+                Run {
+                    peak: 4 * GIB,
+                    duration_ms: 60_000,
+                    exit: Some(0),
+                    flagged: false,
+                    at: 0,
+                    workers: None,
+                    parts: vec![],
+                },
+            );
+        }
+        s.save_profiles(&profiles).unwrap();
+        for command in ["jest", "jest auth"] {
+            let result = estimate(&s, command, &cwd);
+            assert_ne!(result["profile"], legacy);
+            assert_eq!(result["profiled_runs"], 0);
+            assert_eq!(result["estimate_gb"], 4.0);
+            assert!(profiles.get(result["profile"].as_str().unwrap()).is_none());
         }
     }
 

@@ -138,7 +138,7 @@ pub fn explain(line: &str) -> i32 {
     let cfg = Store::open().map(|s| s.load_config()).unwrap_or_default();
     let cwd = std::env::current_dir().unwrap_or_default();
     match classify_in(line, &cfg, &|d, h| git_hook_installed(&cwd, d, h)) {
-        Class::Heavy { cmd, .. } => println!("heavy: queued, profiled as `{cmd}`"),
+        Class::Heavy { cmd, .. } => println!("heavy: queued, command type `{cmd}`"),
         Class::Excluded { why } => println!("long-lived ({why}): never queued"),
         Class::Wrapped => println!("already wrapped: left alone"),
         Class::Light => println!("light: runs immediately"),

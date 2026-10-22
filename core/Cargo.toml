@@ -8,4 +8,6 @@ serde.workspace = true
 serde_json.workspace = true
 directories.workspace = true
 libc.workspace = true
+# Stable workload identities without retaining arguments or environment values in keys.
+sha2 = "0.10.9"
 toml_edit = { version = "0.25.17", default-features = false, features = ["parse"] }
