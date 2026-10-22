@@ -266,6 +266,34 @@ fn an_explicit_bash_shell_survives_a_different_login_shell() {
 }
 
 #[test]
+fn codex_capture_preserves_the_explicit_shell_when_executed() {
+    let d = Daemon::start("codex-shell", Config::default());
+    let absent = tmp("codex-direct");
+    let original =
+        r#"cargo() { :; }; items=(first second); printf "%s\n" "${items[0]}"; cargo test"#;
+    let payload = serde_json::json!({
+        "tool_name": "Bash",
+        "tool_input": { "command": original, "shell": "/bin/bash", "login": false }
+    });
+    let captured = hook("codex", &payload.to_string(), &absent);
+    assert!(captured.status.success());
+    let response: serde_json::Value = serde_json::from_slice(&captured.stdout).unwrap();
+    let input = &response["hookSpecificOutput"]["updatedInput"];
+    assert_eq!(input["shell"], "/bin/bash");
+    for home in [&d.home, &absent] {
+        let output = Command::new(input["shell"].as_str().unwrap())
+            .args(["-c", input["command"].as_str().unwrap()])
+            .env("HEADROOM_HOME", home)
+            .env_remove("HEADROOM_JOB")
+            .env("SHELL", "/bin/zsh")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+        assert_eq!(text(&output.stdout), "first\n");
+    }
+}
+
+#[test]
 fn the_wait_cap_gives_up_with_75_and_nothing_runs() {
     let d = Daemon::start("cap", Config::default());
     assert!(d.output(&["hold", "on"]).status.success());

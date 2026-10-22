@@ -173,6 +173,10 @@ pub fn wrap(agent: Agent, call: &Call, exe: &str, cfg: &Config, hooked: HookProb
     // Bash tool syntax must survive a user's fish or zsh login shell.
     if matches!(agent, Agent::Claude | Agent::Pi) {
         cmd += " --shell /bin/bash";
+    } else if let Some(shell) = call.input.get("shell").and_then(Value::as_str) {
+        // Codex can choose a shell per invocation. Keep that choice for the
+        // inner command too, rather than falling back to the user's SHELL.
+        cmd += &format!(" --shell {}", quote(shell));
     }
     cmd += &format!(" --sh {}", quote(&call.command));
     Some(Wrap {
@@ -429,6 +433,26 @@ mod tests {
             out(Agent::Codex, r#"{"tool_input":{"command":"cargo test"}}"#),
             Value::Null
         );
+    }
+
+    #[test]
+    fn codex_forwards_and_quotes_an_explicit_shell() {
+        for shell in ["/bin/bash", "/tmp/shell's path; echo bad"] {
+            let payload = json!({
+                "tool_name": "Bash",
+                "tool_input": { "command": "cargo test", "shell": shell, "login": false }
+            });
+            let output = out(Agent::Codex, &payload.to_string());
+            let input = &output["hookSpecificOutput"]["updatedInput"];
+            assert_eq!(input["shell"], shell);
+            assert_eq!(input["login"], false);
+            let commands = simple_commands(input["command"].as_str().unwrap());
+            assert_eq!(commands.len(), 1);
+            let words = &commands[0];
+            let index = words.iter().position(|w| w == "--shell").unwrap();
+            assert_eq!(words[index + 1], shell);
+            assert_eq!(words.last().unwrap(), "cargo test");
+        }
     }
 
     #[test]

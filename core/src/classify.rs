@@ -105,6 +105,9 @@ fn first_positional(args: &[String], value_flags: &[&str]) -> Option<usize> {
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
+        if a == "--" {
+            return (i + 1 < args.len()).then_some(i + 1);
+        }
         if is_flag(a) {
             i += if value_flags.contains(&a.as_str()) {
                 2
@@ -129,30 +132,67 @@ pub fn normalize(words: &[String]) -> Option<Normal> {
     loop {
         let w = words.get(i)?;
         match basename(w) {
-            "time" | "nohup" | "command" | "exec" | "caffeinate" | "sudo" | "stdbuf" => {
+            "time" | "nohup" | "command" | "exec" | "caffeinate" | "sudo" | "stdbuf" | "nice"
+            | "timeout" => {
+                let wrapper = basename(w);
+                // Only documented value-taking options consume the next word.
+                // Boolean options must leave the executable in place.
+                let values: &[&str] = match wrapper {
+                    "time" => &["-f", "--format", "-o", "--output"],
+                    "exec" => &["-a"],
+                    "caffeinate" => &["-t", "-w"],
+                    "sudo" => &[
+                        "-u",
+                        "--user",
+                        "-g",
+                        "--group",
+                        "-h",
+                        "--host",
+                        "-p",
+                        "--prompt",
+                        "-C",
+                        "--close-from",
+                        "-T",
+                        "--command-timeout",
+                        "-D",
+                        "--chdir",
+                        "-R",
+                        "--chroot",
+                        "-r",
+                        "--role",
+                        "-t",
+                        "--type",
+                    ],
+                    "stdbuf" => &["-i", "--input", "-o", "--output", "-e", "--error"],
+                    "nice" => &["-n", "--adjustment"],
+                    "timeout" => &["-s", "--signal", "-k", "--kill-after"],
+                    _ => &[],
+                };
                 i += 1;
-                while words.get(i).is_some_and(|w| is_flag(w)) {
-                    i += 1;
+                i += first_positional(&words[i..], values)?;
+                if wrapper == "timeout" {
+                    i += 1; // the duration
                 }
-            }
-            "nice" => {
-                i += 1;
-                match words.get(i).map(String::as_str) {
-                    Some("-n") => i += 2,
-                    Some(w) if is_flag(w) => i += 1,
-                    _ => {}
-                }
-            }
-            "timeout" => {
-                i += 1;
-                while words.get(i).is_some_and(|w| is_flag(w)) {
-                    i += 1;
-                }
-                i += 1; // the duration
             }
             "env" => {
                 i += 1;
-                while words.get(i).is_some_and(|w| is_flag(w) || is_assignment(w)) {
+                if words.get(i).is_some_and(|w| w == "-") {
+                    i += 1;
+                }
+                // -S/--split-string needs a second lexer and is intentionally
+                // left opaque; the string is not an executable argument.
+                let options = &words[i..];
+                let next = first_positional(options, &["-u", "--unset", "-C", "--chdir"])?;
+                if options[..next].iter().any(|w| {
+                    w == "-S"
+                        || w.starts_with("-S")
+                        || w == "--split-string"
+                        || w.starts_with("--split-string=")
+                }) {
+                    return None;
+                }
+                i += next;
+                while words.get(i).is_some_and(|w| is_assignment(w)) {
                     i += 1;
                 }
             }
@@ -177,10 +217,33 @@ pub fn normalize(words: &[String]) -> Option<Normal> {
                 i += 2;
             }
             "uv" | "poetry" | "pipenv" if words.get(i + 1).is_some_and(|w| w == "run") => {
+                let values: &[&str] = if basename(w) == "uv" {
+                    &[
+                        "--project",
+                        "--directory",
+                        "--package",
+                        "--python",
+                        "-p",
+                        "--with",
+                        "--with-editable",
+                        "--with-requirements",
+                        "--extra",
+                        "--group",
+                        "--no-group",
+                        "--env-file",
+                        "--config-file",
+                        "--index",
+                        "--default-index",
+                        "--index-url",
+                        "--extra-index-url",
+                        "--find-links",
+                        "-f",
+                    ]
+                } else {
+                    &[]
+                };
                 i += 2;
-                while words.get(i).is_some_and(|w| is_flag(w)) {
-                    i += 1;
-                }
+                i += first_positional(&words[i..], values)?;
             }
             "direnv" if words.get(i + 1).is_some_and(|w| w == "exec") => i += 3,
             // `corepack yarn test`: the package manager it picks runs the work.
@@ -224,6 +287,13 @@ fn tool(program: &str, rest: &[String]) -> Normal {
             tool(&rest[1], &rest[2..])
         }
         "docker" => docker(rest),
+        "cargo" => {
+            let start = usize::from(rest.first().is_some_and(|a| a.starts_with('+')));
+            match first_positional(&rest[start..], &["--color", "--config", "-Z", "-C"]) {
+                Some(i) => normal(program, &[program, &rest[start + i]], rest),
+                None => normal(program, &[program], rest),
+            }
+        }
         "xcodebuild" => {
             const ACTIONS: &[&str] = &[
                 "build",
@@ -307,7 +377,10 @@ fn package_manager(pm: &str, rest: &[String]) -> Normal {
             None => normal(pm, &[pm], rest),
         },
         "exec" | "x" | "dlx" => {
-            normalize(&rest[i + 1..]).unwrap_or_else(|| normal(pm, &[pm], rest))
+            let args = &rest[i + 1..];
+            first_positional(args, &["--package", "-p", "--call", "-c"])
+                .and_then(|j| normalize(&args[j..]))
+                .unwrap_or_else(|| normal(pm, &[pm], rest))
         }
         "t" | "tst" => normal(pm, &[pm, "test"], rest),
         t if PM_TOOLS.contains(&t) => tool(t, &rest[i + 1..]),
@@ -589,6 +662,80 @@ mod tests {
             cls("bunx tsc --noEmit -p tsconfig.json"),
             heavy("tsc", "tsc")
         );
+    }
+
+    #[test]
+    fn wrapper_options_and_separators_find_the_actual_workload() {
+        for line in [
+            "env -u NODE_OPTIONS cargo test",
+            "env --unset NODE_OPTIONS -- cargo test",
+            "env --unset=NODE_OPTIONS cargo test",
+            "env -uNODE_OPTIONS cargo test",
+            "env -C backend CI=1 cargo test",
+            "timeout -s TERM 30 cargo test",
+            "timeout --signal=TERM --kill-after 5 -- 30 cargo test",
+            "nice --adjustment 10 -- cargo test",
+            "stdbuf -o L cargo test",
+            "sudo -u builder -- cargo test",
+            "cargo --color always test",
+            "cargo --config build.jobs=2 test",
+            "cargo +nightly --color always --config build.jobs=2 test",
+        ] {
+            assert_eq!(cls(line), heavy("cargo test", "cargo"), "{line}");
+        }
+        for line in [
+            "uv run --project backend pytest",
+            "uv run --project=backend -- pytest",
+            "uv run --python 3.13 --with pytest --frozen pytest",
+        ] {
+            assert_eq!(cls(line), heavy("pytest", "pytest"), "{line}");
+        }
+        for line in [
+            "npm exec -- vitest run",
+            "pnpm exec -- vitest run",
+            "npx -- vitest run",
+        ] {
+            assert_eq!(cls(line), heavy("vitest run", "vitest"), "{line}");
+        }
+        for line in [
+            "npm exec --",
+            "env -u",
+            "uv run --project",
+            "timeout -s TERM",
+            "env -S 'cargo test'",
+        ] {
+            assert_eq!(cls(line), Class::Light, "{line}");
+        }
+        // An option value that looks like a tool is not itself a workload.
+        assert_eq!(cls("env -u cargo echo test"), Class::Light);
+        assert_eq!(cls("uv run --project pytest echo test"), Class::Light);
+    }
+
+    #[test]
+    fn wrapped_long_lived_parts_exclude_the_whole_line() {
+        for tail in [
+            "npm exec -- next dev",
+            "pnpm exec -- next dev",
+            "env -u NODE_OPTIONS next dev",
+            "timeout -s TERM 30 next dev",
+            "uv run --project backend next dev",
+        ] {
+            assert!(
+                matches!(
+                    cls(&format!("cargo test && {tail}")),
+                    Class::Excluded { .. }
+                ),
+                "{tail}"
+            );
+        }
+    }
+
+    #[test]
+    fn runner_separator_preserves_the_tools_arguments() {
+        let words = simple_commands("npm exec -- vitest run --watch -- --filter");
+        let n = normalize(&words[0]).unwrap();
+        assert_eq!(n.args, ["run", "--watch", "--", "--filter"]);
+        assert_eq!(cls("npm exec -- vitest run --watch"), excluded("--watch"));
     }
 
     #[test]

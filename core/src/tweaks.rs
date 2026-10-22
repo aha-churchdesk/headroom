@@ -229,8 +229,8 @@ pub struct Probe<'a> {
 fn mentions(text: &str, program: &str) -> bool {
     simple_commands(text)
         .iter()
-        .flatten()
-        .any(|w| basename(w) == program)
+        .filter_map(|words| crate::classify::normalize(words))
+        .any(|normal| normal.program == program)
 }
 
 fn has_flag(text: &str, flags: &[&str]) -> bool {
@@ -578,6 +578,24 @@ mod tests {
                 assert_eq!(tool(&line), None, "{line}");
                 assert_eq!(probe("npm run build", Some(&line), "", &[]), None, "{line}");
             }
+        }
+    }
+
+    #[test]
+    fn capturing_more_wrapper_syntax_does_not_add_invalid_tuning() {
+        for line in [
+            "npm exec -- turbo run build",
+            "pnpm exec -- turbo run build",
+            "uv run --project turbo echo build",
+            "env -u turbo echo build",
+            "env -u vitest echo test",
+            "cargo --config build.jobs=2 test",
+        ] {
+            assert_eq!(tool(line), None, "{line}");
+        }
+        for line in ["npm exec -- vitest run", "pnpm exec -- vitest run"] {
+            let tunable = probe(line, None, "", &[]).unwrap();
+            assert_eq!(apply_line(line, &tunable.knob(2)), line);
         }
     }
 
