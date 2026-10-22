@@ -155,22 +155,22 @@ button:disabled{ cursor:default; opacity:.4; }
 .num{ font-variant-numeric:tabular-nums; }
 
 /* ── Header ───────────────────────────────────────────────── */
-.head{ padding:12px 14px 10px; border-bottom:1px solid var(--sep); flex:0 0 auto; }
+.head{ background:var(--bg-elev); padding:12px 14px 10px; border-bottom:1px solid var(--sep); flex:0 0 auto; }
 .head .row1{ display:flex; align-items:center; gap:10px; }
-.head .lbl{ font-size:11px; font-weight:600; color:var(--text-dim); width:52px; }
-.memtrack{ flex:1; height:8px; border-radius:4px; background:var(--track); overflow:hidden; position:relative; }
+.head .lbl{ font-size:11px; font-weight:600; color:var(--text-dim); }
+.memtrack{ margin-top:8px; height:8px; border-radius:4px; background:var(--track); overflow:hidden; position:relative; }
 .memtrack .fill{ position:absolute; inset:0 auto 0 0; border-radius:4px; }
 .memtrack .reserve{
   position:absolute; top:0; bottom:0; right:0;
   background: repeating-linear-gradient(135deg, transparent 0 3px, var(--sep) 3px 5px);
 }
-.head .memtxt{ font-size:12px; font-weight:600; min-width:92px; text-align:right; }
+.head .memtxt{ margin-left:auto; font-size:12px; font-weight:600; min-width:92px; text-align:right; }
 .btn-hold{
   font-size:11px; font-weight:600; padding:3px 9px; border-radius:6px;
   border:1px solid var(--sep); background:var(--bg-elev);
 }
 .btn-hold.on{ background:var(--warn); border-color:transparent; color:var(--on-status); }
-.head .row2{ display:flex; align-items:center; gap:8px; margin-top:7px; font-size:11.5px; color:var(--text-dim); }
+
 .level{ font-size:10.5px; font-weight:700; letter-spacing:.06em; }
 .level.normal{ color:var(--good); }
 .level.warn{ color:var(--warn); }
@@ -224,7 +224,8 @@ button:disabled[data-tip]{ cursor:default; }
 .sec-h .why{ text-transform:none; letter-spacing:0; font-weight:500; font-size:11.5px; color:var(--text-dim); }
 .sec-h .why.blocked{ color:var(--warn); }
 .day-row{ display:grid; grid-template-columns:repeat(6, minmax(0, 1fr)); margin:0 14px 6px; }
-.day-row.five{ grid-template-columns:repeat(5, minmax(0, 1fr)); }
+.head .day-row{ margin:10px 0 0; grid-template-columns:repeat(3, minmax(0, 1fr)); }
+.head .day-row.five, .day-row.five{ grid-template-columns:repeat(5, minmax(0, 1fr)); }
 .day-row > div{ display:flex; flex-direction:column; gap:1px; padding:2px 7px; min-width:0; }
 .day-row > div:first-child{ padding-left:0; }
 .day-row > div + div{ border-left:1px solid var(--sep-soft); }
@@ -313,19 +314,18 @@ button:disabled[data-tip]{ cursor:default; }
 
 /* Footer nav */
 .foot{
-  flex:0 0 auto; display:flex; border-top:1px solid var(--sep);
+  flex:0 0 auto; display:flex; gap:3px; padding:5px; background:var(--bg-elev); border-top:1px solid var(--sep);
 }
-.foot button{ flex:1; padding:9px 0; font-size:12px; color:var(--text-dim); }
-.foot button:hover{ background:var(--bg-elev); color:var(--text); }
-.foot button + button{ border-left:1px solid var(--sep-soft); }
+.foot button{ flex:1; min-width:0; padding:7px 2px; border-radius:6px; font-size:11px; color:var(--text-dim); }
+.foot button:hover{ background:var(--bg); color:var(--text); }
+.foot button.selected{ background:var(--bg); color:var(--accent); font-weight:650; box-shadow:0 1px 3px rgba(0,0,0,.12); }
 
 /* Drill-in pages */
 .pagehead{
   display:flex; align-items:center; gap:8px; padding:9px 12px; border-bottom:1px solid var(--sep-soft);
   position:sticky; top:0; background:var(--bg); z-index:1;
 }
-.pagehead .back{ color:var(--accent); font-size:12.5px; }
-.pagehead h1{ font-size:13px; font-weight:650; flex:1; text-align:center; margin-right:44px; }
+.pagehead h1{ font-size:13px; font-weight:650; flex:1; text-align:center; }
 
 .hrow{ padding:7px 14px; cursor:pointer; }
 .hrow:hover{ background:var(--bg-elev); }
@@ -615,14 +615,15 @@ const controlsWithKey = key => [...document.querySelectorAll("[data-act]")]
   .filter(el => controlKey(el) === key);
 
 function navigate(page, trigger, back = false){
+  if (!back && page === UI.page) return;
   const saved = back ? UI.trail.pop() : null;
   if (!back){
     const key = trigger?.dataset?.act ? controlKey(trigger) : null;
-    UI.trail.push({ page:UI.page, profileKey:UI.profileKey, scroll:$("view").scrollTop,
+    UI.trail.push({ page:UI.page, profileKey:UI.profileKey, profileFrom:UI.profileFrom, scroll:$("view").scrollTop,
       control:key, occurrence:key ? Math.max(0, controlsWithKey(key).indexOf(trigger)) : 0 });
   }
   UI.page = saved?.page || page;
-  if (saved) UI.profileKey = saved.profileKey;
+  if (saved){ UI.profileKey = saved.profileKey; UI.profileFrom = saved.profileFrom; }
   render(saved || { scroll:0 });
 }
 
@@ -659,11 +660,11 @@ function render(destination = null){
                  : UI.page === "profile"  ? renderProfile(STATE)
                  : UI.page === "others"   ? renderOthers(STATE)
                  :                          renderSettings(STATE);
-  $("foot").innerHTML = UI.page === "main" ? renderFoot() : "";
-  $("foot").style.display = UI.page === "main" ? "" : "none";
+  $("foot").innerHTML = renderFoot();
+  $("foot").style.display = "";
 
   for (const button of document.querySelectorAll("button, [role='button']")) {
-    describeButton(button);
+    if (!button.closest("#foot")) describeButton(button);
   }
 
   // Keep the reader's place and the cursor across the 1 s rerender.
@@ -693,6 +694,7 @@ const PRESSURE_TIP = {
 
 function renderHead(S){
   const m = S.system;
+  const stat = (value, label, tip) => `<div data-tip="${esc(tip)}"><b>${value}</b><span>${label}</span></div>`;
   const usedPct = Math.min(100, m.mem_used / m.mem_total * 100);
   const reservePct = Math.min(100, S.settings.headroom / m.mem_total * 100);
   const color = { normal:"var(--accent)", warn:"var(--warn)", critical:"var(--bad)" }[m.pressure];
@@ -704,22 +706,22 @@ function renderHead(S){
   return `
     <div class="row1">
       <span class="lbl">Memory</span>
-      <div class="memtrack" title="Hatched: headroom kept free (${gb(S.settings.headroom)} GB)">
-        <div class="fill" style="width:${usedPct}%;background:${color}"></div>
-        <div class="reserve" style="width:${reservePct}%"></div>
-      </div>
+      <span class="level ${m.pressure}" data-tip="${PRESSURE_TIP[m.pressure]}">${m.pressure.toUpperCase()}</span>
       <span class="memtxt num">${gb(m.mem_used)} / ${gb(m.mem_total)} GB</span>
       <button class="btn-hold ${S.held ? "on" : ""}" data-act="hold" aria-label="Hold new jobs" aria-pressed="${S.held}"
         title="${S.held ? "Start admitting jobs again" : "Stop starting new jobs; running jobs continue"}">
         ${S.held ? "Held" : "Hold"}</button>
     </div>
-    <div class="row2 num">
-      <span class="level ${m.pressure}" data-tip="${PRESSURE_TIP[m.pressure]}">${m.pressure.toUpperCase()}</span>
-      <span data-tip="Memory macOS can hand out now without swapping. Jobs start when their estimate fits in this, minus the ${gb(S.settings.headroom)} GB kept free.">${gb(m.mem_available)} GB available</span>·
-      <span data-tip="Memory moved to disk. It grows when RAM runs short; a lot of it makes everything slow.">swap ${gb(m.swap_used)} GB</span>·
-      <span data-tip="CPU in use across all cores">CPU ${Math.round(m.cpu_pct)}%</span>
+      <div class="memtrack" title="Hatched: headroom kept free (${gb(S.settings.headroom)} GB)">
+        <div class="fill" style="width:${usedPct}%;background:${color}"></div>
+        <div class="reserve" style="width:${reservePct}%"></div>
+      </div>
+    <div class="day-row ${S.queue_budget ? "five " : ""}num">
+      ${stat(`${gb(m.mem_available)} GB`, "Mac available", `${gb(m.mem_available)} GB available on this Mac, including reclaimable memory. Queue admissions also subtract the ${gb(S.settings.headroom)} GB reserve and expected growth of running jobs.`)}
+      ${stat(`${gb(m.swap_used)} GB`, "swap", `Memory moved to disk: ${gb(m.swap_used)} GB currently in swap. This is system-wide usage, not a single job's memory.`)}
+      ${stat(`${Math.round(m.cpu_pct)}%`, "CPU", `CPU in use across all cores: ${Math.round(m.cpu_pct)}% system-wide.`)}
+      ${S.queue_budget ? stat(`${gb(S.queue_budget.available)} GB`, "job budget", `Job budget ${gb(S.queue_budget.available)} GB = Mac available ${gb(m.mem_available)} GB − reserve ${gb(S.settings.headroom)} GB − expected job growth ${gb(S.queue_budget.growth)} GB, with a minimum of zero. Pressure, CPU and queue-order checks still apply.`) + stat(`${gb(S.queue_budget.growth)} GB`, "growth", `${gb(S.queue_budget.growth)} GB reserved for expected growth across ${S.running.filter(j => j.state === "running").length} running jobs. This is an estimate, not memory already used.`) : ""}
     </div>
-    ${S.queue_budget ? `<div class="row2 num" data-tip="Available memory minus ${gb(S.settings.headroom)} GB kept free and ${gb(S.queue_budget.growth)} GB allowed for running jobs to grow. Pressure, CPU and queue-order checks still apply.">Queue budget ${gb(S.queue_budget.available)} GB · growth allowance ${gb(S.queue_budget.growth)} GB</div>` : ""}
     ${alert}`;
 }
 
@@ -737,21 +739,21 @@ function renderLastDay(h){
     : "No job had to wait";
   return `
     <div class="sec day">
-      <h2 class="sec-h">Last 24h</h2>
+      <h2 class="sec-h">Jobs last 24h</h2>
       <div class="day-row num">
         ${cell(`${h.runs}${h.more ? "+" : ""}`, h.runs === 1 ? "run" : "runs",
-          h.more ? "History keeps 2,000 runs; more than that finished today" : "Jobs that finished", h.runs ? "" : "zero")}
+          h.more ? `At least ${h.runs} jobs finished in the last 24 hours. History keeps 2,000 runs; more than that finished today` : `${h.runs} jobs finished in the last 24 hours.`, h.runs ? "" : "zero")}
         ${cell(bad, "failed", `${h.failed} exited with an error, ${h.killed} killed to free memory`, bad ? "" : "zero")}
         ${cell(waited, "waited", ofRuns, h.waited ? "" : "zero")}
-        ${cell(dur(h.wait_p50_s), "wait p50", `Half the jobs that waited, waited this long or less. ${waits}`, h.wait_p50_s ? "" : "zero")}
-        ${cell(dur(h.wait_p95_s), "wait p95", `95 in 100 jobs that waited, waited this long or less. ${waits}`, h.wait_p95_s ? "" : "zero")}
-        ${cell(h.went_first, "went first", "Smaller jobs that started ahead of a bigger one waiting for memory", h.went_first ? "" : "zero")}
+        ${cell(dur(h.wait_p50_s), "wait p50", `Median queue wait: ${dur(h.wait_p50_s)}. Half the jobs that waited, waited this long or less. ${waits}`, h.wait_p50_s ? "" : "zero")}
+        ${cell(dur(h.wait_p95_s), "wait p95", `95th-percentile queue wait: ${dur(h.wait_p95_s)}. 95 in 100 jobs that waited, waited this long or less. ${waits}`, h.wait_p95_s ? "" : "zero")}
+        ${cell(h.went_first, "went first", `${h.went_first} smaller jobs started ahead of a bigger one waiting for memory in the last 24 hours.`, h.went_first ? "" : "zero")}
       </div>
     </div>`;
 }
 
 function renderMain(S){
-  return `<h1 id="page-title" class="sr-only" tabindex="-1">Jobs</h1>` + S.banners.map(renderBanner).join("") + renderLastDay(S.last_day) + `
+  return `<h1 id="page-title" class="sr-only" tabindex="-1">Queue</h1>` + S.banners.map(renderBanner).join("") + renderLastDay(S.last_day) + `
     <div class="sec">
       <h2 class="sec-h">Running ${S.running.length || ""}</h2>
       ${S.running.length
@@ -962,16 +964,13 @@ function renderDetail(j){
 }
 
 function renderFoot(){
-  return `
-    <button data-act="goto" data-page="history">History ▸</button>
-    <button data-act="goto" data-page="commands">Commands ▸</button>
-    <button data-act="goto" data-page="others">Other apps ▸</button>
-    <button data-act="goto" data-page="settings">Settings ▸</button>`;
+  const selected = UI.page === "profile" ? UI.profileFrom || "history" : UI.page;
+  return [["main", "Queue"], ["history", "History"], ["commands", "Commands"], ["others", "Other apps"], ["settings", "Settings"]]
+    .map(([page, label]) => `<button class="${page === selected ? "selected" : ""}" data-act="goto" data-page="${page}"${page === selected ? ' aria-current="page"' : ""}${UI.page === "profile" && page === selected ? ' data-back="true"' : ""}>${label}</button>`).join("");
 }
 
-function pageHead(title, back = "main"){
-  back = UI.trail[UI.trail.length - 1]?.page || back;
-  return `<div class="pagehead"><button class="back" data-act="goto" data-page="${back}" data-back="true">‹ Back</button><h1 id="page-title" tabindex="-1">${title}</h1></div>`;
+function pageHead(title){
+  return `<div class="pagehead"><h1 id="page-title" tabindex="-1">${title}</h1></div>`;
 }
 
 function outcomeTag(r){
@@ -1057,10 +1056,9 @@ function sparkline(peaks, p90){
 
 function renderProfile(S){
   const p = S.profiles[UI.profileKey];
-  const back = UI.profileFrom || "history";
-  if (!p) return pageHead("Profile", back) + `<div class="empty">No runs recorded for this command yet.</div>`;
+  if (!p) return pageHead("Profile") + `<div class="empty">No runs recorded for this command yet.</div>`;
   const key = "reset:" + UI.profileKey;
-  return pageHead("Profile", back) + `
+  return pageHead("Profile") + `
     <div class="prof">
       <div class="key mono" title="${esc(UI.profileKey)}">${esc(keyLabel(UI.profileKey))}</div>
       ${p.peaks.length ? sparkline(p.peaks, p.p90) : ""}

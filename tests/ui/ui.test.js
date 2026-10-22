@@ -204,11 +204,43 @@ test('Escape returns through a profile and its source list after opening header 
   ui.setState(history);
   ui.click({ act: 'goto', page: 'commands' });
   ui.click({ act: 'profile' }, 0);
-  ui.click({ act: 'goto', page: 'settings' });
+  ui.click({ act: 'goto', page: 'settings' }, 0);
   ui.key('Escape');
   eq(ui.UI.page, 'profile');
   ui.key('Escape');
   eq(ui.UI.page, 'commands');
+});
+
+test('returning through profiles from different tabs restores the correct selected tab', () => {
+  ui.setState(history);
+  ui.click({ act:'goto', page:'history' });
+  ui.click({ act:'profile' }, 0);
+  ui.click({ act:'goto', page:'commands' });
+  ui.click({ act:'profile' }, 0);
+  ui.key('Escape');
+  ui.key('Escape');
+  eq(ui.UI.page, 'profile');
+  eq(ui.UI.profileFrom, 'history');
+  const foot = document.getElementById('foot').innerHTML;
+  has(foot, 'data-page="history" aria-current="page" data-back="true"');
+  lacks(foot, 'data-page="commands" aria-current');
+  ui.click({ act:'goto', page:'history' });
+  eq(ui.UI.page, 'history');
+});
+
+test('persistent navigation selects each page and returns to Queue without a back button', () => {
+  ui.setState(busy);
+  for (const page of ['history', 'commands', 'others', 'settings', 'main']) {
+    ui.click({ act:'goto', page }, 0);
+    eq(ui.UI.page, page);
+    const foot = document.getElementById('foot').innerHTML;
+    eq((foot.match(/data-act="goto"/g) || []).length, 5);
+    eq((foot.match(/aria-current="page"/g) || []).length, 1);
+    has(foot, `data-page="${page}" aria-current="page"`);
+    has(foot, '>Queue</button>');
+    lacks(foot, 'data-tip');
+    lacks(ui.view(), '‹ Back');
+  }
 });
 
 test('job actions expose descriptive names and toggle states', () => {
@@ -643,7 +675,7 @@ test('a head passed over says how often and until when; the job that went first 
 
 test('a strip above what is running sums up the last 24 hours', () => {
   ui.setState(history);
-  has(ui.view(), 'Last 24h 5 runs 3 failed 0 waited 0s wait p50 0s wait p95 0 went first');
+  has(ui.view(), 'Jobs last 24h 5 runs 3 failed 0 waited 0s wait p50 0s wait p95 0 went first');
   has(ui.html(), '1 exited with an error, 2 killed to free memory');
   ui.setState(tunedHistory);
   has(ui.view(), '2 runs 0 failed');
@@ -761,12 +793,12 @@ test('zeros are dimmed, failures are not coloured, and every stat explains itsel
   ui.setState(history);
   const html = ui.html();
   has(html, 'class="" data-tip="1 exited with an error');
-  has(html, 'class="zero" data-tip="Smaller jobs that started ahead');
+  has(html, 'class="zero" data-tip="0 smaller jobs started ahead');
   eq((html.match(/data-tip=/g) || []).length, 6, 'one tooltip per stat');
   lacks(html, 'class="bad"');
   ui.setState(busy);
   eq(busy.last_day.runs, 0, 'the capture has nothing finished yet');
-  has(ui.view(), 'Last 24h 0 runs 0 failed 0 waited 0s wait p50');
+  has(ui.view(), 'Jobs last 24h 0 runs 0 failed 0 waited 0s wait p50');
 });
 
 test('the pressure level is coloured text with a tooltip, and so are the header stats', () => {
@@ -774,8 +806,8 @@ test('the pressure level is coloured text with a tooltip, and so are the header 
   const head = ui.headHtml();
   has(head, `class="level ${busy.system.pressure}" data-tip="Memory pressure ${busy.system.pressure}`);
   lacks(head, 'pill');
-  has(head, 'data-tip="Memory moved to disk.');
-  has(head, 'data-tip="CPU in use across all cores"');
+  has(head, 'data-tip="Memory moved to disk:');
+  has(head, 'data-tip="CPU in use across all cores:');
 });
 
 test('a busier day than the history holds is a floor', () => {
@@ -1023,9 +1055,9 @@ test('clear usage data needs confirmation and waits for the backend result', () 
   }
 });
 
-test('header explains the usable queue budget and running growth', () => {
+test('header explains the job budget and running growth', () => {
   ui.setState({ ...busy, queue_budget: { available: .5 * GiB, growth: 4 * GiB } });
-  has(ui.head(), 'Queue budget 0.5 GB · growth allowance 4 GB');
+  has(ui.head(), '0.5 GB job budget 4 GB growth');
   has(ui.headHtml(), 'Pressure, CPU and queue-order checks still apply');
 });
 
