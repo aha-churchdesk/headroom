@@ -314,11 +314,13 @@ button:disabled[data-tip]{ cursor:default; }
 
 /* Footer nav */
 .foot{
-  flex:0 0 auto; display:flex; gap:3px; padding:5px; background:var(--bg-elev); border-top:1px solid var(--sep);
+  flex:0 0 auto; display:flex; background:var(--bg-elev); border-top:1px solid var(--sep);
 }
-.foot button{ flex:1; min-width:0; padding:7px 2px; border-radius:6px; font-size:11px; color:var(--text-dim); }
+.foot button{ flex:1; min-width:0; padding:11px 2px; border-radius:0; border-top:2px solid transparent; font-size:11px; color:var(--text-dim); }
+.foot button + button{ border-left:1px solid var(--sep-soft); }
+.foot button:focus-visible{ outline-offset:-3px; }
 .foot button:hover{ background:var(--bg); color:var(--text); }
-.foot button.selected{ background:var(--bg); color:var(--accent); font-weight:650; box-shadow:0 1px 3px rgba(0,0,0,.12); }
+.foot button.selected{ background:var(--bg); color:var(--text); font-weight:650; }
 
 /* Drill-in pages */
 .pagehead{
