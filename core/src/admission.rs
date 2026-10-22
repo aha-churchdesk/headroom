@@ -65,7 +65,7 @@ pub struct Decision {
 /// even all of them ending wouldn't make room.
 fn shadow(
     running: &[&Job],
-    admitted: &[(&Job, Bytes)],
+    admitted: &[(Option<u64>, Bytes)],
     need: Bytes,
     free: Bytes,
     now: Millis,
@@ -87,8 +87,8 @@ fn shadow(
             }
         }
     }
-    for (j, est) in admitted {
-        ends.push((j.median_ms?, *est));
+    for (median, est) in admitted {
+        ends.push(((*median)?, *est));
     }
     ends.sort_unstable();
     let mut free = free;
@@ -157,7 +157,7 @@ pub fn decide(
     let mut load = snap.load1;
     let cpu_limit = snap.cores as f64 * cfg.cpu_factor;
 
-    let mut admitted: Vec<(&Job, Bytes)> = Vec::new();
+    let mut admitted: Vec<(Option<u64>, Bytes)> = Vec::new();
     let mut waiting_head: Option<(usize, Bytes)> = None;
     for (i, job) in queue.iter().enumerate() {
         // With nothing of ours running, holding back can't help: an
@@ -208,7 +208,10 @@ pub fn decide(
             None => job.estimate,
         };
         growth += est;
-        admitted.push((job, est));
+        // A newly chosen worker count invalidates the queued runtime.
+        // Settle looks up its matching history after this decision; until
+        // then this round cannot promise when the tuned job will finish.
+        admitted.push((if tuned.is_some() { None } else { job.median_ms }, est));
         load += 1.0;
     }
 
@@ -555,6 +558,33 @@ mod tests {
         let mut frozen = r;
         frozen.state = JobState::Frozen;
         assert!(at(&s, &[frozen], &q, 0).admit.is_empty());
+    }
+
+    #[test]
+    fn newly_tuned_jobs_cannot_supply_their_queued_runtime_to_backfill() {
+        let mut first = short(1, 8.0, 120_000);
+        first.spec.tune = Some(Tunable {
+            tool: Tool::Vitest,
+            default_workers: 8,
+            npm: false,
+        });
+        first.scaling = Some(Scaling {
+            base: 2 * GIB,
+            per_worker: GIB,
+        });
+        let mut blocker = running(9, 2.0, 2.0);
+        blocker.median_ms = Some(30_000);
+        // 4.5 GB free: the first job shrinks to 2 workers / 4 GB.
+        // The head needs that job to finish, whose 2-worker time is unknown.
+        let d = at(
+            &snap(6.5),
+            &[blocker],
+            &[first, job(2, 4.0), short(3, 0.5, 60_000)],
+            0,
+        );
+        assert_eq!(d.admit, vec![1]);
+        assert_eq!(d.tuned, vec![(1, 2, 4 * GIB)]);
+        assert!(d.backfilled.is_empty());
     }
 
     #[test]

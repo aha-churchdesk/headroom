@@ -142,10 +142,20 @@ impl Profile {
     }
 
     pub fn median_ms(&self) -> Option<u64> {
+        self.median_ms_matching(|_| true)
+    }
+
+    /// Runtime at exactly this worker count. Unknown counts match only
+    /// unknown counts; memory scaling cannot predict how long a run takes.
+    pub fn median_ms_for_workers(&self, workers: Option<u32>) -> Option<u64> {
+        self.median_ms_matching(|r| r.workers == workers)
+    }
+
+    fn median_ms_matching(&self, matches: impl Fn(&Run) -> bool) -> Option<u64> {
         let mut d: Vec<u64> = self
             .runs
             .iter()
-            .filter(|r| !r.flagged)
+            .filter(|r| !r.flagged && matches(r))
             .map(|r| r.duration_ms)
             .collect();
         if d.is_empty() {
@@ -753,6 +763,36 @@ mod tests {
             },
         );
         assert_eq!(p.get("k").unwrap().median_ms(), Some(20));
+    }
+
+    #[test]
+    fn runtime_medians_match_workers_without_scaling_or_flagged_samples() {
+        let p = profile(
+            [
+                (Some(2), 120_000, false),
+                (Some(2), 120_000, false),
+                (Some(2), 120_000, false),
+                (Some(8), 30_000, false),
+                (Some(8), 900_000, true),
+                (Some(4), 600_000, true),
+                (None, 45_000, false),
+            ]
+            .into_iter()
+            .map(|(workers, duration_ms, flagged)| Run {
+                workers,
+                duration_ms,
+                flagged,
+                ..run(0.0)
+            })
+            .collect(),
+        );
+        assert_eq!(p.median_ms(), Some(120_000), "overall history stays pooled");
+        assert_eq!(p.median_ms_for_workers(Some(2)), Some(120_000));
+        assert_eq!(p.median_ms_for_workers(Some(8)), Some(30_000));
+        assert_eq!(p.median_ms_for_workers(Some(4)), None);
+        assert_eq!(p.median_ms_for_workers(Some(6)), None);
+        assert_eq!(p.median_ms_for_workers(None), Some(45_000));
+        assert_eq!(profile(vec![at(2.0, 8)]).median_ms_for_workers(None), None);
     }
 
     #[test]

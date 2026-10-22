@@ -558,6 +558,10 @@ test('a command page lists what ran inside its runs, when that was recorded', ()
                  { cmd: 'forks.js', runs: 1, peak: 2 ** 30, procs: 8, median_s: 90 }];
   ui.setState({ ...history, profiles: { ...history.profiles, [key]: { ...p, runs: 4, parts } } });
   has(ui.view(), 'Runs inside it tsc --noEmit in 3 of 4 runs · peak 3 GB · 45s forks.js in 1 of 4 runs · peak 1 GB · 1m30 · 8 processes');
+  ui.setState({ ...history, profiles: { ...history.profiles, [key]: { ...p, runs: 4,
+    parts: [{ ...parts[0], median_s: null }] } } });
+  has(ui.view(), 'tsc --noEmit in 3 of 4 runs · peak 3 GB · time unknown');
+  lacks(ui.view(), 'peak 3 GB · 0s');
 });
 
 test('the commands page says when there is nothing to show, or more than it lists', () => {

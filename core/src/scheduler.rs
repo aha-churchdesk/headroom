@@ -670,7 +670,9 @@ impl Scheduler {
     }
 
     fn median_for(&self, spec: &JobSpec) -> Option<u64> {
-        self.profiles.get(&spec.key)?.median_ms()
+        self.profiles
+            .get(&spec.key)?
+            .median_ms_for_workers(spec.tune.map(|t| t.default_workers))
     }
 
     /// After the settings or a profile changed: queued jobs' estimates.
@@ -856,6 +858,10 @@ impl Scheduler {
                 let default = e.job.spec.tune.map_or(workers, |t| t.default_workers);
                 e.job.tuned = Some(Tuned { workers, default });
                 e.job.estimate = est;
+                e.job.median_ms = self
+                    .profiles
+                    .get(&e.job.spec.key)
+                    .and_then(|p| p.median_ms_for_workers(Some(workers)));
             }
             fx.push(Effect::Send(
                 e.conn,
@@ -1108,6 +1114,75 @@ mod tests {
         s.exited(1, Some(0), None, 1_000, 7);
         assert_eq!(s.profiles.get(&sp.key).unwrap().runs[3].workers, Some(9));
         assert_eq!(s.history[0].tuned, None);
+    }
+
+    #[test]
+    fn backfill_uses_the_running_jobs_actual_worker_count() {
+        for (candidate_ms, should_backfill) in [(60_000, false), (15_000, true)] {
+            let mut s = sched(6);
+            let mut active = own("vitest run");
+            active.tune = Some(Tunable {
+                tool: Tool::Vitest,
+                default_workers: 8,
+                npm: false,
+            });
+            let head = own("head");
+            let candidate = own("candidate");
+            for (sp, peak, workers, duration_ms, count) in [
+                (&active, 2 * GIB, Some(2), 120_000, 3),
+                (&active, 2 * GIB, Some(8), 30_000, 1),
+                (&head, 4 * GIB, None, 90_000, 3),
+                (&candidate, 2 * GIB, None, candidate_ms, 3),
+            ] {
+                for _ in 0..count {
+                    s.profiles.record(
+                        &sp.key,
+                        &sp.fallback_key,
+                        Run {
+                            peak,
+                            workers,
+                            duration_ms,
+                            exit: Some(0),
+                            flagged: false,
+                            at: 0,
+                            parts: vec![],
+                        },
+                    );
+                }
+            }
+            assert!(granted(&s.enqueue(1, active, 0), 1));
+            assert_eq!(s.list().running[0].median_ms, Some(30_000));
+            s.started(1, 100);
+            s.tick(snap(4), &usage(100, 2.0), 0);
+            assert!(!granted(&s.enqueue(2, head, 0), 2));
+            assert_eq!(granted(&s.enqueue(3, candidate, 0), 3), should_backfill);
+        }
+    }
+
+    #[test]
+    fn tuned_runtime_uses_matching_history_or_stays_unknown() {
+        for matching in [false, true] {
+            let (mut s, sp) = tunable_sched(12);
+            if matching {
+                s.profiles.record(
+                    &sp.key,
+                    &sp.fallback_key,
+                    Run {
+                        peak: 27 * GIB / 4,
+                        duration_ms: 30_000,
+                        exit: Some(0),
+                        flagged: false,
+                        at: 0,
+                        workers: Some(6),
+                        parts: vec![],
+                    },
+                );
+            }
+            assert!(granted(&s.enqueue(1, sp, 0), 1));
+            let job = s.list().running.into_iter().find(|j| j.id == 2).unwrap();
+            assert_eq!(job.tuned.unwrap().workers, 6);
+            assert_eq!(job.median_ms, matching.then_some(30_000));
+        }
     }
 
     #[test]

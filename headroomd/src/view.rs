@@ -194,7 +194,9 @@ fn profile_parts(p: &Profile, own: &str) -> Vec<Value> {
             e.runs += 1;
             e.peak = e.peak.max(part.peak);
             e.procs = e.procs.max(part.procs);
-            e.secs.push(part.samples);
+            if !r.flagged {
+                e.secs.push(part.samples);
+            }
         }
     }
     let mut rows: Vec<(&str, Seen)> = by_cmd.into_iter().collect();
@@ -208,7 +210,7 @@ fn profile_parts(p: &Profile, own: &str) -> Vec<Value> {
                 "runs": e.runs,
                 "peak": e.peak,
                 "procs": e.procs,
-                "median_s": e.secs[e.secs.len() / 2],
+                "median_s": e.secs.get(e.secs.len() / 2),
             })
         })
         .collect()
@@ -624,6 +626,43 @@ mod tests {
         let rows = profile_parts(big.get(key).unwrap(), "git push");
         assert_eq!(rows.len(), PAGE_PARTS);
         assert_eq!(rows[0]["cmd"], "c11");
+    }
+
+    #[test]
+    fn inner_runtime_ignores_flagged_runs_but_keeps_their_observed_peaks() {
+        use headroom_core::model::Part;
+        use headroom_core::profile::Run;
+        let p = Profile {
+            runs: [(30, false), (600, true), (900, true)]
+                .into_iter()
+                .map(|(samples, flagged)| Run {
+                    peak: samples as Bytes,
+                    duration_ms: samples as u64 * 1000,
+                    exit: Some(0),
+                    flagged,
+                    at: 0,
+                    workers: None,
+                    parts: vec![Part {
+                        cmd: "tsc --noEmit".into(),
+                        peak: samples as Bytes,
+                        procs: 1,
+                        samples,
+                    }],
+                })
+                .collect(),
+        };
+        let rows = profile_parts(&p, "git push");
+        assert_eq!(p.median_ms(), Some(30_000));
+        assert_eq!(rows[0]["median_s"], 30);
+        assert_eq!(rows[0]["runs"], 3);
+        assert_eq!(rows[0]["peak"], 900);
+        let flagged = Profile {
+            runs: p.runs.into_iter().filter(|r| r.flagged).collect(),
+        };
+        let rows = profile_parts(&flagged, "git push");
+        assert!(rows[0]["median_s"].is_null());
+        assert_eq!(rows[0]["runs"], 2);
+        assert_eq!(rows[0]["peak"], 900);
     }
 
     #[test]

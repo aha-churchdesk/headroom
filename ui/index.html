@@ -935,7 +935,7 @@ function renderProfile(S){
         ${p.parts.map(x => `
         <div class="part">
           <div class="mono" title="${esc(x.cmd)}">${esc(x.cmd)}</div>
-          <div class="num dim">in ${x.runs} of ${p.runs} run${p.runs === 1 ? "" : "s"} · peak ${gb(x.peak)} GB · ${dur(x.median_s)}${x.procs > 1 ? ` · ${x.procs} processes` : ""}</div>
+          <div class="num dim">in ${x.runs} of ${p.runs} run${p.runs === 1 ? "" : "s"} · peak ${gb(x.peak)} GB · ${x.median_s == null ? "time unknown" : dur(x.median_s)}${x.procs > 1 ? ` · ${x.procs} processes` : ""}</div>
         </div>`).join("")}
       </div>` : ""}
       <div style="margin-top:14px">
