@@ -80,6 +80,8 @@ headroom shims status              # are they first on PATH?
 
 `install` and `status` print the line for your shell and the file it goes in: `~/.zshrc` for zsh, `~/.bash_profile` for bash, and `fish_add_path --path --prepend …` in `~/.config/fish/config.fish` for fish. It goes at the end, after fnm, mise, nvm or brew have set PATH; `status` names any program that is still found before the shims.
 
+Settings → Shims shows how many shim links are installed and checks whether they take precedence in a fresh interactive login shell for your account. It reports missing links, PATH conflicts, and checks it could not verify; Check again refreshes the result. Existing terminal sessions and terminal-specific overrides can differ. The check never changes shell configuration.
+
 Called as `pnpm`, Headroom classifies the whole command. A heavy one runs through the queue; anything else, and anything inside a queued job, runs the real `pnpm` (the next one on PATH) straight away. If the daemon isn't running the command runs directly. `headroom shims uninstall` removes the links.
 
 Claude Code note: the hook rewrites the command to `headroom run … --sh '<your command>'` and leaves the permission decision to you. Allow rules written for the raw command (`Bash(pnpm test:*)`) won't match the rewritten one, so you may see a prompt you didn't see before. Deny and ask rules still apply.

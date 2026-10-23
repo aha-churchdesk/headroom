@@ -1214,6 +1214,31 @@ test('hook status per agent, with the install command to copy', () => {
   lacks(ui.page(), 'wsq');
 });
 
+test('Shims settings distinguish installed links from default-terminal activation', () => {
+  const shims = {installed:16,total:16,path:'/Users/me/.local/share/headroom/shims',shell:'/bin/zsh',source:'fresh_login_shell',shadowed:[],message:null};
+  for (const [status, label] of Object.entries({checking:'Checking…',active:'Active',partial:'Some shims missing',missing:'Not installed',not_on_path:'Not on PATH',shadowed:'Commands bypass shims',unverified:'Could not verify'})) {
+    ui.setState({ ...busy, shims:{...shims,status} });
+    if (ui.UI.page !== 'settings') ui.click({ act:'goto', page:'settings' }, 0);
+    has(ui.view(), 'Installed links 16 of 16');
+    has(ui.view(), `Default terminal PATH ${label}`);
+    eq(ui.find({act:'check_shims'})[0].disabled, status === 'checking');
+    if (status !== 'active') lacks(ui.view(), 'Default terminal PATH Active');
+  }
+});
+
+test('Shims setup and recheck send explicit intents and escape probe messages', () => {
+  ui.setState({ ...busy, shims:{installed:12,total:16,status:'shadowed',path:'<path>',shell:'/bin/zsh',shadowed:['<pnpm>'],message:'<probe message>'} });
+  ui.click({act:'goto',page:'settings'},0);
+  has(ui.view(), 'Installed links 12 of 16');
+  has(ui.view(), 'Bypassing the shims: <pnpm>');
+  has(ui.html(), '&lt;path&gt;');
+  has(ui.html(), '&lt;probe message&gt;');
+  lacks(ui.html(), '<pnpm>');
+  ui.click({act:'check_shims'});
+  ui.click({act:'copy',text:'headroom shims install'});
+  eq(ui.sent,[{cmd:'check_shims'},{cmd:'copy',text:'headroom shims install'}]);
+});
+
 test('Hook settings scrolls to Agent hooks from the queue and from Settings', () => {
   const state = { ...busy, hooks: { claude:'installed', codex:'needs_review', pi:'absent' } };
   const section = document.getElementById('agent-hooks');

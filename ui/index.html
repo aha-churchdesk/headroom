@@ -404,7 +404,11 @@ button:disabled[data-tip]{ cursor:default; }
 
 .set{ padding:10px 14px; border-bottom:1px solid var(--sep-soft); }
 .set .k{ font-weight:600; font-size:12.5px; }
-#agent-hooks{ scroll-margin-top:44px; }
+#agent-hooks, #shims{ scroll-margin-top:44px; }
+.shim-row{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:8px;font-size:11.5px}
+.shim-row .label{color:var(--text-dim)}
+.shim-path{overflow-wrap:anywhere}
+
 .set .h{ font-size:11px; color:var(--text-dim); margin-top:2px; }
 .set .ctl{ margin-top:7px; display:flex; align-items:center; gap:8px; }
 .stepper{ display:inline-flex; align-items:center; border:1px solid var(--sep); border-radius:7px; overflow:hidden; }
@@ -1204,6 +1208,27 @@ function renderWelcome(S){
     ${S.setup?.error && !UI.finishingSetup ? `<div class="welcome-note" role="alert">${esc(S.setup.error)}</div>` : ""}`;
 }
 
+function renderShims(S){
+  const info = S.shims;
+  const status = info?.status || "checking";
+  const labels = {checking:"Checking…",active:"Active",partial:"Some shims missing",missing:"Not installed",not_on_path:"Not on PATH",shadowed:"Commands bypass shims",unverified:"Could not verify"};
+  const kind = status === "active" ? "ok" : ["partial","missing","not_on_path","shadowed"].includes(status) ? "guard" : "user";
+  const shadowed = info?.shadowed || [];
+  const shell = info?.shell ? String(info.shell).split("/").pop() : "default shell";
+  return `<div class="set">
+    <h2 class="k" id="shims" tabindex="-1">Shims</h2>
+    <div class="h">Route supported commands from terminals, scripts and agents through Headroom.</div>
+    <div class="shim-row"><span class="label">Installed links</span><span class="num">${info ? `${info.installed} of ${info.total}` : "Checking…"}</span></div>
+    <div class="shim-row"><span class="label">Default terminal PATH</span><span class="gtag ${kind}">${labels[status] || labels.unverified}</span></div>
+    ${info?.path ? `<div class="h mono shim-path">${esc(info.path)}</div>` : ""}
+    <div class="h" style="margin-top:8px">${status === "checking" ? `Checking a fresh ${esc(shell)} login shell.` : `Checked in a fresh ${esc(shell)} login shell. Existing terminals and custom terminal settings can differ.`}</div>
+    ${shadowed.length ? `<div class="h">Bypassing the shims: ${shadowed.map(esc).join(", ")}. Check PATH order and any aliases or functions for these commands.</div>` : ""}
+    ${info?.message ? `<div class="h">${esc(info.message)}</div>` : ""}
+    <div class="ctl"><button class="chip-btn" data-act="check_shims"${status === "checking" ? " disabled" : ""}>Check again</button><button class="chip-btn" data-act="copy" data-text="headroom shims install">Copy setup command</button></div>
+    <div class="h">The setup command prints the PATH line to add for your shell. New terminals pick it up.</div>
+  </div>`;
+}
+
 function renderSettings(S){
   const c = S.settings;
   const installs = AGENTS.filter(([k]) => ["not_installed", "stale"].includes(S.hooks[k]));
@@ -1269,6 +1294,7 @@ function renderSettings(S){
         <button class="toggle ${c.start_at_login ? "on" : ""}" role="switch" aria-label="Start at login" aria-checked="${c.start_at_login}" data-act="set" data-key="start_at_login" data-val="${!c.start_at_login}"${c.login_managed_by_brew ? " disabled" : ""}></button>
       </div>
     </div>
+    ${renderShims(S)}
     <div class="set">
       <h2 class="k" id="agent-hooks" tabindex="-1">Agent hooks</h2>
       <div class="h">Each agent's hook routes its heavy shell commands through <span class="mono">headroom run</span>.</div>
@@ -1381,6 +1407,7 @@ $("pop").addEventListener("click", (e) => {
     case "snippet": UI.snippet = !UI.snippet; break;
     case "cmd_days": UI.cmdDays = Number(d.val); break;
     case "cmd_sort": UI.cmdSort = d.val; break;
+    case "check_shims": send({ cmd:"check_shims" }); return;
     case "finish_setup":
       if (STATE.setup?.complete){ UI.trail = []; UI.page = "main"; render({ scroll:0 }); return; }
       UI.finishingSetup = true;
@@ -1775,6 +1802,7 @@ function mockApply(m){
     case "low": { const j = find(m.id); if (j) j.low = m.on; break; }
     case "dismiss": S.banners = S.banners.filter(b => b.id !== m.id); break;
     case "reset_profile": delete S.profiles[m.key]; all().forEach(j => { if (j.key === m.key){ j.samples = 0; j.memory_range = null; j.estimate = S.settings.default_estimate; } }); break;
+    case "check_shims": S.shims = {...S.shims,status:"unverified",message:"Check this in the native app to inspect your default shell."}; break;
     case "clear_data":
       S.profiles = {}; S.history = []; S.commands = [];
       S.last_day = Object.fromEntries(Object.keys(S.last_day || {}).map(k => [k, k === "more" ? false : 0]));
