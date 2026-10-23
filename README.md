@@ -10,6 +10,15 @@ Headroom is a macOS menu bar app and CLI that schedules heavy development comman
 
 Status: early. Apple Silicon only, ad-hoc signed, used daily by one person.
 
+## How it works
+
+1. **Capture a command.** Agent hooks check shell commands before the agent runs them. PATH shims catch supported tools launched from terminals and scripts. You can also use `headroom run -- <command>` directly. Hooks add agent and session information so you can see where jobs came from.
+2. **Classify the work.** Hooks and shims queue tests, builds and other heavy commands while letting lightweight commands and long-lived development servers run directly. An explicit `headroom run` queues the command you give it. Commands started inside an existing Headroom job run as part of that job, avoiding a second queue wait.
+3. **Wait for room.** The local scheduler uses the command's measured history to estimate its memory needs. It compares that estimate with the job budget, which is available system memory minus the reserve and expected growth of running jobs. Memory pressure, CPU load and queue order also affect when it starts.
+4. **Run and learn.** Headroom starts the original command with its arguments and worker settings intact, tracks its processes, and records memory use, queue wait and runtime for future estimates. The menu bar shows what is running, why jobs are waiting and what the scheduler expects next. The guard can pause jobs if memory pressure becomes critical.
+
+Everything runs locally. Agent hooks and shims feed the same queue; you can use either or both. If the scheduler is unavailable, commands run directly.
+
 ## How it decides
 
 - **Memory, not job count.** Headroom records peak memory per repository, starting directory, and complete invocation. With at least three successful measured runs, the estimate uses their p90 peak among the last 20 attempts. Until then, it blends with broader repository history or a 1.5 GB default. Failed or interrupted peaks remain minimum memory requirements, and known worker counts can raise the estimate. A queued job normally starts when its estimate fits in available memory, minus a reserve (2 GB by default), minus what running jobs are still expected to grow into. Memory includes processes started by the job, including tasks that move to their own process groups.
