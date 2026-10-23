@@ -1299,23 +1299,40 @@ fn the_mcp_server_reports_and_reorders_the_real_queue() {
 
 #[test]
 fn a_quick_job_starts_ahead_while_the_running_one_overruns() {
-    // The same 1 GB job takes 1 s three times, then runs on. Past its usual
-    // second it is expected to take as long again, so a known small job
-    // may start ahead of another 1 GB one waiting for it.
+    // Release even a wrapper that failed open before its pgid was listed.
+    struct ReleaseOnDrop([PathBuf; 2]);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            for path in &self.0 {
+                let _ = std::fs::write(path, "");
+            }
+        }
+    }
+
+    // Train both commands with real memory samples, then keep the 1 GB job
+    // running past its learned runtime. The small job may pass another 1 GB
+    // job waiting for it, using the overrun's predicted remaining time.
     let bin = tmp("overrun-bin");
-    let secs = bin.join("secs");
-    let quick_secs = bin.join("quick-secs");
-    let script = |name: &str, body: String| {
+    let script = |name: &str, gb: &str| {
         let p = bin.join(name);
+        let release = bin.join(format!("{name}.release"));
+        // A one-second sleep can finish between the daemon's one-second
+        // samples. Keep the allocation alive until the test has observed it.
+        let body = format!(
+            "[ -f '{release}' ] && exit 0\n\
+             {HOG} {gb} 60 &\n\
+             hog=$!\n\
+             trap 'kill \"$hog\" 2>/dev/null; wait \"$hog\" 2>/dev/null || true' EXIT\n\
+             while [ ! -f '{release}' ]; do sleep 0.05; done",
+            release = release.display(),
+        );
         std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        p.display().to_string()
+        (p.display().to_string(), release)
     };
-    let big = script("e2e.sh", format!("exec {HOG} 1 $(cat {})", secs.display()));
-    let quick = script(
-        "lint.sh",
-        format!("exec {HOG} 0.05 $(cat {})", quick_secs.display()),
-    );
+    let (big, big_release) = script("e2e.sh", "1");
+    let (quick, quick_release) = script("lint.sh", "0.05");
+    let _release = ReleaseOnDrop([big_release.clone(), quick_release.clone()]);
     let d = Daemon::start(
         "overrun",
         Config {
@@ -1323,19 +1340,50 @@ fn a_quick_job_starts_ahead_while_the_running_one_overruns() {
             ..Config::default()
         },
     );
-    std::fs::write(&secs, "1").unwrap();
-    std::fs::write(&quick_secs, "1").unwrap();
+    let mut quick_max_ms = 0;
     for _ in 0..3 {
-        d.output(&["run", "--", &big]);
-        d.output(&["run", "--", &quick]);
+        for (cmd, release, footprint) in [
+            (&big, &big_release, GIB),
+            (&quick, &quick_release, GIB / 20),
+        ] {
+            let warm = d.spawn(&["run", "--", cmd]);
+            let (id, pgid) = d.running();
+            let _cleanup = KillGroups(vec![pgid]);
+            wait_for("the warm run's full footprint", 10, || {
+                d.ls()
+                    .running
+                    .iter()
+                    .any(|j| j.id == id && j.peak >= footprint)
+                    .then_some(())
+            });
+            std::fs::write(release, "").unwrap();
+            let (code, _, err) = finish(warm);
+            assert_eq!(code, 0, "{err}");
+            let h = wait_for("the measured warm run in history", 5, || {
+                d.ls().history.iter().find(|h| h.id == id).cloned()
+            });
+            assert!(h.peak >= footprint);
+            if cmd == &quick {
+                quick_max_ms = quick_max_ms.max(h.duration_ms);
+            }
+            std::fs::remove_file(release).unwrap();
+        }
     }
-    // Warm runs must last long enough to measure their small footprint.
-    // An unmeasured immediate exit is not evidence of zero memory use.
-    std::fs::write(&quick_secs, "0").unwrap();
-    std::fs::write(&secs, "8").unwrap();
+    std::fs::write(&quick_release, "").unwrap();
     let running = d.spawn(&["run", "--", &big]);
-    d.running();
-    std::thread::sleep(Duration::from_millis(2500));
+    let (running_id, pgid) = d.running();
+    let _cleanup = KillGroups(vec![pgid]);
+    wait_for(
+        "the measured job to overrun its learned runtime",
+        10,
+        || {
+            let l = d.ls();
+            let j = l.running.iter().find(|j| j.id == running_id)?;
+            let elapsed = l.now.saturating_sub(j.started_at?);
+            (j.samples >= 3 && j.footprint >= GIB && elapsed >= j.median_ms?.max(quick_max_ms))
+                .then_some(())
+        },
+    );
     let head = d.spawn(&["run", "--", &big]);
     let head_id = d.queued_id();
     let ahead = d.output(&["run", "--wait-cap", "4", "--", &quick]);
@@ -1348,6 +1396,8 @@ fn a_quick_job_starts_ahead_while_the_running_one_overruns() {
             .any(|h| h.cmd.ends_with("lint.sh") && h.ahead_of.is_some())
             .then_some(())
     });
+    assert!(d.ls().running.iter().any(|j| j.id == running_id));
+    std::fs::write(&big_release, "").unwrap();
     for c in [running, head] {
         assert_eq!(finish(c).0, 0);
     }
