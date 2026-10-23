@@ -556,6 +556,7 @@ const UI = {
   page: "main",           // welcome | main | history | commands | profile | others | settings
   started: false,
   finishingSetup: false,
+  restoringFocus: false,
   welcomeOpen: new Set(),
   profileKey: null,
   trail: [],             // Previous page, reader position, and the control that opened this page
@@ -728,8 +729,12 @@ function render(destination = null){
     // Reveal the row until focus restores that selector, including in WebKit.
     const row = target.closest?.(".job.queued");
     row?.classList.add("restoring-focus");
-    target.focus({ preventScroll:true });
-    row?.classList.remove("restoring-focus");
+    UI.restoringFocus = true;
+    try { target.focus({ preventScroll:true }); }
+    finally {
+      UI.restoringFocus = false;
+      row?.classList.remove("restoring-focus");
+    }
     if (!destination && caret != null) target.setSelectionRange(caret, selectionEnd, selectionDirection);
   }
   section?.scrollIntoView({ block:"start" });
@@ -1532,8 +1537,14 @@ $("pop").addEventListener("mousemove", (e) => {
   showTip(e.target.closest && e.target.closest("[data-tip]"));
 });
 $("pop").addEventListener("mouseleave", () => { POINTER.x = null; $("tip").classList.remove("on"); });
-$("pop").addEventListener("focusin", e => { POINTER.x = null; showTip(e.target.closest?.("[data-tip]")); });
-$("pop").addEventListener("focusout", () => showTip(null));
+$("pop").addEventListener("focusin", e => {
+  // Restoring a replaced node is not a new keyboard interaction. Keep the
+  // pointer so refreshTip can find the current stat beneath it after render.
+  if (UI.restoringFocus) return;
+  POINTER.x = null;
+  showTip(e.target.closest?.("[data-tip]"));
+});
+$("pop").addEventListener("focusout", () => { if (!UI.restoringFocus) showTip(null); });
 
 $("pop").addEventListener("dragstart", (e) => {
   const row = e.target.closest("[data-qid]");

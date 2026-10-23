@@ -1117,6 +1117,45 @@ test('button tooltips expose action consequences to assistive technology', () =>
   }
 });
 
+test('hovered stats keep their tooltip and update its recorded values across focus restoration', () => {
+  ui.setState(busy);
+  const pop = document.getElementById('pop');
+  const tip = document.getElementById('tip');
+  const heading = document.getElementById('page-title');
+  const originalFocus = heading.focus;
+  const originalBounds = pop.getBoundingClientRect;
+  const originalHitTest = document.elementFromPoint;
+  const rect = {left:0,top:0,right:400,bottom:640,width:400,height:640};
+  const stat = {
+    get dataset() { return {tip: /data-tip="([^"]*available on this Mac[^"]*)"/.exec(ui.headHtml())[1]}; },
+    closest() { return this; },
+    getBoundingClientRect: () => rect,
+  };
+  try {
+    pop.getBoundingClientRect = () => rect;
+    heading.focus = function() {
+      document.activeElement = this;
+      pop._listeners.focusin({target:this});
+    };
+    heading.focus();
+    document.elementFromPoint = () => stat;
+    pop._listeners.mousemove({clientX:20,clientY:80,target:stat});
+    eq(tip.classList.contains('on'), true);
+    for (const available of [3, 4, 5]) {
+      ui.setState({...busy,system:{...busy.system,mem_available:available * 1024 ** 3}});
+      eq(tip.classList.contains('on'), true, 'stationary hover survives each sample');
+      has(tip.textContent, `${available} GB available on this Mac`);
+    }
+    pop._listeners.mouseleave();
+    eq(tip.classList.contains('on'), false, 'leaving still hides the tooltip');
+  } finally {
+    heading.focus = originalFocus;
+    pop.getBoundingClientRect = originalBounds;
+    document.elementFromPoint = originalHitTest;
+    pop._listeners.mouseleave();
+  }
+});
+
 test('clear usage data needs confirmation and waits for the backend result', () => {
   ui.setState(busy);
   ui.click({ act: 'goto', page: 'settings' }, 0);
