@@ -44,6 +44,8 @@ brew install aha-churchdesk/tap/headroom
 brew services start headroom       # menu bar app, now and at login
 ```
 
+The first time you open Headroom from the menu bar, it shows a welcome guide. It explains agent hooks, PATH shims, and optional direct CLI use, with commands you can copy. To have future agent sessions use the CLI, copy the suggested instruction into the agent's saved project instructions. Continue to Queue dismisses the guide; Settings → Getting started opens it again. The guide installs no integrations automatically.
+
 ## Connect your agents
 
 ```sh
@@ -153,7 +155,7 @@ claude mcp add headroom -- headroom mcp
 
 ## Files
 
-Everything lives in `~/Library/Application Support/dev.headroom/` (or `$HEADROOM_HOME`): `config.json`, `profiles.json`, `history.json`, `stats.json` (the Commands page's totals) and the daemon's socket. Settings → Stored data → Clear all usage data removes saved profiles, history, statistics and legacy memory trends after a second confirmation. Settings, hooks and active jobs are kept. Running attempts retain their memory reservations and guard thresholds; queued jobs use fresh estimates. Finished jobs begin building new history.
+Everything lives in `~/Library/Application Support/dev.headroom/` (or `$HEADROOM_HOME`): `config.json`, `profiles.json`, `history.json`, `stats.json` (the Commands page's totals), `ui.json` (whether the welcome guide was completed), and the daemon's socket. Settings → Stored data → Clear all usage data removes saved profiles, history, statistics and legacy memory trends after a second confirmation. Settings, hooks and active jobs are kept. Running attempts retain their memory reservations and guard thresholds; queued jobs use fresh estimates. Finished jobs begin building new history.
 
 `headroomd --headless` runs the queue without the menu bar. `headroomd --probe` prints what it measures and exits.
 

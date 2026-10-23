@@ -11,6 +11,9 @@ const failures = [];
 function test(name, fn) {
   ui.sent.length = 0;
   ui.UI.page = 'main';
+  ui.UI.started = true;
+  ui.UI.finishingSetup = false;
+  ui.UI.welcomeOpen.clear();
   ui.UI.trail.length = 0;
   ui.UI.cmdDays = 7;
   ui.UI.cmdSort = 'run_s';
@@ -47,6 +50,85 @@ const tuned = ui.fixture('tuned');
 const tunedHistory = ui.fixture('tuned-history');
 const backfill = ui.fixture('backfill');
 const others = ui.fixture('others');
+
+test('first launch explains setup without installing integrations or queuing work', () => {
+  ui.UI.started = false;
+  const fresh = { ...busy, setup:{complete:false,error:null}, copy_result:null };
+  ui.setState(fresh);
+  eq(ui.UI.page, 'welcome');
+  has(ui.view(), 'Connect your coding agents');
+  has(ui.view(), 'Catch commands with shims');
+  has(ui.view(), 'Optionally use the CLI directly');
+  has(ui.view(), 'Headroom learns their memory use and runtime');
+  eq(ui.sent, []);
+  ui.click({ act:'copy', text:'headroom hook install' });
+  ui.click({ act:'copy', text:'headroom shims install' });
+  const instruction = ui.find({ act:'copy' }).find(b => b.dataset.text.includes('Run heavy tests')).dataset.text;
+  ui.click({ act:'copy', text:instruction });
+  eq(ui.sent, [
+    {cmd:'copy',text:'headroom hook install'},
+    {cmd:'copy',text:'headroom shims install'},
+    {cmd:'copy',text:instruction},
+  ]);
+  has(instruction, 'headroom run -- <command>');
+  has(instruction, 'headroom ls');
+  lacks(ui.view(), 'Copied');
+  ui.setState(fresh);
+  eq(ui.UI.page, 'welcome');
+});
+
+test('continuing setup waits for persistence, shows failure, and exits after successful retry', () => {
+  ui.UI.started = false;
+  const fresh = { ...busy, setup:{complete:false,error:null} };
+  ui.setState(fresh);
+  ui.click({ act:'finish_setup' });
+  eq(ui.sent, [{cmd:'finish_setup'}]);
+  eq(ui.UI.page, 'welcome');
+  eq(ui.find({ act:'finish_setup' })[0].disabled, true);
+  ui.setState({ ...fresh, setup:{complete:false,error:'<save failed>'} });
+  eq(ui.UI.page, 'welcome');
+  has(ui.html(), '&lt;save failed&gt;');
+  eq(ui.find({ act:'finish_setup' })[0].disabled, false);
+  ui.click({ act:'finish_setup' });
+  eq(ui.sent, [{cmd:'finish_setup'},{cmd:'finish_setup'}]);
+  ui.setState({ ...fresh, setup:{complete:true,error:null} });
+  eq(ui.UI.page, 'main');
+  eq(ui.UI.trail.length, 0);
+  eq(document.activeElement.id, 'page-title');
+  ui.UI.started = false;
+  ui.setState({ ...fresh, setup:{complete:true,error:null} });
+  eq(ui.UI.page, 'main', 'completed setup does not reopen on launch');
+});
+
+test('welcome can be revisited without resetting completed setup', () => {
+  ui.setState({ ...busy, setup:{complete:true,error:null} });
+  ui.click({ act:'goto', page:'settings' }, 0);
+  ui.click({ act:'goto', page:'welcome' });
+  eq(ui.UI.page, 'welcome');
+  ui.UI.welcomeOpen.add('cli');
+  document.getElementById('welcome-detail-cli').focus();
+  ui.setState({ ...busy, setup:{complete:true,error:null} });
+  has(ui.html(), 'data-welcome-detail="cli" open');
+  eq(document.activeElement.id, 'welcome-detail-cli', 'live updates preserve disclosure focus');
+  ui.click({ act:'finish_setup' });
+  eq(ui.UI.page, 'main');
+  eq(ui.sent, []);
+  eq(ui.UI.trail.length, 0);
+});
+
+test('welcome copy feedback reflects the confirmed native result', () => {
+  ui.UI.started = false;
+  const fresh = { ...busy, setup:{complete:false,error:null}, copy_result:null };
+  ui.setState(fresh);
+  ui.click({ act:'copy', text:'headroom hook install' });
+  lacks(ui.view(), 'Copied');
+  ui.setState({ ...fresh, copy_result:{text:'headroom hook install',ok:false,message:'<clipboard failed>'} });
+  has(ui.html(), '&lt;clipboard failed&gt;');
+  lacks(ui.view(), 'Copied');
+  ui.setState({ ...fresh, copy_result:{text:'headroom hook install',ok:true,message:'Copied to clipboard.'} });
+  has(ui.view(), 'Copied');
+  lacks(ui.view(), 'clipboard failed');
+});
 
 test('state updates preserve the selected text and direction in both settings inputs', () => {
   ui.setState(busy);

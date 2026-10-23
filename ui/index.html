@@ -312,6 +312,26 @@ button:disabled[data-tip]{ cursor:default; }
 .detail .v{ overflow-wrap:anywhere; }
 .detail .full{ grid-column:1 / -1; display:flex; gap:6px; margin-top:4px; }
 
+.welcome-brand{display:flex;align-items:center;justify-content:space-between;font-size:12px;font-weight:650}
+.welcome-brand span:last-child{font-size:11px;font-weight:500;color:var(--text-dim)}
+.welcome-intro{padding:18px 14px 14px}
+.welcome-intro h1{font-size:20px;line-height:1.2;font-weight:650;letter-spacing:-.3px;margin-bottom:8px}
+.welcome-intro p{font-size:12px;line-height:1.45;color:var(--text-dim)}
+.welcome-step{padding:10px 14px;border-top:1px solid var(--sep-soft)}
+.welcome-step h2{font-size:13px;font-weight:650;display:flex;align-items:center;gap:9px}
+.welcome-step .number{font-size:11px;color:var(--text-faint);font-weight:500}
+.welcome-step p{font-size:11.5px;line-height:1.4;color:var(--text-dim);margin:6px 0 9px}
+.welcome-actions{display:flex;align-items:center;gap:10px}
+.welcome-actions .link{font-size:11px;color:var(--text-dim);text-decoration:underline;text-underline-offset:3px}
+.welcome-step details{font-size:11px;color:var(--text-dim);margin-top:9px}
+.welcome-step summary{cursor:pointer}
+.welcome-step pre{margin-top:6px;padding:8px;background:var(--bg-elev);font-size:10.5px;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--text)}
+.welcome-footer{display:flex;justify-content:space-between;align-items:center;width:100%;padding:0 12px}
+.welcome-footer span{font-size:10.5px;color:var(--text-dim)}
+.foot .welcome-footer button{flex:0 0 auto;font-weight:650;color:var(--text);padding:12px 10px}
+.welcome-note{padding:8px 14px 12px;font-size:10.5px;color:var(--text-faint);line-height:1.35}
+#preview-feedback{min-height:15px;padding:0 14px 8px;color:var(--text-dim);font-size:11px}
+
 /* Footer nav */
 .foot{
   flex:0 0 auto; display:flex; background:var(--bg-elev); border-top:1px solid var(--sep);
@@ -465,7 +485,22 @@ const LIVE = !!window.ipc;
 if (LIVE) document.body.classList.add("live");
 
 /** Rust calls this on every sample (1 s): window.__setState({...}) */
-window.__setState = (s) => { STATE = s; render(); };
+window.__setState = (s) => {
+  STATE = s;
+  if (!UI.started){
+    UI.started = true;
+    if (s.setup?.complete === false) UI.page = "welcome";
+  }
+  if (UI.finishingSetup){
+    if (s.setup?.complete){
+      UI.finishingSetup = false;
+      UI.page = "main"; UI.trail = [];
+      render({ scroll:0 }); return;
+    }
+    if (s.setup?.error) UI.finishingSetup = false;
+  }
+  render();
+};
 
 function send(msg){
   if (LIVE) window.ipc.postMessage(JSON.stringify(msg));
@@ -514,7 +549,10 @@ function reasonText(r){
    ═══════════════════════════════════════════════════════════ */
 let STATE = null;
 const UI = {
-  page: "main",           // main | history | commands | profile | others | settings
+  page: "main",           // welcome | main | history | commands | profile | others | settings
+  started: false,
+  finishingSetup: false,
+  welcomeOpen: new Set(),
   profileKey: null,
   trail: [],             // Previous page, reader position, and the control that opened this page
   cmdDays: 7,             // Commands page: window in days, and the column it sorts by
@@ -661,7 +699,8 @@ function render(destination = null){
   const occurrence = control ? controlsWithKey(control).indexOf(active) : -1;
 
   $("head").innerHTML = renderHead(STATE);
-  view.innerHTML = UI.page === "main"     ? renderMain(STATE)
+  view.innerHTML = UI.page === "welcome"  ? renderWelcome(STATE)
+                 : UI.page === "main"     ? renderMain(STATE)
                  : UI.page === "history"  ? renderHistory(STATE)
                  : UI.page === "commands" ? renderCommands(STATE)
                  : UI.page === "profile"  ? renderProfile(STATE)
@@ -702,6 +741,7 @@ const PRESSURE_TIP = {
 };
 
 function renderHead(S){
+  if (UI.page === "welcome") return '<div class="welcome-brand"><span>Headroom</span><span>Getting started</span></div>';
   const m = S.system;
   const stat = (value, label, tip) => `<div data-tip="${esc(tip)}"><b>${value}</b><span>${label}</span></div>`;
   const usedPct = Math.min(100, m.mem_used / m.mem_total * 100);
@@ -973,6 +1013,7 @@ function renderDetail(j){
 }
 
 function renderFoot(){
+  if (UI.page === "welcome") return `<div class="welcome-footer"><span>Revisit this in Settings</span><button data-act="finish_setup"${UI.finishingSetup ? " disabled" : ""}>${UI.finishingSetup ? "Saving…" : "Continue to Queue"}</button></div>`;
   const selected = UI.page === "profile" ? UI.profileFrom || "history" : UI.page;
   return [["main", "Queue"], ["history", "History"], ["commands", "Commands"], ["others", "Other apps"], ["settings", "Settings"]]
     .map(([page, label]) => `<button class="${page === selected ? "selected" : ""}" data-act="goto" data-page="${page}"${page === selected ? ' aria-current="page"' : ""}${UI.page === "profile" && page === selected ? ' data-back="true"' : ""}>${label}</button>`).join("");
@@ -1144,6 +1185,25 @@ function stepper(key, label, value, step, fmt, min, max){
   </span>`;
 }
 
+const AGENT_INSTRUCTION = "Run heavy tests, builds, and type checks with headroom run -- <command>. Use headroom ls to inspect running and queued jobs.";
+function renderWelcome(S){
+  const copied = text => S.copy_result?.text === text && S.copy_result.ok;
+  const copy = (text, label) => `<button class="chip-btn" data-act="copy" data-text="${esc(text)}">${copied(text) ? "Copied" : label}</button>`;
+  const detail = (key, title, body) => `<details data-welcome-detail="${key}"${UI.welcomeOpen.has(key) ? " open" : ""}><summary id="welcome-detail-${key}">${title}</summary>${body}</details>`;
+  const agents = AGENTS.map(([key, name]) => {
+    const [cls, label] = HOOK_STATUS[S.hooks[key] || "absent"] || HOOK_STATUS.review_unknown;
+    return `<div class="agent"><span class="an">${name}</span><span class="gtag ${cls}">${label}</span></div>`;
+  }).join("");
+  return `
+    <div class="welcome-intro"><h1 id="page-title" tabindex="-1">Welcome to Headroom</h1><p>Put heavy commands in one queue. Headroom learns their memory use and runtime as they finish.</p></div>
+    <section class="welcome-step" aria-labelledby="welcome-agents"><h2 id="welcome-agents"><span class="number num">01</span> Connect your coding agents</h2><p>Know which agent started each job. Hooks queue whole commands, including supported work that bypasses your shell's PATH.</p><div class="welcome-actions">${copy("headroom hook install", "Copy setup command")}<button class="link" data-act="goto" data-page="settings" data-section="agent-hooks">Agent settings</button></div>${detail("agents", "Codex, Claude Code and pi", `<pre>headroom hook install</pre><p>Codex also asks you to review Headroom in /hooks. Hooks can allow extra queue time for Claude Code and pi.</p>${agents}`)}</section>
+    <section class="welcome-step" aria-labelledby="welcome-shims"><h2 id="welcome-shims"><span class="number num">02</span> Catch commands with shims</h2><p>Queue supported tools from terminals, scripts and agents through PATH. Keep using your normal commands and installed tool versions.</p><div class="welcome-actions">${copy("headroom shims install", "Copy shim setup")}</div>${detail("shims", "How to finish setup", `<pre>headroom shims install</pre><p>Run this in your terminal, then follow the PATH instruction it prints for your shell. Put that line after your version manager in your shell config. New terminals pick it up. Shims and agent hooks can work together.</p>`)}</section>
+    <section class="welcome-step" aria-labelledby="welcome-cli"><h2 id="welcome-cli"><span class="number num">03</span> Optionally use the CLI directly</h2><p>Choose what enters the queue, or give your agent an instruction it can follow.</p><div class="welcome-actions">${copy(AGENT_INSTRUCTION, "Copy agent instruction")}</div>${detail("cli", "Example command and instruction", `<pre>headroom run -- pnpm test\nheadroom ls</pre><p>${esc(AGENT_INSTRUCTION)}</p><p>Add the instruction to your agent's saved project instructions to reuse it in future sessions.</p>`)}</section>
+    <div class="welcome-note">Choose one approach or combine them. Only commands routed through Headroom build its job history and estimates.</div>
+    ${S.copy_result && !S.copy_result.ok ? `<div id="welcome-copy-result" class="welcome-note" role="alert">${esc(S.copy_result.message)}</div>` : ""}
+    ${S.setup?.error && !UI.finishingSetup ? `<div class="welcome-note" role="alert">${esc(S.setup.error)}</div>` : ""}`;
+}
+
 function renderSettings(S){
   const c = S.settings;
   const installs = AGENTS.filter(([k]) => ["not_installed", "stale"].includes(S.hooks[k]));
@@ -1236,6 +1296,7 @@ function renderSettings(S){
         data-act="clear_data" data-confirm="clear-data">${confirming("clear-data") ? "Clear permanently? Click again" : "Clear all usage data"}</button></div>
       ${S.data_clear ? `<div class="h" role="${S.data_clear.ok ? "status" : "alert"}">${esc(S.data_clear.message)}</div>` : ""}
     </div>
+    <div class="set"><div class="k">Getting started</div><div class="h">Review ways to connect your commands to Headroom.</div><div class="ctl"><button class="chip-btn" data-act="goto" data-page="welcome">Open welcome</button></div></div>
     <div class="quit">
       <span>${S.attached
         ? "The queue runs in another headroomd; quitting closes only this menu bar."
@@ -1320,6 +1381,10 @@ $("pop").addEventListener("click", (e) => {
     case "snippet": UI.snippet = !UI.snippet; break;
     case "cmd_days": UI.cmdDays = Number(d.val); break;
     case "cmd_sort": UI.cmdSort = d.val; break;
+    case "finish_setup":
+      if (STATE.setup?.complete){ UI.trail = []; UI.page = "main"; render({ scroll:0 }); return; }
+      UI.finishingSetup = true;
+      send({ cmd:"finish_setup" }); render(); return;
     case "hold":    send({ cmd:"hold", on: !STATE.held }); return;
     case "freeze": case "resume": case "kill": case "cancel": case "top":
                     send({ cmd: d.act, id }); return;
@@ -1353,6 +1418,10 @@ $("pop").addEventListener("input", (e) => {
   if (k === "test" && e.target.value.trim()) send({ cmd:"classify", text: e.target.value });
   render();
 });
+$("pop").addEventListener("toggle", e => {
+  const key = e.target.dataset?.welcomeDetail;
+  if (key) e.target.open ? UI.welcomeOpen.add(key) : UI.welcomeOpen.delete(key);
+}, true);
 $("pop").addEventListener("keydown", (e) => {
   const button = e.target.closest?.('[role="button"][data-act]');
   if (button && (e.key === "Enter" || e.key === " ")){
@@ -1364,7 +1433,7 @@ $("pop").addEventListener("keydown", (e) => {
     const p = UI.drafts.pattern.trim();
     if (p){ UI.drafts.pattern = ""; send({ cmd:"add_pattern", pattern: p }); }
   }
-  if (e.key === "Escape" && UI.page !== "main"){
+  if (e.key === "Escape" && UI.page !== "main" && UI.page !== "welcome"){
     e.preventDefault?.();
     navigate(UI.page === "profile" ? UI.profileFrom || "history" : "main", null, true);
   }
@@ -1566,6 +1635,7 @@ const COMMANDS = [
 function base(over){
   return Object.assign({
     system: { pressure:"normal", mem_total:G(36), mem_used:G(27.1), mem_available:G(8.9), swap_used:G(0.4), cpu_pct:63 },
+    setup:{complete:true,error:null}, copy_result:null,
     held:false, hooks:{ claude:"installed", codex:"installed", pi:"installed" }, queue_reason:null,
     running:[], queued:[], banners:[],
     last_day: { runs:3, failed:1, killed:1, waited:2, waited_s:254, longest_wait_s:131, wait_p50_s:12, wait_p95_s:131, went_first:1, more:false },
@@ -1714,7 +1784,12 @@ function mockApply(m){
     case "add_pattern": if (!S.settings.patterns.includes(m.pattern)) S.settings.patterns.push(m.pattern); break;
     case "remove_pattern": S.settings.patterns = S.settings.patterns.filter(p => p !== m.pattern); break;
     case "classify": S.classify = mockClassify(m.text); break;
-    case "copy": case "quit": return;
+    case "finish_setup":
+      S.setup = {complete:true,error:null};
+      window.__setState(S); return;
+    case "copy":
+      S.copy_result = {text:m.text,ok:false,message:"Copy commands from the native app, or select the text in this browser preview."}; break;
+    case "quit": return;
   }
   render();
 }
