@@ -766,10 +766,10 @@ function renderHead(S){
         <div class="reserve" style="width:${reservePct}%"></div>
       </div>
     <div class="day-row ${S.queue_budget ? "five " : ""}num">
-      ${stat(`${gb(m.mem_available)} GB`, "Mac available", `${gb(m.mem_available)} GB available on this Mac, including reclaimable memory. Queue admissions also subtract the ${gb(S.settings.headroom)} GB reserve and expected growth of running jobs.`)}
+      ${stat(`${gb(m.mem_available)} GB`, "available", `${gb(m.mem_available)} GB available on this Mac, including reclaimable memory. Queue admissions also subtract the ${gb(S.settings.headroom)} GB reserve and expected growth of running jobs.`)}
       ${stat(`${gb(m.swap_used)} GB`, "swap", `Memory moved to disk: ${gb(m.swap_used)} GB currently in swap. This is system-wide usage, not a single job's memory.`)}
       ${stat(`${Math.round(m.cpu_pct)}%`, "CPU", `CPU in use across all cores: ${Math.round(m.cpu_pct)}% system-wide.`)}
-      ${S.queue_budget ? stat(`${gb(S.queue_budget.available)} GB`, "job budget", `Job budget ${gb(S.queue_budget.available)} GB = Mac available ${gb(m.mem_available)} GB − reserve ${gb(S.settings.headroom)} GB − expected job growth ${gb(S.queue_budget.growth)} GB, with a minimum of zero. Pressure, CPU and queue-order checks still apply.`) + stat(`${gb(S.queue_budget.growth)} GB`, "growth", `${gb(S.queue_budget.growth)} GB reserved for expected growth across ${S.running.filter(j => j.state === "running").length} running jobs. This is an estimate, not memory already used.`) : ""}
+      ${S.queue_budget ? stat(`${gb(S.queue_budget.available)} GB`, "job budget", `Job budget ${gb(S.queue_budget.available)} GB = available ${gb(m.mem_available)} GB − reserve ${gb(S.settings.headroom)} GB − expected job growth ${gb(S.queue_budget.growth)} GB, with a minimum of zero. Pressure, CPU and queue-order checks still apply.`) + stat(`${gb(S.queue_budget.growth)} GB`, "growth", `${gb(S.queue_budget.growth)} GB reserved for expected growth across ${S.running.filter(j => j.state === "running").length} running jobs. This is an estimate, not memory already used.`) : ""}
     </div>
     ${alert}`;
 }
