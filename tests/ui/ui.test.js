@@ -1132,6 +1132,36 @@ test('hook status per agent, with the install command to copy', () => {
   lacks(ui.page(), 'wsq');
 });
 
+test('Hook settings scrolls to Agent hooks from the queue and from Settings', () => {
+  const state = { ...busy, hooks: { claude:'installed', codex:'needs_review', pi:'absent' } };
+  const section = document.getElementById('agent-hooks');
+  const originalScroll = section.scrollIntoView;
+  let jumps = 0;
+  section.scrollIntoView = options => {
+    eq(options, { block:'start' }); jumps++;
+    document.getElementById('view').scrollTop = 600;
+  };
+  try {
+    ui.setState(state);
+    ui.click({ act:'goto', page:'settings', section:'agent-hooks' });
+    eq(ui.UI.page, 'settings');
+    has(ui.html(), 'id="agent-hooks" tabindex="-1"');
+    eq(document.activeElement.id, 'agent-hooks');
+    eq(jumps, 1);
+    eq(document.getElementById('view').scrollTop, 600);
+    ui.setState(state);
+    eq(jumps, 1, 'telemetry updates preserve scroll rather than jumping again');
+    document.getElementById('view').scrollTop = 0;
+    const depth = ui.UI.trail.length;
+    ui.click({ act:'goto', page:'settings', section:'agent-hooks' });
+    eq(jumps, 2, 'jump still works when already on Settings');
+    eq(ui.UI.trail.length, depth, 'jump within Settings adds no history entry');
+    ui.key('Escape');
+    eq(ui.UI.page, 'main');
+    eq(document.activeElement.dataset.section, 'agent-hooks', 'return focus targets the header shortcut');
+  } finally { section.scrollIntoView = originalScroll; }
+});
+
 test('confirmed Codex hook problems show approval and disabled notices', () => {
   const states = [
     ['needs_review', 'hook needs approval in /hooks', 'Codex needs review',

@@ -384,6 +384,7 @@ button:disabled[data-tip]{ cursor:default; }
 
 .set{ padding:10px 14px; border-bottom:1px solid var(--sep-soft); }
 .set .k{ font-weight:600; font-size:12.5px; }
+#agent-hooks{ scroll-margin-top:44px; }
 .set .h{ font-size:11px; color:var(--text-dim); margin-top:2px; }
 .set .ctl{ margin-top:7px; display:flex; align-items:center; gap:8px; }
 .stepper{ display:inline-flex; align-items:center; border:1px solid var(--sep); border-radius:7px; overflow:hidden; }
@@ -610,14 +611,18 @@ function animateTaskChanges(view, before){
 // Values and toggle states change on each reply; the action itself stays put.
 function controlKey(el){
   const d = el.dataset;
-  return JSON.stringify([d.act, d.id, d.key, d.name, d.page, d.pattern, d.confirm, d.step, d.run,
+  return JSON.stringify([d.act, d.id, d.key, d.name, d.page, d.section, d.pattern, d.confirm, d.step, d.run,
     d.act === "set" && d.key !== "kill_mode" ? null : d.val]);
 }
 const controlsWithKey = key => [...document.querySelectorAll("[data-act]")]
   .filter(el => controlKey(el) === key);
 
 function navigate(page, trigger, back = false){
-  if (!back && page === UI.page) return;
+  const section = !back ? trigger?.dataset?.section : null;
+  if (!back && page === UI.page){
+    if (section) render({ scroll:$("view").scrollTop, section });
+    return;
+  }
   const saved = back ? UI.trail.pop() : null;
   if (!back){
     const key = trigger?.dataset?.act ? controlKey(trigger) : null;
@@ -626,7 +631,7 @@ function navigate(page, trigger, back = false){
   }
   UI.page = saved?.page || page;
   if (saved){ UI.profileKey = saved.profileKey; UI.profileFrom = saved.profileFrom; }
-  render(saved || { scroll:0 });
+  render(saved || { scroll:0, section });
 }
 
 function render(destination = null){
@@ -671,9 +676,10 @@ function render(destination = null){
 
   // Keep the reader's place and the cursor across the 1 s rerender.
   view.scrollTop = destination ? destination.scroll : scroll;
-  const target = destination
+  const section = destination?.section ? $(destination.section) : null;
+  const target = section || (destination
     ? (destination.control && controlsWithKey(destination.control)[destination.occurrence]) || $("page-title")
-    : focus ? $(focus) : control ? controlsWithKey(control)[occurrence] : null;
+    : focus ? $(focus) : control ? controlsWithKey(control)[occurrence] : null);
   if (target && !target.disabled){
     // Replacement rows have lost :focus-within, which hides queued actions.
     // Reveal the row until focus restores that selector, including in WebKit.
@@ -683,6 +689,7 @@ function render(destination = null){
     row?.classList.remove("restoring-focus");
     if (!destination && caret != null) target.setSelectionRange(caret, selectionEnd, selectionDirection);
   }
+  section?.scrollIntoView({ block:"start" });
   if (before) animateTaskChanges(view, before);
   if (!LIVE) renderTray(STATE);
   refreshTip();
@@ -703,7 +710,7 @@ function renderHead(S){
   const gaps = AGENTS.filter(([k]) => ["not_installed", "stale", "needs_review", "disabled"].includes(S.hooks[k]));
   const alert = gaps.length
     ? `<div class="alert"><span>⚠︎ ${gaps.map(([k, n]) => `${n}: ${HOOK_STATUS[S.hooks[k]][3]}`).join(". ")}.</span>
-         <button data-act="goto" data-page="settings">Hook settings</button></div>`
+         <button data-act="goto" data-page="settings" data-section="agent-hooks">Hook settings</button></div>`
     : "";
   return `
     <div class="row1">
@@ -1203,7 +1210,7 @@ function renderSettings(S){
       </div>
     </div>
     <div class="set">
-      <div class="k">Agent hooks</div>
+      <h2 class="k" id="agent-hooks" tabindex="-1">Agent hooks</h2>
       <div class="h">Each agent's hook routes its heavy shell commands through <span class="mono">headroom run</span>.</div>
       ${AGENTS.map(([k, name, where]) => {
         const st = S.hooks[k] || "absent";

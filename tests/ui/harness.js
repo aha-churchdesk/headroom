@@ -28,6 +28,7 @@ function node(tag) {
     addEventListener(type, fn) { listeners[type] = fn; },
     _listeners: listeners,
     append() {},
+    scrollIntoView() {},
     focus() { document.activeElement = this; },
     setSelectionRange(start, end, direction = 'none') {
       this.selectionStart = start;
