@@ -11,8 +11,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::model::HistoryEntry;
@@ -23,6 +23,13 @@ pub const HOME_ENV: &str = "HEADROOM_HOME";
 /// `sun_path` is 104 bytes on macOS, including the terminating NUL.
 const SOCKET_MAX: usize = 104;
 static SAVE_ID: AtomicU64 = AtomicU64::new(0);
+
+/// App preferences that do not affect the scheduler or agent hooks.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct UiPreferences {
+    pub setup_complete: bool,
+}
 
 unsafe extern "C" {
     fn confstr(name: i32, buf: *mut u8, len: usize) -> usize;
@@ -157,6 +164,14 @@ impl Store {
         self.save("config.json", c)
     }
 
+    pub fn load_ui_preferences(&self) -> UiPreferences {
+        self.load("ui.json")
+    }
+
+    pub fn save_ui_preferences(&self, preferences: &UiPreferences) -> io::Result<()> {
+        self.save("ui.json", preferences)
+    }
+
     pub fn load_profiles(&self) -> Profiles {
         self.load("profiles.json")
     }
@@ -277,6 +292,10 @@ mod tests {
             ..Config::default()
         };
         s.save_config(&config).unwrap();
+        let preferences = UiPreferences {
+            setup_complete: true,
+        };
+        s.save_ui_preferences(&preferences).unwrap();
         for name in [
             "profiles.json",
             "history.json",
@@ -295,6 +314,7 @@ mod tests {
         assert!(s.load_history().is_empty());
         assert_eq!(s.load_tally(), Tally::default());
         assert_eq!(s.load_config(), config);
+        assert_eq!(s.load_ui_preferences(), preferences);
         assert_eq!(
             fs::read_to_string(s.root().join("unrelated.txt")).unwrap(),
             "keep"
@@ -309,6 +329,49 @@ mod tests {
             assert!(!s.root().join(name).exists());
         }
         s.clear_data().unwrap();
+    }
+
+    #[test]
+    fn ui_preferences_default_to_incomplete_and_survive_reopening() {
+        let s = tmp("ui-preferences");
+        assert_eq!(s.load_ui_preferences(), UiPreferences::default());
+        assert!(!s.root().join("ui.json").exists());
+        let preferences = UiPreferences {
+            setup_complete: true,
+        };
+        s.save_ui_preferences(&preferences).unwrap();
+        assert_eq!(
+            Store::at(s.root()).unwrap().load_ui_preferences(),
+            preferences
+        );
+        assert!(!s.root().join("config.json").exists());
+        assert_eq!(fs::read_dir(s.root()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn corrupt_ui_preferences_require_setup_again() {
+        let s = tmp("ui-corrupt");
+        fs::write(s.root().join("ui.json"), "{ truncated").unwrap();
+        assert!(!s.load_ui_preferences().setup_complete);
+        assert_eq!(
+            fs::read_to_string(s.root().join("ui.json.corrupt")).unwrap(),
+            "{ truncated"
+        );
+    }
+
+    #[test]
+    fn a_failed_ui_save_cleans_up_its_temporary_file() {
+        let s = tmp("ui-save-failed");
+        fs::create_dir(s.root().join("ui.json")).unwrap();
+        assert!(
+            s.save_ui_preferences(&UiPreferences {
+                setup_complete: true
+            })
+            .is_err()
+        );
+        assert!(!s.load_ui_preferences().setup_complete);
+        assert!(s.root().join("ui.json").is_dir());
+        assert_eq!(fs::read_dir(s.root()).unwrap().count(), 1);
     }
 
     #[test]

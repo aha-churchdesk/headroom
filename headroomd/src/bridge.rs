@@ -26,6 +26,7 @@ pub enum UiCmd {
     Move { id: String, to: usize },
     Dismiss { id: String },
     Copy { text: String },
+    FinishSetup,
     ResetProfile { key: String },
     ClearData,
     Set { key: String, value: Value },
@@ -40,6 +41,7 @@ pub enum Do {
     Control(Control),
     Dismiss(String),
     Copy(String),
+    FinishSetup,
     Login(bool),
     Classify(String),
     Quit,
@@ -70,6 +72,7 @@ pub fn translate(cmd: UiCmd, cfg: &Config) -> Result<Do, String> {
         UiCmd::ClearData => Do::Control(Control::ClearData),
         UiCmd::Dismiss { id } => Do::Dismiss(id),
         UiCmd::Copy { text } => Do::Copy(text),
+        UiCmd::FinishSetup => Do::FinishSetup,
         UiCmd::Classify { text } => Do::Classify(text),
         UiCmd::Quit => Do::Quit,
         UiCmd::AddPattern { pattern } => {
@@ -173,6 +176,11 @@ mod tests {
         );
         assert!(t(r#"{"cmd":"self_destruct"}"#).is_err());
         assert!(t(r#"{"cmd":"pin","id":"4"}"#).is_err(), "missing field");
+    }
+
+    #[test]
+    fn finishing_setup_is_an_app_action() {
+        assert_eq!(t(r#"{"cmd":"finish_setup"}"#), Ok(Do::FinishSetup));
     }
 
     #[test]

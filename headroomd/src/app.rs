@@ -18,7 +18,7 @@ use headroom_core::hookio::Agent;
 use headroom_core::hooksettings::{self, Scope, Status};
 use headroom_core::profile::Profiles;
 use headroom_core::protocol::{ClientMsg, Control, DaemonMsg, Listing, request};
-use headroom_core::store::Store;
+use headroom_core::store::{Store, UiPreferences};
 use headroom_core::tally::Tally;
 use serde_json::Value;
 
@@ -63,6 +63,9 @@ pub struct App {
     listing: Option<Listing>,
     attached: bool,
     data_clear: Option<Value>,
+    ui_preferences: UiPreferences,
+    setup_error: Option<String>,
+    copy_result: Option<Value>,
     /// The last thing the daemon refused, for stderr; not shown in the page.
     pub last_error: Option<String>,
 }
@@ -107,6 +110,7 @@ impl App {
             cfg: store.load_config(),
             profiles: store.load_profiles(),
             tally: store.load_tally(),
+            ui_preferences: store.load_ui_preferences(),
             store,
             socket,
             home,
@@ -122,6 +126,8 @@ impl App {
             listing: None,
             attached: false,
             data_clear: None,
+            setup_error: None,
+            copy_result: None,
             last_error: None,
         };
         app.refresh_settings();
@@ -230,6 +236,11 @@ impl App {
             },
         );
         state["data_clear"] = self.data_clear.clone().unwrap_or(Value::Null);
+        state["setup"] = serde_json::json!({
+            "complete": self.ui_preferences.setup_complete,
+            "error": self.setup_error,
+        });
+        state["copy_result"] = self.copy_result.clone().unwrap_or(Value::Null);
         Some(state)
     }
 
@@ -253,6 +264,20 @@ impl App {
         };
         match action {
             Do::Quit => return Next::Quit,
+            Do::FinishSetup => {
+                let mut preferences = self.ui_preferences.clone();
+                preferences.setup_complete = true;
+                match self.store.save_ui_preferences(&preferences) {
+                    Ok(()) => {
+                        self.ui_preferences = preferences;
+                        self.setup_error = None;
+                    }
+                    Err(e) => {
+                        self.setup_error = Some(format!("Could not save setup: {e}"));
+                    }
+                }
+                return Next::Continue;
+            }
             Do::Control(c) => {
                 if c == Control::ClearData {
                     let result = match request(&self.socket, &ClientMsg::Control(c)) {
@@ -297,9 +322,8 @@ impl App {
                 self.dismissed.insert(id);
             }
             Do::Copy(text) => {
-                if let Err(e) = copy(&text) {
-                    self.last_error = Some(format!("copy: {e}"));
-                }
+                let result = copy(&text);
+                self.record_copy_result(&text, result);
             }
             Do::Login(on) => match login::set(&self.home, on, &self.exe) {
                 Ok(l) => self.login = l,
@@ -310,16 +334,41 @@ impl App {
         self.poll();
         Next::Continue
     }
+
+    fn record_copy_result(&mut self, text: &str, result: std::io::Result<()>) {
+        let (ok, message) = match result {
+            Ok(()) => (true, "Copied to clipboard.".to_string()),
+            Err(e) => {
+                self.last_error = Some(format!("copy: {e}"));
+                (false, format!("Could not copy: {e}"))
+            }
+        };
+        self.copy_result = Some(serde_json::json!({
+            "text": text,
+            "ok": ok,
+            "message": message,
+        }));
+    }
 }
 
 fn copy(text: &str) -> std::io::Result<()> {
-    let mut child = Command::new("/usr/bin/pbcopy")
-        .stdin(Stdio::piped())
-        .spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(text.as_bytes())?;
+    copy_with_command(text, &mut Command::new("/usr/bin/pbcopy"))
+}
+
+fn copy_with_command(text: &str, command: &mut Command) -> std::io::Result<()> {
+    let mut child = command.stdin(Stdio::piped()).spawn()?;
+    let written = if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(text.as_bytes())
+    } else {
+        Err(std::io::Error::other("clipboard input unavailable"))
+    };
+    let status = child.wait()?;
+    written?;
+    if !status.success() {
+        return Err(std::io::Error::other(format!(
+            "pbcopy exited with {status}"
+        )));
     }
-    child.wait()?;
     Ok(())
 }
 
@@ -406,6 +455,7 @@ mod tests {
     #[test]
     fn clear_data_reports_durable_success_and_preserves_settings() {
         let (mut app, _d) = with_daemon("clear-data");
+        app.command(r#"{"cmd":"finish_setup"}"#);
         app.command(r#"{"cmd":"set","key":"wait_cap_s","value":123}"#);
         app.command(r#"{"cmd":"hold","on":true}"#);
         // Persisted legacy data is cleared even if this daemon did not load it.
@@ -419,11 +469,133 @@ mod tests {
         assert_eq!(state["data_clear"]["ok"], true);
         assert_eq!(state["held"], true);
         assert_eq!(state["settings"]["wait_cap_s"], 123);
+        assert_eq!(state["setup"]["complete"], true);
+        assert!(app.store.load_ui_preferences().setup_complete);
         assert_eq!(app.store.load_config().wait_cap_s, 123);
         assert!(!app.store.root().join("profiles.json.corrupt").exists());
         assert_eq!(app.store.load_profiles(), Profiles::default());
         assert!(app.store.load_history().is_empty());
         assert_eq!(app.store.load_tally(), Tally::default());
+    }
+
+    #[test]
+    fn finishing_setup_is_durable_and_does_not_change_scheduler_state() {
+        let (mut app, _d) = with_daemon("finish-setup");
+        app.command(r#"{"cmd":"set","key":"wait_cap_s","value":123}"#);
+        app.command(r#"{"cmd":"hold","on":true}"#);
+        let config = fs::read(app.store.root().join("config.json")).unwrap();
+        let mut before = app.state().unwrap();
+        assert_eq!(
+            before["setup"],
+            serde_json::json!({"complete": false, "error": null})
+        );
+        assert_eq!(before["copy_result"], Value::Null);
+        assert_eq!(app.command(r#"{"cmd":"finish_setup"}"#), Next::Continue);
+        before["setup"]["complete"] = Value::Bool(true);
+        assert_eq!(app.state().unwrap(), before);
+        assert_eq!(
+            fs::read(app.store.root().join("config.json")).unwrap(),
+            config
+        );
+        let mut reopened = App::new(
+            app.store.clone(),
+            app.home.clone(),
+            app.cli.clone(),
+            app.exe.clone(),
+        );
+        assert!(reopened.poll());
+        assert_eq!(
+            reopened.state().unwrap()["setup"],
+            serde_json::json!({"complete": true, "error": null})
+        );
+        reopened.refresh_settings();
+        assert!(reopened.ui_preferences.setup_complete);
+    }
+
+    #[test]
+    fn finishing_setup_without_a_daemon_only_saves_ui_preferences() {
+        let root = dir("finish-without-daemon");
+        let mut app = App::new(
+            Store::at(root.join("data")).unwrap(),
+            root.join("home"),
+            "h".into(),
+            "d".into(),
+        );
+        app.command(r#"{"cmd":"finish_setup"}"#);
+        assert!(app.store.load_ui_preferences().setup_complete);
+        assert_eq!(app.last_error, None, "no daemon request is needed");
+        assert!(!app.store.root().join("config.json").exists());
+    }
+
+    #[test]
+    fn finishing_setup_save_failure_stays_incomplete_until_a_successful_retry() {
+        let (mut app, _d) = with_daemon("finish-setup-failed");
+        let path = app.store.root().join("ui.json");
+        fs::create_dir(&path).unwrap();
+        app.command(r#"{"cmd":"finish_setup"}"#);
+        let state = app.state().unwrap();
+        assert_eq!(state["setup"]["complete"], false);
+        assert!(
+            state["setup"]["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("Could not save setup:")
+        );
+        assert!(!app.store.load_ui_preferences().setup_complete);
+        let restarted = App::new(
+            app.store.clone(),
+            app.home.clone(),
+            app.cli.clone(),
+            app.exe.clone(),
+        );
+        assert!(!restarted.ui_preferences.setup_complete);
+        fs::remove_dir(&path).unwrap();
+        app.command(r#"{"cmd":"finish_setup"}"#);
+        assert_eq!(
+            app.state().unwrap()["setup"],
+            serde_json::json!({"complete": true, "error": null})
+        );
+        assert!(app.store.load_ui_preferences().setup_complete);
+    }
+
+    #[test]
+    fn copy_feedback_reports_the_text_and_the_actual_result() {
+        let (mut app, _d) = with_daemon("copy-feedback");
+        app.record_copy_result(
+            "headroom status",
+            Err(std::io::Error::other("clipboard unavailable")),
+        );
+        let state = app.state().unwrap();
+        assert_eq!(state["copy_result"]["text"], "headroom status");
+        assert_eq!(state["copy_result"]["ok"], false);
+        assert!(
+            state["copy_result"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("clipboard unavailable")
+        );
+        app.record_copy_result("headroom doctor", Ok(()));
+        let state = app.state().unwrap();
+        assert_eq!(state["copy_result"]["text"], "headroom doctor");
+        assert_eq!(state["copy_result"]["ok"], true);
+        assert_eq!(state["copy_result"]["message"], "Copied to clipboard.");
+    }
+
+    #[test]
+    fn a_copy_process_that_exits_unsuccessfully_is_a_failure() {
+        // A fake clipboard consumer keeps tests away from the user's clipboard.
+        let result = copy_with_command(
+            "test",
+            Command::new("/bin/sh").args(["-c", "cat >/dev/null; exit 7"]),
+        );
+        assert!(result.unwrap_err().to_string().contains("exit status: 7"));
+        assert!(
+            copy_with_command(
+                "test",
+                Command::new("/bin/sh").args(["-c", "cat >/dev/null"])
+            )
+            .is_ok()
+        );
     }
 
     #[test]
