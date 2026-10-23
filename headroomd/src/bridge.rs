@@ -27,6 +27,7 @@ pub enum UiCmd {
     Dismiss { id: String },
     Copy { text: String },
     FinishSetup,
+    CheckShims,
     ResetProfile { key: String },
     ClearData,
     Set { key: String, value: Value },
@@ -42,6 +43,7 @@ pub enum Do {
     Dismiss(String),
     Copy(String),
     FinishSetup,
+    CheckShims,
     Login(bool),
     Classify(String),
     Quit,
@@ -73,6 +75,7 @@ pub fn translate(cmd: UiCmd, cfg: &Config) -> Result<Do, String> {
         UiCmd::Dismiss { id } => Do::Dismiss(id),
         UiCmd::Copy { text } => Do::Copy(text),
         UiCmd::FinishSetup => Do::FinishSetup,
+        UiCmd::CheckShims => Do::CheckShims,
         UiCmd::Classify { text } => Do::Classify(text),
         UiCmd::Quit => Do::Quit,
         UiCmd::AddPattern { pattern } => {
@@ -181,6 +184,11 @@ mod tests {
     #[test]
     fn finishing_setup_is_an_app_action() {
         assert_eq!(t(r#"{"cmd":"finish_setup"}"#), Ok(Do::FinishSetup));
+    }
+
+    #[test]
+    fn checking_shims_is_a_read_only_app_action() {
+        assert_eq!(t(r#"{"cmd":"check_shims"}"#), Ok(Do::CheckShims));
     }
 
     #[test]

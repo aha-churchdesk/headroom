@@ -19,6 +19,7 @@ pub mod profile;
 pub mod protocol;
 pub mod scheduler;
 pub mod shell;
+pub mod shims;
 pub mod store;
 pub mod tally;
 pub mod tweaks;

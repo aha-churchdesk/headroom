@@ -8,7 +8,6 @@
 //! one on PATH that isn't a link back to Headroom.
 
 use std::io;
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -20,25 +19,8 @@ use headroom_core::store::Store;
 use crate::context::git_hook_installed;
 use crate::run::{self, JOB_ENV, RunOpts};
 
-/// The programs shimmed: package managers and the heavy tools they run.
-pub const NAMES: &[&str] = &[
-    "pnpm",
-    "npm",
-    "npx",
-    "yarn",
-    "bun",
-    "bunx",
-    "corepack",
-    "vitest",
-    "jest",
-    "playwright",
-    "cargo",
-    "tsc",
-    "turbo",
-    "nx",
-    "xcodebuild",
-    "docker",
-];
+pub use headroom_core::shims::{NAMES, OnPath, on_path};
+use headroom_core::shims::{executable, installed, is_headroom};
 
 /// The shim this process was started as, if any.
 pub fn called_as(argv0: &str) -> Option<&'static str> {
@@ -50,22 +32,7 @@ pub fn default_dir() -> PathBuf {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default();
-    home.join(".local/share/headroom/shims")
-}
-
-fn executable(p: &Path) -> bool {
-    std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-}
-
-/// A file that resolves to a Headroom binary: one of our shims, wherever it
-/// lives. Skipping these (not only our own directory) is what stops a shim
-/// from finding itself, or another copy of Headroom, forever.
-fn is_headroom(p: &Path) -> bool {
-    p.canonicalize().is_ok_and(|c| {
-        c.file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n == "headroom" || n.starts_with("headroom-"))
-    })
+    headroom_core::shims::default_dir(&home)
 }
 
 /// The real `name`: the first on `path` that isn't Headroom.
@@ -159,41 +126,6 @@ pub fn uninstall(dir: &Path) -> io::Result<usize> {
     }
     let _ = std::fs::remove_dir(dir);
     Ok(n)
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum OnPath {
-    /// Not on PATH: the shims do nothing.
-    Missing,
-    /// On PATH, but these names are found earlier, in these directories.
-    Behind(Vec<(&'static str, PathBuf)>),
-    First,
-}
-
-/// Where `dir` sits on `path`, for the names that exist somewhere on it.
-pub fn on_path(dir: &Path, path: &str) -> OnPath {
-    let same = |d: &str| {
-        Path::new(d) == dir || Path::new(d).canonicalize().ok() == dir.canonicalize().ok()
-    };
-    let dirs: Vec<&str> = path.split(':').filter(|d| !d.is_empty()).collect();
-    let Some(at) = dirs.iter().position(|d| same(d)) else {
-        return OnPath::Missing;
-    };
-    let behind: Vec<_> = NAMES
-        .iter()
-        .filter_map(|&name| {
-            dirs[..at]
-                .iter()
-                .map(|d| Path::new(d).join(name))
-                .find(|p| executable(p) && !is_headroom(p))
-                .map(|p| (name, p.parent().unwrap_or(Path::new("/")).to_path_buf()))
-        })
-        .collect();
-    if behind.is_empty() {
-        OnPath::First
-    } else {
-        OnPath::Behind(behind)
-    }
 }
 
 /// The line that puts the shims on PATH, and the file it goes in, for the
@@ -351,7 +283,7 @@ pub fn manage(action: &str, dir: &Path, exe: &Path) -> i32 {
             }
         },
         "status" => {
-            let installed = NAMES.iter().filter(|n| is_headroom(&dir.join(n))).count();
+            let installed = installed(dir);
             println!("{installed} of {} shims in {}", NAMES.len(), dir.display());
             if installed == 0 {
                 println!("Install them with: headroom shims install");
@@ -370,6 +302,7 @@ pub fn manage(action: &str, dir: &Path, exe: &Path) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     fn tmp(name: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!("hr-shims-{name}-{}", std::process::id()));
@@ -503,7 +436,7 @@ mod tests {
     #[test]
     fn the_setup_line_fits_the_users_shell() {
         let home = Path::new("/Users/me");
-        let dir = home.join(".local/share/headroom/shims");
+        let dir = headroom_core::shims::default_dir(home);
         let zsh = shell_setup("/bin/zsh", &dir, home);
         assert_eq!(zsh.file, Some("~/.zshrc"));
         assert_eq!(
@@ -582,7 +515,7 @@ mod tests {
     #[test]
     fn a_line_already_in_the_config_is_found() {
         let home = tmp("cfg-home");
-        let dir = home.join(".local/share/headroom/shims");
+        let dir = headroom_core::shims::default_dir(&home);
         let setup = shell_setup("zsh", &dir, &home);
         assert!(!in_config(&setup, &dir, &home), "no ~/.zshrc at all");
         std::fs::write(home.join(".zshrc"), "eval \"$(mise activate zsh)\"\n").unwrap();

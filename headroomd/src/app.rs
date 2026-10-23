@@ -18,12 +18,14 @@ use headroom_core::hookio::Agent;
 use headroom_core::hooksettings::{self, Scope, Status};
 use headroom_core::profile::Profiles;
 use headroom_core::protocol::{ClientMsg, Control, DaemonMsg, Listing, request};
+use headroom_core::shims::{self, ShimsStatus};
 use headroom_core::store::{Store, UiPreferences};
 use headroom_core::tally::Tally;
 use serde_json::Value;
 
 use crate::bridge::{self, Do, UiCmd};
 use crate::hook_refresh::HookVerification;
+use crate::shim_refresh::ShimsVerification;
 use crate::view::{self, AppUsage, Extras, Login};
 use crate::{login, sample};
 
@@ -59,6 +61,8 @@ pub struct App {
     others: Vec<AppUsage>,
     hooks: Vec<(&'static str, &'static str)>,
     hook_verification: HookVerification,
+    shims: ShimsStatus,
+    shims_verification: ShimsVerification,
     login: Login,
     listing: Option<Listing>,
     attached: bool,
@@ -111,6 +115,8 @@ impl App {
             profiles: store.load_profiles(),
             tally: store.load_tally(),
             ui_preferences: store.load_ui_preferences(),
+            shims: ShimsStatus::checking(&shims::default_dir(&home)),
+            shims_verification: ShimsVerification::default(),
             store,
             socket,
             home,
@@ -132,12 +138,14 @@ impl App {
         };
         app.refresh_settings();
         app.refresh_hooks();
+        app.refresh_shims(false);
         app
     }
 
     /// Ask the daemon for the queue. A failed ask keeps the last listing:
     /// a daemon restarting for a second shouldn't blank the popover.
     pub fn poll(&mut self) -> bool {
+        self.refresh_shims(false);
         match request(&self.socket, &ClientMsg::List) {
             Ok(DaemonMsg::Jobs(l)) => {
                 self.listing = Some(l);
@@ -207,6 +215,12 @@ impl App {
         }
     }
 
+    fn refresh_shims(&mut self, force: bool) {
+        self.shims = self
+            .shims_verification
+            .refresh(&self.home, Instant::now(), force);
+    }
+
     /// Whether the queue this app shows runs in another headroomd.
     pub fn set_attached(&mut self, on: bool) {
         self.attached = on;
@@ -241,6 +255,7 @@ impl App {
             "error": self.setup_error,
         });
         state["copy_result"] = self.copy_result.clone().unwrap_or(Value::Null);
+        state["shims"] = serde_json::to_value(&self.shims).unwrap();
         Some(state)
     }
 
@@ -264,6 +279,10 @@ impl App {
         };
         match action {
             Do::Quit => return Next::Quit,
+            Do::CheckShims => {
+                self.refresh_shims(true);
+                return Next::Continue;
+            }
             Do::FinishSetup => {
                 let mut preferences = self.ui_preferences.clone();
                 preferences.setup_complete = true;
@@ -492,7 +511,11 @@ mod tests {
         assert_eq!(before["copy_result"], Value::Null);
         assert_eq!(app.command(r#"{"cmd":"finish_setup"}"#), Next::Continue);
         before["setup"]["complete"] = Value::Bool(true);
-        assert_eq!(app.state().unwrap(), before);
+        let mut after = app.state().unwrap();
+        // Background shell verification is independent of setup completion.
+        before.as_object_mut().unwrap().remove("shims");
+        after.as_object_mut().unwrap().remove("shims");
+        assert_eq!(after, before);
         assert_eq!(
             fs::read(app.store.root().join("config.json")).unwrap(),
             config
@@ -525,6 +548,24 @@ mod tests {
         assert!(app.store.load_ui_preferences().setup_complete);
         assert_eq!(app.last_error, None, "no daemon request is needed");
         assert!(!app.store.root().join("config.json").exists());
+    }
+
+    #[test]
+    fn checking_shims_does_not_need_or_control_a_daemon() {
+        let root = dir("check-shims-local");
+        let mut app = App::new(
+            Store::at(root.join("data")).unwrap(),
+            root.join("home"),
+            "h".into(),
+            "d".into(),
+        );
+        assert_eq!(app.command(r#"{"cmd":"check_shims"}"#), Next::Continue);
+        assert_eq!(app.last_error, None);
+        assert_eq!(app.shims.installed, 0);
+        assert_eq!(app.shims.total, shims::NAMES.len());
+        assert_eq!(app.shims.path, shims::default_dir(&app.home));
+        assert!(!app.store.root().join("config.json").exists());
+        assert!(!app.shims.path.exists());
     }
 
     #[test]

@@ -8,5 +8,6 @@ pub mod login;
 pub mod sample;
 pub mod server;
 pub mod shell;
+mod shim_refresh;
 pub mod single;
 pub mod view;
