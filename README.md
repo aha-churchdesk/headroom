@@ -10,6 +10,33 @@ Headroom is a macOS menu bar app and CLI that schedules heavy development comman
 
 Status: early. Apple Silicon only, ad-hoc signed, used daily by one person.
 
+## Install
+
+### Homebrew (recommended)
+
+Installs the prebuilt app and CLI. Rust is not required. If you do not have Homebrew, follow the [Homebrew installation guide](https://brew.sh/) first.
+
+```sh
+brew install aha-churchdesk/tap/headroom
+brew services start headroom       # menu bar app, now and at login
+```
+
+The first time you open Headroom from the menu bar, it shows a welcome guide. It explains agent hooks, PATH shims, and optional direct CLI use, with commands you can copy. To have future agent sessions use the CLI, copy the suggested instruction into the agent's saved project instructions. Continue to Queue dismisses the guide; Settings → Getting started opens it again. The guide installs no integrations automatically.
+
+### Build from source (optional)
+
+Source builds require Rust and Cargo. Install them with [rustup](https://rust-lang.org/tools/install/), then reopen your terminal so they are on PATH. If you use [mise](https://mise.jdx.dev/getting-started.html), run `mise install` from the checkout to install the Rust version pinned in `mise.toml`.
+
+```sh
+git clone https://github.com/aha-churchdesk/headroom
+cd headroom
+./scripts/install.sh --login --hooks
+```
+
+That builds `Headroom.app` into `/Applications`, links the CLI to `~/.local/bin/headroom` (`--bin DIR` for elsewhere), starts the app now and at login, and installs the agent hooks. Leave out `--login` or `--hooks` to do those yourself later. It never edits your shell config; if the bin directory isn't on your PATH it prints the line to add. Run it again after `git pull` to upgrade. `./scripts/install.sh --uninstall` removes the hooks, the login item, the link and the app, and keeps your learned profiles.
+
+To install a bundle you have already built and tested, run `./scripts/install.sh --bundle ./Headroom.app`. Updates stage and verify the replacement before stopping the installed app, refuse to restart a busy queue, and preserve the existing login registration. The installer checks that the app is running and its queue responds before reporting success. If replacement fails, it restores the previous bundle when safe. If the new app has accepted jobs or its state cannot be checked, it keeps both bundles and reports the backup path. The idle check happens immediately before shutdown; a new job arriving between those steps can still lose its queue connection and run directly.
+
 ## How it works
 
 1. **Capture a command.** Agent hooks check shell commands before the agent runs them. PATH shims catch supported tools launched from terminals and scripts. You can also use `headroom run -- <command>` directly. Hooks add agent and session information so you can see where jobs came from.
@@ -31,29 +58,6 @@ Everything runs locally. Agent hooks and shims feed the same queue; you can use 
 Headroom preserves each command's worker settings. It controls when commands start and does not change their parallelism.
 
 A foreground command waits at most 8 minutes in the queue (under the 10 minute limit of Claude Code's Bash tool), then exits 75 with "still queued, try again later". The hook raises the Bash tool's timeout by the time it may spend queued.
-
-## Install
-
-From source (Rust 1.99, pinned in `mise.toml`):
-
-```sh
-git clone https://github.com/aha-churchdesk/headroom
-cd headroom
-./scripts/install.sh --login --hooks
-```
-
-That builds `Headroom.app` into `/Applications`, links the CLI to `~/.local/bin/headroom` (`--bin DIR` for elsewhere), starts the app now and at login, and installs the agent hooks. Leave out `--login` or `--hooks` to do those yourself later. It never edits your shell config; if the bin directory isn't on your PATH it prints the line to add. Run it again after `git pull` to upgrade. `./scripts/install.sh --uninstall` removes the hooks, the login item, the link and the app, and keeps your learned profiles.
-
-To install a bundle you have already built and tested, run `./scripts/install.sh --bundle ./Headroom.app`. Updates stage and verify the replacement before stopping the installed app, refuse to restart a busy queue, and preserve the existing login registration. The installer checks that the app is running and its queue responds before reporting success. If replacement fails, it restores the previous bundle when safe. If the new app has accepted jobs or its state cannot be checked, it keeps both bundles and reports the backup path. The idle check happens immediately before shutdown; a new job arriving between those steps can still lose its queue connection and run directly.
-
-Homebrew:
-
-```sh
-brew install aha-churchdesk/tap/headroom
-brew services start headroom       # menu bar app, now and at login
-```
-
-The first time you open Headroom from the menu bar, it shows a welcome guide. It explains agent hooks, PATH shims, and optional direct CLI use, with commands you can copy. To have future agent sessions use the CLI, copy the suggested instruction into the agent's saved project instructions. Continue to Queue dismisses the guide; Settings → Getting started opens it again. The guide installs no integrations automatically.
 
 ## Connect your agents
 
