@@ -13,6 +13,23 @@ APP="Headroom.app"
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 
 command -v mise >/dev/null 2>&1 && RUN="mise exec --" || RUN=""
+if ! $RUN cargo --version >/dev/null 2>&1 || ! $RUN rustc --version >/dev/null 2>&1; then
+  cat >&2 <<'HELP'
+Headroom: building from source requires a working Rust toolchain (cargo and rustc).
+
+For the prebuilt app, no Rust is needed:
+  brew install aha-churchdesk/tap/headroom
+  brew services start headroom
+  Install Homebrew if needed: https://brew.sh/
+
+To build from source, install Rust and Cargo:
+  https://rust-lang.org/tools/install/
+  Then reopen your terminal and retry ./scripts/install.sh.
+
+If you use mise, run `mise install` from this checkout, then retry.
+HELP
+  exit 1
+fi
 $RUN cargo build --release --locked -p headroom -p headroomd
 
 rm -rf "$APP"

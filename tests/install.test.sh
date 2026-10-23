@@ -237,9 +237,11 @@ printf '%s\n' "$1" > "$TEST_WORK/bundle-argument"
 exit 23
 STUB
   printf '#!/bin/bash\nexit 1\n' > "$TEST_WORK/stubs/brew"
+  ln -s /usr/bin/dirname "$TEST_WORK/stubs/dirname"
+  ln -s /bin/mkdir "$TEST_WORK/stubs/mkdir"
   chmod +x "$repo/scripts/install-bundle.sh" "$TEST_WORK/stubs/brew"
   # Stop at the install helper, before any app, CLI link or hook is changed.
-  if (cd "$caller" && PATH="$TEST_WORK/stubs:$PATH" bash "$repo/scripts/install.sh" \
+  if (cd "$caller" && PATH="$TEST_WORK/stubs" /bin/bash "$repo/scripts/install.sh" \
       --bundle 'release builds/Headroom.app' --bin "$TEST_WORK/bin") > "$TEST_WORK/output" 2>&1; then
     fail 'stub installer unexpectedly succeeded'
   else
@@ -249,6 +251,61 @@ STUB
   [ "$(cat "$TEST_WORK/bundle-argument")" = "$caller/release builds/Headroom.app" ] || fail 'bundle path resolved outside caller directory'
   assert_old; assert_no_signal
 }
-for name in busy queued unknown unreachable custom_home process_failure near_matches delayed_exit timeout stage_failure sign_failure rollback restart_rollback registered registered_fallback startup_absent startup_unknown startup_busy_rollback startup_busy_healthy relative_bundle; do
+check_build_toolchain() {
+  local missing="$1" repo="$TEST_WORK/repo" stubs="$TEST_WORK/stubs" status
+  mkdir -p "$repo/scripts" "$stubs"
+  command cp scripts/install.sh scripts/bundle.sh "$repo/scripts/"
+  printf 'version = "0.0.0"\n' > "$repo/Cargo.toml"
+  printf 'HR_APP="$TEST_WORK/apps/Headroom.app"\n' > "$repo/scripts/install-common.sh"
+  # A minimal PATH prevents this machine's Rust or mise from hiding a missing
+  # prerequisite. Every file and build target stays inside the fixture.
+  ln -s /usr/bin/dirname "$stubs/dirname"
+  ln -s /usr/bin/sed "$stubs/sed"
+  ln -s /usr/bin/head "$stubs/head"
+  ln -s /bin/cat "$stubs/cat"
+  ln -s /bin/mkdir "$stubs/mkdir"
+  printf '#!/bin/bash\nexit 1\n' > "$stubs/brew"
+  for tool in cargo rustc; do
+    [ "$missing" != "$tool" ] || continue
+    cat > "$stubs/$tool" <<'TOOL'
+#!/bin/bash
+[ "$1" = --version ] || { printf 'unexpected build\n' > "$TEST_WORK/build-attempted"; exit 9; }
+[ "$TEST_MISSING_TOOL" != broken_toolchain ]
+TOOL
+    chmod +x "$stubs/$tool"
+  done
+  if [ "$missing" = mise_toolchain ]; then
+    printf '#!/bin/bash\nexit 1\n' > "$stubs/mise"
+    chmod +x "$stubs/mise"
+  fi
+  chmod +x "$stubs/brew"
+  if TEST_MISSING_TOOL="$missing" PATH="$stubs" /bin/bash "$repo/scripts/install.sh" \
+      --bin "$TEST_WORK/new-bin" > "$TEST_WORK/output" 2>&1; then
+    fail 'missing Rust toolchain unexpectedly installed'
+  else
+    status=$?
+  fi
+  if [ "$missing" = working_toolchain ]; then
+    [ "$status" = 9 ] && [ -e "$TEST_WORK/build-attempted" ] || fail 'working toolchain did not reach build'
+    if grep -q 'requires a working Rust toolchain' "$TEST_WORK/output"; then fail 'rejected working toolchain'; fi
+    assert_old; assert_no_signal
+    return
+  fi
+  [ "$status" = 1 ] || fail "unexpected prerequisite failure: $status"
+  grep -q 'requires a working Rust toolchain' "$TEST_WORK/output" || { cat "$TEST_WORK/output"; fail 'missing prerequisite explanation'; }
+  grep -q 'brew install aha-churchdesk/tap/headroom' "$TEST_WORK/output" || fail 'missing prebuilt alternative'
+  grep -q 'https://rust-lang.org/tools/install/' "$TEST_WORK/output" || fail 'missing Rust installation guide'
+  grep -q 'mise install' "$TEST_WORK/output" || fail 'missing pinned-toolchain instruction'
+  [ ! -e "$TEST_WORK/build-attempted" ] || fail 'started build without toolchain'
+  [ ! -e "$TEST_WORK/new-bin/headroom" ] || fail 'created a CLI link without toolchain'
+  [ ! -e "$repo/Headroom.app" ] || fail 'started bundle assembly without toolchain'
+  assert_old; assert_no_signal
+}
+missing_cargo() { check_build_toolchain cargo; }
+missing_rustc() { check_build_toolchain rustc; }
+broken_toolchain() { check_build_toolchain broken_toolchain; }
+mise_toolchain() { check_build_toolchain mise_toolchain; }
+working_toolchain() { check_build_toolchain working_toolchain; }
+for name in busy queued unknown unreachable custom_home process_failure near_matches delayed_exit timeout stage_failure sign_failure rollback restart_rollback registered registered_fallback startup_absent startup_unknown startup_busy_rollback startup_busy_healthy relative_bundle missing_cargo missing_rustc broken_toolchain mise_toolchain working_toolchain; do
   run_case "$name" "$name"
 done
