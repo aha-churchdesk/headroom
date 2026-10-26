@@ -1252,6 +1252,10 @@ function renderSettings(S){
     : `<div class="verdict no">not gated, runs immediately</div>`;
   return pageHead("Settings") + `
     <div class="set">
+      <div class="k">Version</div>
+      <div class="h num">${esc(S.version ?? "Unknown")}</div>
+    </div>
+    <div class="set">
       <div class="k">Headroom</div>
       <div class="h">Memory kept free before a new job may start.</div>
       <div class="ctl">${stepper("headroom", "Headroom", c.headroom, 0.5 * GiB, b => gb(b) + " GB", 0, Math.max(16 * GiB, Math.floor(S.system.mem_total / GiB) * GiB / 2))}</div>
@@ -1692,7 +1696,7 @@ function base(over){
     ],
     commands: COMMANDS,
     profiles: PROFILES, others: OTHERS,
-    settings: structuredClone(BASE_SETTINGS), classify:null,
+    version:"development", settings: structuredClone(BASE_SETTINGS), classify:null,
   }, over);
 }
 

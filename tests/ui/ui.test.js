@@ -345,9 +345,10 @@ test('job actions expose descriptive names and toggle states', () => {
   for (const control of ui.find({ act: 'resume' })) has(control.label, 'headroom-hog');
 });
 
-test('settings expose named steppers, input labels, pattern removal, and selected segments', () => {
-  ui.setState(busy);
+test('settings expose the build version, named steppers, input labels, pattern removal, and selected segments', () => {
+  ui.setState({ ...busy, version: '0.4.13' });
   ui.click({ act: 'goto', page: 'settings' }, 0);
+  has(ui.view(), 'Version 0.4.13');
   for (const [key, label] of [['headroom', 'headroom'], ['wait_cap_s', 'foreground wait limit'],
     ['default_estimate', 'default estimate']]) {
     const [minus, plus] = ui.find({ act: 'set', key });

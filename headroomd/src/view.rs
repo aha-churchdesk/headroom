@@ -393,6 +393,7 @@ pub fn state(l: &Listing, x: &Extras) -> Value {
         .map(|(a, st)| (a.to_string(), Value::String(st.to_string())))
         .collect();
     json!({
+        "version": env!("CARGO_PKG_VERSION"),
         "system": {
             "pressure": s.pressure,
             "mem_total": s.mem_total,
@@ -926,6 +927,7 @@ mod tests {
     fn state_matches_the_prototype_contract() {
         let (cfg, p, d) = (Config::default(), Profiles::default(), HashSet::new());
         let v = state(&listing(), &extras(&cfg, &p, &d));
+        assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(v["system"]["pressure"], "critical");
         assert_eq!(
             v["queue_reason"],
