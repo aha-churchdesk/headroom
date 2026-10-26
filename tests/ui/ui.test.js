@@ -430,7 +430,7 @@ function near(got, want, what) {
 test('past peaks have measured bounds and a distinct live fill and scheduling estimate', () => {
   showMemoryJob(memoryJob());
   has(ui.view(), 'Past peaks 2–4 GB · 8 runs');
-  has(ui.view(), '3 / new est 6 GB');
+  has(ui.view(), '3 / est 6 GB');
   const { lower, upper, live, estimate } = memoryGeometry();
   near(lower / estimate, 2 / 6, 'lower bound on the same scale');
   near(upper / estimate, 4 / 6, 'upper bound on the same scale');
@@ -464,10 +464,30 @@ test('widely varying history explains uncertainty instead of drawing a predictio
   lacks(ui.view(), 'Memory varies widely');
 });
 
-test('new workload estimates disclose broader history instead of claiming a default', () => {
-  showMemoryJob(memoryJob({ samples: 0, memory_range: null }));
-  has(ui.html(), 'Estimate uses broader history or the default, and retains observed failed or interrupted peaks as a minimum.');
-  lacks(ui.html(), 'No profile yet: default estimate');
+test('fallback icons explain measured run counts until the estimate can use its own history', () => {
+  for (const state of ['running', 'queued', 'frozen']) {
+    for (const samples of [0, 1, 2, 3, 4]) {
+      const job = memoryJob({ state, samples, samples_required: 1, memory_range: null });
+      ui.setState({ ...busy, running: state === 'queued' ? [] : [job], queued: state === 'queued' ? [job] : [] });
+      has(ui.view(), 'est 6 GB');
+      if (samples >= 1) {
+        lacks(ui.html(), 'class="fallback-estimate"');
+        continue;
+      }
+      has(ui.html(), 'class="fallback-estimate"');
+      has(ui.html(), 'tabindex="0" role="img" aria-label="Fallback memory estimate.');
+      has(ui.html(), 'data-tip="Fallback memory estimate. 0 of 1 successful, uninterrupted measured run registered for this exact workload when this estimate was set.');
+      has(ui.html(), '1 more measured run needed to use its own history.');
+      has(ui.html(), 'Until then, the estimate uses broader history or the default.');
+      has(ui.html(), 'Each later qualifying run updates the estimate.');
+      has(ui.html(), 'Failed or interrupted peaks remain a minimum.');
+      has(ui.html(), 'Different invocations and starting directories have separate histories.');
+    }
+  }
+  // The threshold comes from the scheduler, rather than a separate UI constant.
+  showMemoryJob(memoryJob({ samples: 1, samples_required: 2, memory_range: null }));
+  has(ui.html(), '1 of 2 successful, uninterrupted measured runs');
+  has(ui.html(), '1 more measured run needed');
 });
 
 test('live usage can exceed past peaks without clipping or moving their values', () => {
@@ -478,7 +498,7 @@ test('live usage can exceed past peaks without clipping or moving their values',
   near(upper, live * .4, 'upper peak');
   near(estimate, live * .6, 'estimate');
   has(ui.view(), 'Past peaks 2–4 GB · 8 runs');
-  has(ui.view(), '10 / new est 6 GB');
+  has(ui.view(), '10 / est 6 GB');
 });
 
 test('identical past peaks remain a single marked value without inventing a range', () => {
@@ -497,7 +517,7 @@ test('absent history never borrows a band from the estimate or profile', () => {
     eq(memoryGeometry().lower, null);
     lacks(ui.view(), 'Past peaks');
     lacks(ui.html(), 'successful, uninterrupted runs of this workload');
-    has(ui.view(), '3 / new est 6 GB');
+    has(ui.view(), '3 / est 6 GB');
     has(ui.html(), 'Conservative estimate 6 GB');
   }
 });
@@ -518,7 +538,7 @@ test('state updates refresh live usage, range, estimate, and explanation for the
   eq(after.live > before.live, true);
   near(after.upper / after.estimate, .7, 'updated range geometry');
   has(ui.view(), 'Past peaks 3–7 GB · 12 runs');
-  has(ui.view(), '9 / new est 10 GB');
+  has(ui.view(), '9 / est 10 GB');
   has(ui.html(), 'Conservative estimate 10 GB');
   has(ui.html(), '12 successful, uninterrupted runs of this workload with 2 workers, like this job.');
   lacks(ui.html(), 'Past peaks 2–4 GB');
@@ -541,7 +561,7 @@ test('running and queued jobs are listed with why the queue waits', () => {
   has(v, 'next needs 1.5 GB, 0 GB free');
   has(ui.html(), '<b>fix-main</b></span><span class="cmd">sleep 30</span>');
   has(v, 'form-service sleep 32');
-  has(v, 'new est 1.5 GB');
+  has(v, 'est 1.5 GB');
   // The estimate, and how long it has waited on the line below.
   has(ui.html(), 'est 1.5 GB</span><span title="Time in the queue so far">waiting ');
 });

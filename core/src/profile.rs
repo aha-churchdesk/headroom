@@ -13,7 +13,9 @@ use crate::model::{Bytes, Part};
 
 /// Runs kept per key.
 pub const KEEP: usize = 20;
-/// Successful uninterrupted runs needed before a key's history is trusted outright.
+/// Successful measured runs needed before using a workload's own estimate.
+pub const ESTIMATE_SAMPLES: usize = 1;
+/// Successful measured runs needed for broader priors, memory ranges and fitted scaling.
 pub const TRUSTED: usize = 3;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -262,9 +264,9 @@ impl Profiles {
         }
     }
 
-    /// Blend toward the best available prior while a key has few runs:
-    /// with one successful measured run the key's own peak weighs a third;
-    /// with three it stands alone.
+    /// Use the workload's own p90 from its first successful measured run,
+    /// updated with each later run. Broader history or the default supplies
+    /// the estimate only while the workload has no qualifying measurements.
     pub fn estimate(&self, key: &str, fallback: &str, default: Bytes) -> Estimate {
         let prior = self
             .0
@@ -279,21 +281,13 @@ impl Profiles {
             };
         };
         let n = own.samples();
-        if let Some(t) = own.trusted() {
-            return Estimate {
-                bytes: t,
-                samples: n,
-            };
-        }
-        let blended = match own.p90() {
-            Some(p) => {
-                let n = n as u128;
-                ((p as u128 * n + prior as u128 * (TRUSTED as u128 - n)) / TRUSTED as u128) as Bytes
-            }
-            None => prior,
+        let measured = if n >= ESTIMATE_SAMPLES as u32 {
+            own.p90()
+        } else {
+            None
         };
         Estimate {
-            bytes: blended.max(own.observed_floor()),
+            bytes: measured.unwrap_or(prior).max(own.observed_floor()),
             samples: n,
         }
     }
@@ -700,11 +694,28 @@ mod tests {
     }
 
     #[test]
-    fn one_run_blends_a_third_of_the_way_from_the_default() {
+    fn first_measured_run_replaces_the_default() {
         let mut p = Profiles::default();
         p.record("k", "k", run(4.5));
-        // (4.5 + 1.5 + 1.5) / 3
-        assert_eq!(gb(p.estimate("k", "k", DEF).bytes), 2.5);
+        assert_eq!(gb(p.estimate("k", "k", DEF).bytes), 4.5);
+        assert_eq!(p.estimate("k", "k", DEF).samples, 1);
+    }
+
+    #[test]
+    fn own_measurements_replace_broader_history_and_update_with_each_run() {
+        for first in [0.5, 8.0] {
+            let mut p = Profiles::default();
+            for _ in 0..TRUSTED {
+                p.record("other", "fallback", run(6.0));
+            }
+            assert_eq!(gb(p.estimate("own", "fallback", DEF).bytes), 6.0);
+            for (i, peak) in [first, first + 1.0, first + 2.0].into_iter().enumerate() {
+                p.record("own", "fallback", run(peak));
+                let est = p.estimate("own", "fallback", DEF);
+                assert_eq!(gb(est.bytes), peak);
+                assert_eq!(est.samples, (i + 1) as u32);
+            }
+        }
     }
 
     #[test]

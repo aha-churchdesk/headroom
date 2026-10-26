@@ -256,10 +256,8 @@ button:disabled[data-tip]{ cursor:default; }
 .job .name .cmd{ color:var(--text-dim); }
 .job .mem{ font-size:11.5px; color:var(--text-dim); white-space:nowrap; }
 .job .mem b{ color:var(--text); font-weight:600; }
-.job .mem .new{
-  font-size:9.5px; font-weight:700; letter-spacing:.05em; text-transform:uppercase;
-  padding:0 5px; border-radius:4px; background:var(--bg-sunk); color:var(--text-dim); margin-right:3px;
-}
+.fallback-estimate{ display:inline-flex; flex:none; align-self:center; color:var(--text-dim); border-radius:3px; }
+.fallback-estimate svg{ width:14px; height:14px; }
 .job .l2{ display:flex; flex-wrap:wrap; align-items:center; gap:5px 9px; margin-top:5px; font-size:11px; color:var(--text-dim); }
 .job .l2 .meta{ white-space:nowrap; }
 .job .l2 .mem{ margin-left:auto; }
@@ -880,9 +878,16 @@ function fpBar(j){
 }
 
 function estLabel(j){
-  return j.samples === 0
-    ? `<span class="new" title="No successful measured runs of this workload yet. Estimate uses broader history or the default, and retains observed failed or interrupted peaks as a minimum.">new</span>est ${gb(j.estimate)} GB`
-    : `est ${gb(j.estimate)} GB`;
+  return `est ${gb(j.estimate)} GB`;
+}
+
+function fallbackBadge(j){
+  if (!(j.samples < j.samples_required)) return "";
+  const remaining = j.samples_required - j.samples;
+  const tip = `Fallback memory estimate. ${j.samples} of ${j.samples_required} successful, uninterrupted measured run${j.samples_required === 1 ? "" : "s"} registered for this exact workload when this estimate was set. ${remaining} more measured run${remaining === 1 ? "" : "s"} needed to use its own history. Until then, the estimate uses broader history or the default. Each later qualifying run updates the estimate. Failed or interrupted peaks remain a minimum. Different invocations and starting directories have separate histories.`;
+  return `<span class="fallback-estimate" id="fallback-${esc(j.id)}" tabindex="0" role="img" aria-label="${esc(tip)}" data-tip="${esc(tip)}">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 4v7a5 5 0 0 0 5 5h8m-4-4 4 4-4 4"/></svg>
+  </span>`;
 }
 
 function originLabel(agent){
@@ -922,7 +927,7 @@ function renderRunning(j){
   return `
     <div class="job ${UI.expanded.has(j.id) ? "expanded" : ""}" data-job-id="${esc(j.id)}">
       <div class="l1">
-        ${jobName(j)}${marks(j)}
+        ${jobName(j)}${fallbackBadge(j)}${marks(j)}
         <span class="acts-i">
           ${frozen
             ? `<button class="ib" data-act="resume" data-id="${j.id}" aria-label="Resume ${jobLabel(j)}" title="Resume">▶︎</button>`
@@ -954,7 +959,7 @@ function renderQueued(j, i, S){
         ${j.pinned ? `<span class="handle" title="Pinned: runs next">📌</span>`
                    : `<span class="handle" title="Drag to reorder">⋮⋮</span>`}
         <span class="pos num">${i + 1}</span>
-        ${jobName(j)}${j.low ? marks({ low:true }) : ""}
+        ${jobName(j)}${fallbackBadge(j)}${j.low ? marks({ low:true }) : ""}
         ${j.retry ? `<span class="tag" title="Requeued after a guard kill (retry ${j.retry}/1)">↻</span>` : ""}
         <span class="acts-i">
           <button class="ib" data-act="top" data-id="${j.id}" aria-label="Move ${jobLabel(j)} to top of queue" title="Move to top" ${i === 0 ? "disabled" : ""}>⤒</button>
@@ -1626,7 +1631,7 @@ const PROFILES = {
 
 function job(o){
   return Object.assign({
-    state:"running", pinned:false, low:false, footprint:0, peak:0, samples:5,
+    state:"running", pinned:false, low:false, footprint:0, peak:0, samples:5, samples_required:1,
     elapsed_s:0, frozen_s:0, waited_s:0, runtime_estimate_s:null, cpu_pct:0, procs:1, retry:0, session:"",
   }, o, {
     runaway_at: o.runaway_at ?? Math.max(2 * o.estimate, G(8)),

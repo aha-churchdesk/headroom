@@ -179,7 +179,7 @@ fn estimate_execution(
                 } else if e.samples == 0 {
                     "no measured runs of its own yet: the repository's or the default estimate, with failed or interrupted runs as a lower bound"
                 } else {
-                    "p90 of measured past peaks, blended with the repository's or default estimate until three runs; failed or interrupted runs set a lower bound"
+                    "p90 of this workload's measured past peaks, used from its first successful measured run and updated with later runs; broader repository history or the default is used before then; failed or interrupted runs set a lower bound"
                 },
             })
         }

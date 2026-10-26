@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use headroom_core::config::Config;
 use headroom_core::model::{Bytes, HistoryEntry, Job, JobState, Outcome, Pressure};
-use headroom_core::profile::{Profile, Profiles};
+use headroom_core::profile::{ESTIMATE_SAMPLES, Profile, Profiles};
 use headroom_core::protocol::Listing;
 use headroom_core::scheduler::{HISTORY, HISTORY_DAY_S, HISTORY_MAX};
 use headroom_core::tally::{Day, TALLY_DAYS, Tally};
@@ -246,6 +246,7 @@ fn job_json(j: &Job, now: u64, cfg: &Config, profiles: &Profiles) -> Value {
         "runtime_estimate_s": j.median_ms.map(secs),
         "growth_reserved": headroom_core::admission::pending_growth(&[j]),
         "samples": j.samples,
+        "samples_required": ESTIMATE_SAMPLES,
         "footprint": j.footprint,
         "peak": j.peak,
         "runaway_at": j.runaway_at(cfg.runaway_factor, cfg.runaway_cap),
@@ -566,6 +567,19 @@ mod tests {
             since: 500,
             login: Login::Brew,
             attached: false,
+        }
+    }
+
+    #[test]
+    fn estimate_progress_uses_the_attempts_sample_count_and_core_threshold() {
+        let cfg = Config::default();
+        let profiles = Profiles::default();
+        let mut job = listing().running.remove(0);
+        for samples in 0..=ESTIMATE_SAMPLES as u32 + 1 {
+            job.samples = samples;
+            let v = job_json(&job, 100_000, &cfg, &profiles);
+            assert_eq!(v["samples"], samples);
+            assert_eq!(v["samples_required"], ESTIMATE_SAMPLES);
         }
     }
 
