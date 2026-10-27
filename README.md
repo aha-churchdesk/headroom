@@ -1,5 +1,7 @@
 # Headroom
 
+<img width="446" height="646" alt="Screenshot 2026-10-27 at 10 25 46" src="https://github.com/user-attachments/assets/56c4ce22-8fd3-4fac-bb71-f9d26142d588" />
+
 Headroom is a macOS menu bar app and CLI that schedules heavy development commands so parallel coding agents can share your Mac without freezing it.
 
 - **Agent integration.** Routes tests, builds, e2e runs, and type checks from Codex, Claude Code, and pi through one queue. Other tools can use the CLI.
