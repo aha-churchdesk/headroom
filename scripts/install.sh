@@ -52,10 +52,22 @@ if [ $UNINSTALL -eq 1 ]; then
   exit 0
 fi
 
-if command -v brew >/dev/null 2>&1 && brew list --formula headroom >/dev/null 2>&1; then
-  echo "Headroom is also installed with Homebrew; two copies would each run a queue."
-  echo "Remove one first: brew uninstall headroom, or ./scripts/install.sh --uninstall"
-  exit 1
+# A tap formula is not always found by its short name, so look at the files:
+# a linked keg is a live install; kegs left in the Cellar are old versions
+# `brew uninstall` keeps, which start nothing. Name the formula in full:
+# a bare `headroom` can match an unrelated cask that also installs
+# /Applications/Headroom.app, and removing that removes this app.
+BREW_PREFIX=$(command -v brew >/dev/null 2>&1 && brew --prefix 2>/dev/null) || BREW_PREFIX=""
+if [ -n "$BREW_PREFIX" ]; then
+  if [ -e "$BREW_PREFIX/opt/headroom" ]; then
+    echo "Headroom is also installed with Homebrew; two copies would each run a queue."
+    echo "Remove it first: brew services stop headroom && brew uninstall --formula --force aha-churchdesk/tap/headroom"
+    echo "(learned profiles are kept), or keep Homebrew and run ./scripts/install.sh --uninstall"
+    exit 1
+  fi
+  if [ -n "$(ls -A "$BREW_PREFIX/Cellar/headroom" 2>/dev/null)" ]; then
+    echo "note: old Homebrew versions of Headroom remain; remove them with: brew uninstall --formula --force aha-churchdesk/tap/headroom"
+  fi
 fi
 
 if [ -e "$LINK" ] && ! [ -L "$LINK" ]; then
@@ -75,6 +87,27 @@ case ":$PATH:" in
   *) echo "$BIN_DIR isn't on your PATH. Add this to your shell config:"
      echo "  export PATH=\"$BIN_DIR:\$PATH\"" ;;
 esac
+
+# Hooks and shims written by a copy that is gone, such as a removed Homebrew
+# install, call a missing binary: the hooks then fail every agent shell
+# command and the shell skips the shims. Point them at this copy.
+missing_headrooms() {
+  grep -Eho '/[^" ]+/headroom[" ]' "$@" 2>/dev/null | sed 's/.$//' | sort -u |
+    while read -r p; do [ -x "$p" ] || echo "$p"; done
+}
+SHIMS="$HOME/.local/share/headroom/shims"
+if [ -d "$SHIMS" ] && [ -n "$(find "$SHIMS" -type l ! -exec test -e {} \; -print -quit)" ]; then
+  echo "shims in $SHIMS point at a removed headroom; repointing them"
+  "$LINK" shims install >/dev/null
+fi
+if [ $HOOKS -eq 0 ]; then
+  STALE=$(missing_headrooms "$HOME/.claude/settings.json" "$HOME/.codex/hooks.json" \
+    "$HOME/.pi/agent/extensions/headroom.ts")
+  if [ -n "$STALE" ]; then
+    echo "agent hooks call a removed headroom ($STALE); reinstalling them"
+    HOOKS=1
+  fi
+fi
 
 if [ $LOGIN -eq 1 ]; then
   # Starts it now too.

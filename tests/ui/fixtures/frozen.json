@@ -1,4 +1,5 @@
 {
+  "version": "0.4.13",
   "system": {
     "pressure": "critical",
     "mem_total": 68719476736,
@@ -8,6 +9,10 @@
     "cpu_pct": 0.0
   },
   "held": false,
+  "queue_budget": {
+    "growth": 0,
+    "available": 49392123904
+  },
   "hooks": {
     "claude": "installed",
     "codex": "not_installed",
@@ -22,18 +27,24 @@
       "full_cmd": "~/Projects/work-scheduler-mcp/target/debug/headroom-hog 0.2 120",
       "cwd": "~/Projects/work-scheduler-mcp/headroom",
       "session": null,
-      "key": "~/Projects/work-scheduler-mcp|headroom|headroom-hog",
+      "agent": null,
+      "key": "~/Projects/work-scheduler-mcp|headroom|v2:e9a8e68f0dc32c8ea6c33162cba0c898cc7014ad3990038c65301ed1c0528c2b|headroom-hog",
       "state": "frozen",
       "pinned": false,
       "low": false,
       "estimate": 1610612736,
+      "memory_range": null,
+      "runtime_estimate_s": null,
+      "growth_reserved": 0,
       "samples": 0,
-      "footprint": 216236536,
-      "peak": 216236536,
+      "samples_required": 1,
+      "footprint": 216252920,
+      "peak": 216252920,
       "runaway_at": 8589934592,
       "elapsed_s": 1,
       "frozen_s": 0,
-      "waited_s": 1,
+      "frozen_by": "guard",
+      "waited_s": 0,
       "cpu_pct": 0.0,
       "procs": 1,
       "now": null,
@@ -59,11 +70,13 @@
       "id": "3",
       "label": "sc-48870",
       "cmd": "sleep 60",
-      "key": "~/Projects/work-scheduler-mcp|headroom|sleep 60",
+      "key": "~/Projects/work-scheduler-mcp|headroom|v2:eeb609fb6fe3c6226c851542d34d1b803f6ccadb45bb455741c11d365f41768c|sleep 60",
+      "profile": "cmd:~/Projects/work-scheduler-mcp|headroom|sleep 60",
       "duration_s": 0,
       "peak": 0,
       "estimate": 1610612736,
       "exit": null,
+      "ended_at": 1793361973,
       "ended_ago_s": 1,
       "tuned": null,
       "ahead_of": null,
@@ -76,12 +89,14 @@
       "id": "2",
       "label": "fix-main",
       "cmd": "echo ok",
-      "key": "~/Projects/work-scheduler-mcp|headroom|echo ok",
+      "key": "~/Projects/work-scheduler-mcp|headroom|v2:8e9d80233fdcaa5b0b8a20c7f3496d12abd509c609e2aae4c7c55d425c18fa72|echo ok",
+      "profile": "cmd:~/Projects/work-scheduler-mcp|headroom|echo ok",
       "duration_s": 0,
       "peak": 0,
       "estimate": 1610612736,
       "exit": 0,
-      "ended_ago_s": 1,
+      "ended_at": 1793361972,
+      "ended_ago_s": 2,
       "tuned": null,
       "ahead_of": null,
       "guard": null
@@ -90,11 +105,13 @@
       "id": "1",
       "label": "fix-main",
       "cmd": "exit 3",
-      "key": "~/Projects/work-scheduler-mcp|headroom|exit 3",
+      "key": "~/Projects/work-scheduler-mcp|headroom|v2:c2a4581f611b42738dc895d0d474813765bd71864977b00eb5945bbd8da6f395|exit 3",
+      "profile": "cmd:~/Projects/work-scheduler-mcp|headroom|exit 3",
       "duration_s": 0,
       "peak": 0,
       "estimate": 1610612736,
       "exit": 3,
+      "ended_at": 1793361972,
       "ended_ago_s": 2,
       "tuned": null,
       "ahead_of": null,
@@ -104,7 +121,7 @@
   "last_day": {
     "runs": 3,
     "failed": 1,
-    "killed": 0,
+    "requeued": 0,
     "waited": 0,
     "waited_s": 0,
     "longest_wait_s": 0,
@@ -128,21 +145,13 @@
       "rows": [
         {
           "runs": 1,
-          "failed": 0,
-          "run_s": 0,
-          "wait_s": 0,
-          "gb_h": 0.0,
-          "peak": 0,
-          "key": "~/Projects/work-scheduler-mcp|headroom|echo ok"
-        },
-        {
-          "runs": 1,
           "failed": 1,
           "run_s": 0,
           "wait_s": 0,
           "gb_h": 0.0,
           "peak": 0,
-          "key": "~/Projects/work-scheduler-mcp|headroom|exit 3"
+          "key": "~/Projects/work-scheduler-mcp|headroom|exit 3",
+          "profile": "cmd:~/Projects/work-scheduler-mcp|headroom|exit 3"
         },
         {
           "runs": 1,
@@ -151,7 +160,18 @@
           "wait_s": 0,
           "gb_h": 0.0,
           "peak": 0,
-          "key": "~/Projects/work-scheduler-mcp|headroom|sleep 60"
+          "key": "~/Projects/work-scheduler-mcp|headroom|echo ok",
+          "profile": "cmd:~/Projects/work-scheduler-mcp|headroom|echo ok"
+        },
+        {
+          "runs": 1,
+          "failed": 0,
+          "run_s": 0,
+          "wait_s": 0,
+          "gb_h": 0.0,
+          "peak": 0,
+          "key": "~/Projects/work-scheduler-mcp|headroom|sleep 60",
+          "profile": "cmd:~/Projects/work-scheduler-mcp|headroom|sleep 60"
         }
       ]
     },
@@ -169,21 +189,13 @@
       "rows": [
         {
           "runs": 1,
-          "failed": 0,
-          "run_s": 0,
-          "wait_s": 0,
-          "gb_h": 0.0,
-          "peak": 0,
-          "key": "~/Projects/work-scheduler-mcp|headroom|echo ok"
-        },
-        {
-          "runs": 1,
           "failed": 1,
           "run_s": 0,
           "wait_s": 0,
           "gb_h": 0.0,
           "peak": 0,
-          "key": "~/Projects/work-scheduler-mcp|headroom|exit 3"
+          "key": "~/Projects/work-scheduler-mcp|headroom|exit 3",
+          "profile": "cmd:~/Projects/work-scheduler-mcp|headroom|exit 3"
         },
         {
           "runs": 1,
@@ -192,7 +204,18 @@
           "wait_s": 0,
           "gb_h": 0.0,
           "peak": 0,
-          "key": "~/Projects/work-scheduler-mcp|headroom|sleep 60"
+          "key": "~/Projects/work-scheduler-mcp|headroom|echo ok",
+          "profile": "cmd:~/Projects/work-scheduler-mcp|headroom|echo ok"
+        },
+        {
+          "runs": 1,
+          "failed": 0,
+          "run_s": 0,
+          "wait_s": 0,
+          "gb_h": 0.0,
+          "peak": 0,
+          "key": "~/Projects/work-scheduler-mcp|headroom|sleep 60",
+          "profile": "cmd:~/Projects/work-scheduler-mcp|headroom|sleep 60"
         }
       ]
     },
@@ -210,21 +233,13 @@
       "rows": [
         {
           "runs": 1,
-          "failed": 0,
-          "run_s": 0,
-          "wait_s": 0,
-          "gb_h": 0.0,
-          "peak": 0,
-          "key": "~/Projects/work-scheduler-mcp|headroom|echo ok"
-        },
-        {
-          "runs": 1,
           "failed": 1,
           "run_s": 0,
           "wait_s": 0,
           "gb_h": 0.0,
           "peak": 0,
-          "key": "~/Projects/work-scheduler-mcp|headroom|exit 3"
+          "key": "~/Projects/work-scheduler-mcp|headroom|exit 3",
+          "profile": "cmd:~/Projects/work-scheduler-mcp|headroom|exit 3"
         },
         {
           "runs": 1,
@@ -233,31 +248,49 @@
           "wait_s": 0,
           "gb_h": 0.0,
           "peak": 0,
-          "key": "~/Projects/work-scheduler-mcp|headroom|sleep 60"
+          "key": "~/Projects/work-scheduler-mcp|headroom|echo ok",
+          "profile": "cmd:~/Projects/work-scheduler-mcp|headroom|echo ok"
+        },
+        {
+          "runs": 1,
+          "failed": 0,
+          "run_s": 0,
+          "wait_s": 0,
+          "gb_h": 0.0,
+          "peak": 0,
+          "key": "~/Projects/work-scheduler-mcp|headroom|sleep 60",
+          "profile": "cmd:~/Projects/work-scheduler-mcp|headroom|sleep 60"
         }
       ]
     }
   ],
   "profiles": {
-    "~/Projects/work-scheduler-mcp|headroom|echo ok": {
-      "peaks": [
-        0
-      ],
-      "p90": 1073741824,
+    "cmd:~/Projects/work-scheduler-mcp|headroom|echo ok": {
+      "peaks": [],
+      "p90": 1610612736,
       "median_s": 0,
-      "samples": 1,
+      "samples": 0,
       "runs": 1,
-      "parts": []
+      "parts": [],
+      "command": "~/Projects/work-scheduler-mcp|headroom|echo ok"
     },
-    "~/Projects/work-scheduler-mcp|headroom|exit 3": {
-      "peaks": [
-        0
-      ],
-      "p90": 1073741824,
-      "median_s": 0,
-      "samples": 1,
+    "cmd:~/Projects/work-scheduler-mcp|headroom|exit 3": {
+      "peaks": [],
+      "p90": 1610612736,
+      "median_s": null,
+      "samples": 0,
       "runs": 1,
-      "parts": []
+      "parts": [],
+      "command": "~/Projects/work-scheduler-mcp|headroom|exit 3"
+    },
+    "cmd:~/Projects/work-scheduler-mcp|headroom|sleep 60": {
+      "peaks": [],
+      "p90": 1610612736,
+      "median_s": null,
+      "samples": 0,
+      "runs": 1,
+      "parts": [],
+      "command": "~/Projects/work-scheduler-mcp|headroom|sleep 60"
     }
   },
   "others": [],
@@ -267,7 +300,6 @@
     "wait_cap_s": 480,
     "default_estimate": 1610612736,
     "start_at_login": true,
-    "tune": true,
     "backfill": true,
     "backfill_skips": 3,
     "backfill_wait_s": 300,
@@ -305,5 +337,21 @@
     ]
   },
   "classify": null,
-  "attached": false
+  "attached": false,
+  "data_clear": null,
+  "setup": {
+    "complete": false,
+    "error": null
+  },
+  "copy_result": null,
+  "shims": {
+    "installed": 0,
+    "total": 16,
+    "path": "/var/folders/g3/qjbw6xys4_1cb6zs26vqbjkr0000gn/T/hr-ui-guard-home-10045/.local/share/headroom/shims",
+    "status": "missing",
+    "shell": "/bin/zsh",
+    "source": "fresh_login_shell",
+    "shadowed": [],
+    "message": null
+  }
 }

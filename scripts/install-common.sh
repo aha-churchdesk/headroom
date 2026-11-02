@@ -15,15 +15,36 @@ hr_pids() {
   '
 }
 
+# Every headroomd of this uid, wherever it was started from: a Homebrew copy,
+# a build in a checkout. Only one can hold the queue, so an installed app
+# started beside another exits at once. Prints "pid path" lines. A name
+# that is not an executable on disk (a shell running one, say) is skipped.
+hr_any_daemons() {
+  local listing pid exe
+  listing=$(ps -axo uid=,pid=,comm= | awk -v uid="$(id -u)" '
+    $1 == uid { pid=$2; sub(/^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+/, ""); n=split($0, p, "/"); if (p[n] == "headroomd") print pid, $0 }
+  ') || return 1
+  while read -r pid exe; do
+    [ -n "$pid" ] && [ -f "$exe" ] && [ -x "$exe" ] && echo "$pid $exe"
+  done <<< "$listing"
+  return 0
+}
+
+# The same, for those not started from $HR_APP.
+hr_other_daemons() {
+  hr_any_daemons | awk -v exe="$HR_APP/Contents/MacOS/headroomd" '{ pid=$1; sub(/^[0-9]+ /, ""); if ($0 != exe) print pid, $0 }'
+}
+
 hr_require_idle() {
   local pids listing
   if [ "${HEADROOM_HOME+x}" = x ]; then
     hr_error "unset HEADROOM_HOME before managing the installed app so the queue check uses its default data directory"
     return 1
   fi
-  pids=$(hr_pids) || { hr_error "cannot inspect running processes"; return 1; }
+  pids=$(hr_any_daemons) || { hr_error "cannot inspect running processes"; return 1; }
   [ -n "$pids" ] || return 0
-  listing=$("$HR_APP/Contents/MacOS/headroom" ls) || {
+  # Whichever copy holds the socket answers; ours may not be installed yet.
+  listing=$(hr_cli ls) || {
     hr_error "cannot read the live queue; leaving Headroom running"; return 1;
   }
   # Accept only the known empty listing, with an optional held notice. Unknown
@@ -41,9 +62,37 @@ hr_require_idle() {
   fi
 }
 
+# A CLI that can read the queue: the installed one, else this checkout's.
+hr_cli() {
+  local cli="$HR_APP/Contents/MacOS/headroom"
+  [ -x "$cli" ] || cli="$(dirname "${BASH_SOURCE[0]}")/../target/release/headroom"
+  [ -x "$cli" ] || { hr_error "no headroom CLI to read the queue with"; return 1; }
+  "$cli" "$@"
+}
+
+# Stop copies started from anywhere but $HR_APP, once the queue is idle.
+hr_stop_others() {
+  local others pid exe n
+  others=$(hr_other_daemons) || return 1
+  [ -n "$others" ] || return 0
+  hr_require_idle || return 1
+  while read -r pid exe; do
+    echo "stopping Headroom started from $exe (pid $pid); only one copy can run"
+    kill -TERM "$pid" 2>/dev/null || true
+  done <<< "$others"
+  for ((n=0; n<100; n++)); do
+    others=$(hr_other_daemons) || return 1
+    [ -n "$others" ] || return 0
+    sleep 0.1
+  done
+  hr_error "Headroom from another location did not exit within 10 seconds: $others"
+  return 1
+}
+
 hr_stop() {
   local pids pid current n
   hr_require_idle || return 1
+  hr_stop_others || return 1
   pids=$(hr_pids) || return 1
   for pid in $pids; do
     # Recheck identity immediately before signalling, including the uid.
@@ -81,6 +130,13 @@ hr_wait_started() {
     sleep 0.1
   done
   hr_error "the installed daemon did not respond after launch"
+  local others
+  others=$(hr_other_daemons)
+  if [ -n "$others" ]; then
+    hr_error "another copy holds the queue, so the installed one exited: $others"
+  elif launchctl print "$HR_SERVICE" >/dev/null 2>&1; then
+    hr_error "login item: $(launchctl print "$HR_SERVICE" | awk -F' = ' '/^\tprogram|last exit code/ { printf "%s=%s ", $1, $2 }')"
+  fi
   return 1
 }
 

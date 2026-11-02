@@ -16,7 +16,7 @@ use crate::model::{Bytes, FrozenBy, HistoryEntry, Job, JobId, JobSpec, Millis, S
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum ClientMsg {
-    Enqueue(JobSpec),
+    Enqueue(Box<JobSpec>),
     Started {
         pid: i32,
         pgid: i32,
@@ -74,6 +74,10 @@ pub enum Control {
     },
     ResetProfile {
         key: String,
+    },
+    /// Forget every invocation of a command (see `classify::command_key`).
+    ResetCommand {
+        command: String,
     },
     /// Forget learned profiles, completed runs and command statistics.
     ClearData,
@@ -191,10 +195,10 @@ mod tests {
     #[test]
     fn messages_round_trip_one_per_line() {
         let msgs = vec![
-            ClientMsg::Enqueue(JobSpec {
+            ClientMsg::Enqueue(Box::new(JobSpec {
                 cmd: "pnpm test".into(),
                 ..JobSpec::default()
-            }),
+            })),
             ClientMsg::Started { pid: 10, pgid: 10 },
             ClientMsg::Exited {
                 code: Some(0),

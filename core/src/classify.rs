@@ -5,6 +5,8 @@
 //! paths, package filters, flags, shell operators and inline environment
 //! settings can all change how much work runs.
 
+use std::path::{Component, Path, PathBuf};
+
 use sha2::{Digest, Sha256};
 
 use crate::config::Config;
@@ -641,6 +643,107 @@ pub fn profile_keys(
     (key, format!("{repo}|{program}"))
 }
 
+/// A `v2:` digest segment from `profile_keys`.
+fn is_digest(segment: &str) -> bool {
+    segment
+        .strip_prefix("v2:")
+        .is_some_and(|h| h.len() == 64 && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+}
+
+/// Whether `key` is an exact workload key, not a legacy or fallback key.
+pub fn is_exact_key(key: &str) -> bool {
+    key.split('|').any(is_digest)
+}
+
+/// The command a profile key belongs to: the key without its digest, so
+/// every invocation of `git commit` in one place counts as one command.
+/// Keys without a digest are their own command.
+pub fn command_key(key: &str) -> String {
+    key.split('|')
+        .filter(|s| !is_digest(s))
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+/// Keys for what a line runs, whatever its arguments: the line's heavy
+/// workloads in order, then each of them on its own. Each workload is named
+/// by its command and the directory it runs in, so `cd <worktree>/apps/web &&
+/// S=/tmp/x yarn typecheck a.ts` shares history with that typecheck from any
+/// worktree, while `yarn biome && yarn typecheck` keeps its own.
+///
+/// Unlike `profile_keys` these drop file lists, flags and package selectors,
+/// so they stand in only until the exact key has a measured run of its own.
+/// `None` where a `cd` goes somewhere the line alone cannot say (`cd "$D"`,
+/// `cd -`, outside `top`), or the line runs nothing heavy.
+pub fn alike_keys(
+    repo: &str,
+    top: &Path,
+    cwd: &Path,
+    line: &str,
+    cfg: &Config,
+    hooked: HookProbe,
+) -> Option<(String, Vec<String>)> {
+    let mut dir = cwd.to_path_buf();
+    let mut found: Vec<(PathBuf, String)> = Vec::new();
+    for words in simple_commands(line) {
+        match words.first().map(String::as_str) {
+            Some("cd") => {
+                let target = words[1..].iter().find(|w| !is_flag(w))?;
+                if target == "-" || target.contains(['$', '`', '~']) {
+                    return None;
+                }
+                dir = lexical_join(&dir, target);
+                continue;
+            }
+            Some("pushd" | "popd") => return None,
+            _ => {}
+        }
+        if let Some(g) = git_hook(&words) {
+            if hooked(g.dir.as_deref(), g.hook) {
+                found.push((dir.clone(), format!("git {}", g.sub)));
+            }
+            continue;
+        }
+        if let Some(n) = normalize(&words).filter(|n| is_heavy(n, cfg)) {
+            found.push((dir.clone(), n.cmd()));
+        }
+    }
+    let mut names: Vec<String> = Vec::new();
+    for (at, cmd) in found {
+        let sub = at.strip_prefix(top).ok()?.display().to_string();
+        let name = if sub.is_empty() {
+            cmd
+        } else {
+            format!("{cmd} in {sub}")
+        };
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    if names.is_empty() {
+        return None;
+    }
+    let each = names.iter().map(|n| format!("{repo}|alike:{n}")).collect();
+    Some((format!("{repo}|alike:{}", names.join(", ")), each))
+}
+
+/// `dir` joined with `target`, with `.` and `..` resolved without touching
+/// the filesystem.
+fn lexical_join(dir: &Path, target: &str) -> PathBuf {
+    let mut out = dir.to_path_buf();
+    for c in Path::new(target).components() {
+        match c {
+            Component::RootDir => out = PathBuf::from("/"),
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(s) => out.push(s),
+            Component::CurDir | Component::Prefix(_) => {}
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1128,6 +1231,40 @@ mod tests {
     }
 
     #[test]
+    fn different_invocations_of_a_command_share_its_command_key() {
+        let key = |line: &str| {
+            profile_keys(
+                "/r",
+                "web",
+                "git commit",
+                "git",
+                ProfileCommand::Shell(line),
+            )
+            .0
+        };
+        let (a, b) = (key("git commit -m one"), key("git commit -m two"));
+        assert_ne!(a, b);
+        assert!(is_exact_key(&a));
+        assert_eq!(command_key(&a), "/r|web|git commit");
+        assert_eq!(command_key(&b), command_key(&a));
+        assert_eq!(command_key(&command_key(&a)), "/r|web|git commit");
+    }
+
+    #[test]
+    fn keys_without_a_digest_are_their_own_command() {
+        assert_eq!(command_key("/r|test"), "/r|test");
+        assert!(!is_exact_key("/r|test"));
+        assert_eq!(command_key(""), "");
+        // Only a whole 64-digit lowercase digest is one.
+        let short = format!("/r|v2:{}|test", "a".repeat(63));
+        let upper = format!("/r|v2:{}|test", "A".repeat(64));
+        for k in [&short, &upper] {
+            assert_eq!(&command_key(k), k);
+            assert!(!is_exact_key(k));
+        }
+    }
+
+    #[test]
     fn exact_workloads_keep_selectors_that_classification_drops() {
         for (a, b) in [
             ("vitest run", "vitest run src/a.test.ts"),
@@ -1200,5 +1337,77 @@ mod tests {
             .unwrap();
         assert_eq!(fingerprint.len(), 64);
         assert!(fingerprint.bytes().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    fn alike_in(cwd: &str, line: &str) -> Option<(String, Vec<String>)> {
+        let top = Path::new(cwd.split("/apps").next().unwrap());
+        alike_keys(
+            "/r",
+            top,
+            Path::new(cwd),
+            line,
+            &Config::default(),
+            &|_, _| true,
+        )
+    }
+
+    #[test]
+    fn worktrees_running_the_same_workload_share_an_alike_key() {
+        let a = alike_in(
+            "/w/one",
+            "cd /w/one/apps/web && S=/tmp/one yarn typecheck src/a.ts 2>&1 | tail -20",
+        );
+        let b = alike_in("/w/two/apps/web", "S=/tmp/two yarn typecheck src/b.ts");
+        assert_eq!(a, b);
+        let (line, each) = a.unwrap();
+        assert_eq!(line, "/r|alike:yarn typecheck in apps/web");
+        assert_eq!(each, vec![line.clone()]);
+    }
+
+    #[test]
+    fn alike_keys_name_every_heavy_workload_in_order_once() {
+        let (line, each) = alike_in(
+            "/w/one",
+            "yarn eslint b.ts && cd apps/web && yarn typecheck | tail -2 && cd ./../.. && yarn eslint c.ts",
+        )
+        .unwrap();
+        assert_eq!(line, "/r|alike:eslint, yarn typecheck in apps/web");
+        assert_eq!(
+            each,
+            ["/r|alike:eslint", "/r|alike:yarn typecheck in apps/web"]
+        );
+        assert_ne!(
+            alike_in("/w/one", "yarn typecheck"),
+            alike_in("/w/one", "cd apps/web && yarn typecheck"),
+            "a cd moves the workload"
+        );
+    }
+
+    #[test]
+    fn hooked_git_commands_are_workloads_and_unhooked_ones_are_not() {
+        let cfg = Config::default();
+        let top = Path::new("/w/one");
+        let hooked = alike_keys("/r", top, top, "git commit -m x", &cfg, &|_, _| true);
+        assert_eq!(hooked.unwrap().0, "/r|alike:git commit");
+        let bare = alike_keys("/r", top, top, "git commit -m x", &cfg, &|_, _| false);
+        assert_eq!(bare, None);
+    }
+
+    #[test]
+    fn no_alike_key_where_the_line_alone_cannot_say_where_it_runs() {
+        for line in [
+            "cd \"$DIR\" && yarn typecheck",
+            "cd ~/x && yarn typecheck",
+            "cd - && yarn typecheck",
+            "cd && yarn typecheck",
+            "cd /elsewhere && yarn typecheck",
+            "pushd apps/web && yarn typecheck",
+            "git diff | tail -2",
+            "",
+        ] {
+            assert_eq!(alike_in("/w/one", line), None, "{line}");
+        }
+        // A cd after the last workload moves nothing.
+        assert!(alike_in("/w/one", "yarn typecheck && cd /elsewhere").is_some());
     }
 }

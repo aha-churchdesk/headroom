@@ -15,7 +15,7 @@ use crate::model::{
     Bytes, FrozenBy, HistoryEntry, Job, JobId, JobSpec, JobState, Millis, Outcome, Part, Pressure,
     Snapshot, merge_parts,
 };
-use crate::profile::{Estimate, Profiles, Run};
+use crate::profile::{Estimate, Keys, Profiles, Run};
 use crate::protocol::{Control, DaemonMsg, Listing};
 use crate::tally::Tally;
 
@@ -511,6 +511,13 @@ impl Scheduler {
                 fx.push(Effect::SaveProfiles);
                 self.reestimate(Some(&key));
             }
+            Control::ResetCommand { command } => {
+                if !self.profiles.reset_command(&command) {
+                    return Err(format!("no profile for {command}"));
+                }
+                fx.push(Effect::SaveProfiles);
+                self.reestimate(None);
+            }
         }
         Ok(())
     }
@@ -689,9 +696,8 @@ impl Scheduler {
     /// Historical peaks may include runs from versions that reduced workers.
     /// Reserve for the untouched command's default count when known.
     fn estimate_for(&self, spec: &JobSpec) -> Estimate {
-        self.profiles.estimate_for_workers(
-            &spec.key,
-            &spec.fallback_key,
+        self.profiles.estimate_alike_for_workers(
+            &keys(spec),
             self.cfg.default_estimate,
             spec.tune.map(|t| t.default_workers),
         )
@@ -699,8 +705,7 @@ impl Scheduler {
 
     fn median_for(&self, spec: &JobSpec) -> Option<u64> {
         self.profiles
-            .get(&spec.key)?
-            .median_ms_for_workers(spec.tune.map(|t| t.default_workers))
+            .median_alike(&keys(spec), spec.tune.map(|t| t.default_workers))
     }
 
     /// After the settings or a profile changed: queued jobs' estimates.
@@ -709,7 +714,7 @@ impl Scheduler {
             .jobs
             .values()
             .filter(|e| e.job.state == JobState::Queued)
-            .filter(|e| key.is_none_or(|k| e.job.spec.key == k || e.job.spec.fallback_key == k))
+            .filter(|e| key.is_none_or(|k| draws_on(&e.job.spec, k)))
             .map(|e| e.job.id)
             .collect();
         for id in ids {
@@ -750,7 +755,7 @@ impl Scheduler {
     }
 
     /// Keep observed memory even when a run was interrupted, then refresh
-    /// queued consumers of both the exact profile and its fallback.
+    /// queued consumers of the exact profile, its fallback and its alike line.
     fn record_run(
         &mut self,
         j: &Job,
@@ -762,25 +767,26 @@ impl Scheduler {
         if j.started_at.is_none() || j.pgid.is_none() {
             return false;
         }
-        self.profiles.record(
-            &j.spec.key,
-            &j.spec.fallback_key,
-            Run {
-                peak: j.peak,
-                duration_ms,
-                exit,
-                flagged,
-                at: wall,
-                workers: j
-                    .tuned
-                    .map(|t| t.workers)
-                    .or(j.spec.tune.map(|t| t.default_workers)),
-                parts: j.parts.clone(),
-            },
-        );
+        let run = Run {
+            peak: j.peak,
+            duration_ms,
+            exit,
+            flagged,
+            at: wall,
+            workers: j
+                .tuned
+                .map(|t| t.workers)
+                .or(j.spec.tune.map(|t| t.default_workers)),
+            parts: j.parts.clone(),
+        };
+        self.profiles.record_alike(&j.spec.alike_key, &run);
+        self.profiles.record(&j.spec.key, &j.spec.fallback_key, run);
         self.reestimate(Some(&j.spec.key));
         if j.spec.fallback_key != j.spec.key {
             self.reestimate(Some(&j.spec.fallback_key));
+        }
+        if !j.spec.alike_key.is_empty() {
+            self.reestimate(Some(&j.spec.alike_key));
         }
         true
     }
@@ -912,6 +918,24 @@ impl Scheduler {
         }
         fx
     }
+}
+
+/// The profiles `spec`'s estimate draws on.
+fn keys(spec: &JobSpec) -> Keys<'_> {
+    Keys {
+        exact: &spec.key,
+        line: &spec.alike_key,
+        each: &spec.alike_each,
+        fallback: &spec.fallback_key,
+    }
+}
+
+/// Whether a change to profile `key` can change `spec`'s estimate.
+fn draws_on(spec: &JobSpec, key: &str) -> bool {
+    spec.key == key
+        || spec.fallback_key == key
+        || spec.alike_key == key
+        || spec.alike_each.iter().any(|k| k == key)
 }
 
 fn freeze(e: &mut Entry, by: FrozenBy, now: Millis) {
@@ -1217,6 +1241,74 @@ mod tests {
             fallback_key: format!("/r|own-{cmd}"),
             ..spec(cmd)
         }
+    }
+
+    /// An invocation of `cmd` whose exact key no other job shares.
+    fn alike(cmd: &str, exact: &str) -> JobSpec {
+        let line = format!("/r|alike:{cmd}");
+        JobSpec {
+            key: format!("/r|{exact}|{cmd}"),
+            alike_each: vec![line.clone()],
+            alike_key: line,
+            ..spec(cmd)
+        }
+    }
+
+    #[test]
+    fn a_finished_run_teaches_queued_invocations_with_other_arguments() {
+        let mut s = sched(12);
+        s.enqueue(1, alike("typecheck", "a"), 0);
+        s.started(1, 100);
+        s.control(9, Control::Hold { on: true }, 0, 0);
+        s.enqueue(2, alike("typecheck", "b"), 0);
+        s.enqueue(3, alike("biome", "c"), 0);
+        let at = |s: &Scheduler, id| {
+            let j = s.list().queued.into_iter().find(|j| j.id == id).unwrap();
+            (j.estimate, j.samples, j.median_ms.is_some())
+        };
+        assert_eq!(
+            (at(&s, 2), at(&s, 3)),
+            ((3 * GIB, 0, false), (3 * GIB, 0, false))
+        );
+        s.tick(snap(12), &usage(100, 4.5), 1_000);
+        s.exited(1, Some(0), None, 61_000, 100);
+        assert_eq!(
+            at(&s, 2),
+            (9 * GIB / 2, 0, true),
+            "learned, though not its own run"
+        );
+        assert_eq!(
+            at(&s, 3),
+            (3 * GIB, 0, false),
+            "another workload learns nothing"
+        );
+    }
+
+    #[test]
+    fn a_light_workload_learned_elsewhere_starts_ahead_of_a_heavy_head() {
+        // A build runs; 4 GB more is available, 2 of it kept free, so a
+        // job at the 3 GB default waits.
+        let mut s = sched(12);
+        s.enqueue(1, spec("build"), 0);
+        s.started(1, 100);
+        s.tick(snap(4), &usage(100, 3.0), 1_000);
+        for (cmd, mb) in [("typecheck", 5 * 1024), ("biome", 100)] {
+            let run = Run {
+                peak: mb * 1024 * 1024,
+                duration_ms: 10_000,
+                exit: Some(0),
+                flagged: false,
+                at: 0,
+                workers: None,
+                parts: Vec::new(),
+            };
+            s.profiles.record_alike(&format!("/r|alike:{cmd}"), &run);
+        }
+        s.enqueue(2, alike("typecheck", "a"), 1_000);
+        let fx = s.enqueue(3, alike("biome", "b"), 1_000);
+        assert!(granted(&fx, 3) && !granted(&fx, 2));
+        let fx = s.enqueue(4, spec("lint"), 1_000);
+        assert!(!granted(&fx, 4), "without history the default still waits");
     }
 
     #[test]
@@ -2066,6 +2158,52 @@ mod tests {
             )[0],
             DaemonMsg::Error { .. }
         ));
+    }
+
+    #[test]
+    fn reset_command_forgets_its_invocations_and_reestimates() {
+        let mut s = sched(4);
+        let key = format!("/r|v2:{}|b", "a".repeat(64));
+        s.profiles.record(
+            &key,
+            "/r|x",
+            Run {
+                peak: 9 * GIB,
+                duration_ms: 1,
+                exit: Some(0),
+                flagged: false,
+                at: 0,
+                workers: None,
+                parts: Vec::new(),
+            },
+        );
+        s.enqueue(1, spec("a"), 0);
+        let mut b = spec("b");
+        b.key = key.clone();
+        s.enqueue(2, b, 0);
+        assert!(s.list().queued[0].estimate > 3 * GIB);
+        let fx = s.control(
+            9,
+            Control::ResetCommand {
+                command: "/r|b".into(),
+            },
+            0,
+            0,
+        );
+        assert!(fx.contains(&Effect::SaveProfiles));
+        assert!(s.profiles.get(&key).is_none());
+        assert_eq!(s.list().queued[0].estimate, 3 * GIB);
+        // Nothing left: the second press is refused, not silently accepted.
+        let again = s.control(
+            9,
+            Control::ResetCommand {
+                command: "/r|b".into(),
+            },
+            0,
+            0,
+        );
+        assert!(!again.contains(&Effect::SaveProfiles));
+        assert!(matches!(sent(&again, 9)[0], DaemonMsg::Error { .. }));
     }
 
     #[test]

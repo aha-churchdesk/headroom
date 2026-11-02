@@ -29,6 +29,11 @@ pub enum UiCmd {
     FinishSetup,
     CheckShims,
     ResetProfile { key: String },
+    ResetCommand { command: String },
+    OpenProfile { key: Option<String> },
+    ScanWorktrees,
+    RemoveWorktree { repo: String, path: String },
+    RemoveMergedWorktrees { repo: String },
     ClearData,
     Set { key: String, value: Value },
     AddPattern { pattern: String },
@@ -46,6 +51,14 @@ pub enum Do {
     CheckShims,
     Login(bool),
     Classify(String),
+    /// The profile page shows this key's details; `None` when it is closed.
+    OpenProfile(Option<String>),
+    ScanWorktrees,
+    RemoveWorktree {
+        repo: String,
+        path: String,
+    },
+    RemoveMergedWorktrees(String),
     Quit,
 }
 
@@ -71,6 +84,11 @@ pub fn translate(cmd: UiCmd, cfg: &Config) -> Result<Do, String> {
         UiCmd::Low { id, on } => Do::Control(Control::Low { id: job(&id)?, on }),
         UiCmd::Move { id, to } => Do::Control(Control::Move { id: job(&id)?, to }),
         UiCmd::ResetProfile { key } => Do::Control(Control::ResetProfile { key }),
+        UiCmd::ResetCommand { command } => Do::Control(Control::ResetCommand { command }),
+        UiCmd::OpenProfile { key } => Do::OpenProfile(key),
+        UiCmd::ScanWorktrees => Do::ScanWorktrees,
+        UiCmd::RemoveWorktree { repo, path } => Do::RemoveWorktree { repo, path },
+        UiCmd::RemoveMergedWorktrees { repo } => Do::RemoveMergedWorktrees(repo),
         UiCmd::ClearData => Do::Control(Control::ClearData),
         UiCmd::Dismiss { id } => Do::Dismiss(id),
         UiCmd::Copy { text } => Do::Copy(text),
@@ -168,6 +186,36 @@ mod tests {
             Ok(Do::Control(Control::Hold { on: false }))
         );
         assert_eq!(t(r#"{"cmd":"quit"}"#), Ok(Do::Quit));
+        assert_eq!(
+            t(r#"{"cmd":"reset_command","command":"/r|git commit"}"#),
+            Ok(Do::Control(Control::ResetCommand {
+                command: "/r|git commit".into()
+            }))
+        );
+        assert_eq!(
+            t(r#"{"cmd":"open_profile","key":"cmd:/r|git commit"}"#),
+            Ok(Do::OpenProfile(Some("cmd:/r|git commit".into())))
+        );
+        assert_eq!(
+            t(r#"{"cmd":"open_profile","key":null}"#),
+            Ok(Do::OpenProfile(None))
+        );
+        assert_eq!(t(r#"{"cmd":"scan_worktrees"}"#), Ok(Do::ScanWorktrees));
+        assert_eq!(
+            t(r#"{"cmd":"remove_worktree","repo":"/r","path":"/r.worktrees/a"}"#),
+            Ok(Do::RemoveWorktree {
+                repo: "/r".into(),
+                path: "/r.worktrees/a".into()
+            })
+        );
+        assert_eq!(
+            t(r#"{"cmd":"remove_merged_worktrees","repo":"/r"}"#),
+            Ok(Do::RemoveMergedWorktrees("/r".into()))
+        );
+        assert!(
+            t(r#"{"cmd":"remove_worktree","repo":"/r"}"#).is_err(),
+            "no path"
+        );
     }
 
     #[test]

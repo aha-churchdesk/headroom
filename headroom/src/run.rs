@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use headroom_core::classify::{ProfileCommand, describe_in, profile_keys};
+use headroom_core::classify::{ProfileCommand, alike_keys, describe_in, profile_keys};
 use headroom_core::model::JobSpec;
 use headroom_core::protocol::{ClientMsg, DaemonMsg, read_msg, write_msg};
 use headroom_core::shell;
@@ -170,15 +170,20 @@ pub fn run(o: RunOpts) -> i32 {
     let line = o.line();
     let cwd = std::env::current_dir().unwrap_or_default();
     let git = git_context(&cwd);
-    let (cmd, program) = describe_in(&line, &cfg, &|d, h| git_hook_installed(&cwd, d, h));
+    let hooked = |d: Option<&str>, h: &str| git_hook_installed(&cwd, d, h);
+    let (cmd, program) = describe_in(&line, &cfg, &hooked);
     let (key, fallback_key) =
         profile_keys(&git.repo, &git.subdir, &cmd, &program, o.profile_command());
+    let (alike_key, alike_each) =
+        alike_keys(&git.repo, &git.top, &git.cwd, &line, &cfg, &hooked).unwrap_or_default();
     let tune = tunable(&line, &cwd);
     let spec = JobSpec {
         full_cmd: line,
         cmd,
         key,
         fallback_key,
+        alike_key,
+        alike_each,
         label: o.label.clone().unwrap_or(git.label),
         cwd: cwd.display().to_string(),
         session: o.session.clone(),
@@ -209,7 +214,7 @@ impl Session {
     /// Enqueue and wait briefly for the first answer; `None` means fail open.
     fn open(stream: UnixStream, spec: JobSpec) -> Option<Self> {
         let mut writer = stream.try_clone().ok()?;
-        write_msg(&mut writer, &ClientMsg::Enqueue(spec)).ok()?;
+        write_msg(&mut writer, &ClientMsg::Enqueue(Box::new(spec))).ok()?;
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let mut r = BufReader::new(stream);

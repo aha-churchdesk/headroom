@@ -99,6 +99,13 @@ pub struct JobSpec {
     pub key: String,
     /// Coarser key (repository and program) used while `key` has few runs.
     pub fallback_key: String,
+    /// Lines running the same workloads, whatever their arguments, and each
+    /// of those workloads alone (see `classify::alike_keys`). Consulted
+    /// before `fallback_key`; empty from older clients.
+    #[serde(default)]
+    pub alike_key: String,
+    #[serde(default)]
+    pub alike_each: Vec<String>,
     /// Worktree or directory name, e.g. `sc-49123`.
     pub label: String,
     pub cwd: String,

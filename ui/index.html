@@ -13,7 +13,7 @@
 
 :root{
   color-scheme: light dark;
-  --pop-w: 400px;
+  --pop-w: 520px;
   --pop-max-h: 640px;
 
   --bg:        #ffffff;
@@ -339,6 +339,12 @@ button:disabled[data-tip]{ cursor:default; }
 .foot button:focus-visible{ outline-offset:-3px; }
 .foot button:hover{ background:var(--bg); color:var(--text); }
 .foot button.selected{ background:var(--bg); color:var(--text); font-weight:650; }
+.update-dot{ display:inline-block; width:6px; height:6px; margin-left:4px; border-radius:50%; background:var(--accent); vertical-align:2px; }
+.update-note{ margin-top:6px; font-size:11px; color:var(--text-dim); }
+.install-kind{ margin-top:2px; font-size:11px; overflow-wrap:anywhere; }
+.update-note b{ color:var(--text); }
+.update-cmd{ display:flex; align-items:center; gap:8px; margin-top:4px; }
+.update-cmd .mono{ flex:1; min-width:0; overflow-wrap:anywhere; }
 
 /* Drill-in pages */
 .pagehead{
@@ -367,6 +373,18 @@ button:disabled[data-tip]{ cursor:default; }
 .crow .l1 .n b{ color:var(--text); font-weight:600; }
 .crow .cbar{ height:3px; border-radius:2px; background:var(--track); margin:4px 0 3px; }
 .crow .cbar i{ display:block; height:100%; border-radius:2px; background:var(--accent); }
+.wt-top{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:4px 14px 10px; border-bottom:1px solid var(--sep); font-size:12px; }
+.wt-top button{ margin-left:auto; }
+.wt-repo{ padding:12px 14px 6px; border-bottom:1px solid var(--sep-soft); }
+.wt-repo .l1{ display:flex; align-items:baseline; gap:8px; }
+.wt-repo .l1 button{ margin-left:auto; white-space:nowrap; }
+.wt-repo .l1 b{ white-space:nowrap; }
+.wt-repo .l1 .dim{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.wt-row .l1{ display:flex; align-items:center; gap:6px; }
+.wt-row .l1 .name{ flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.wt-note{ padding:2px 14px 6px; font-size:11px; color:var(--text-faint); }
+.wt-row .wt-note{ padding:4px 0 0; }
+.wt-note.bad{ color:var(--bad); }
 .cmd-note{ padding:8px 14px 12px; font-size:11px; color:var(--text-faint); }
 .prof{ padding:12px 14px; }
 .prof .parts{ margin-top:14px; }
@@ -557,6 +575,7 @@ const UI = {
   restoringFocus: false,
   welcomeOpen: new Set(),
   profileKey: null,
+  openProfile: null,      // the profile the daemon sends details for
   trail: [],             // Previous page, reader position, and the control that opened this page
   cmdDays: 7,             // Commands page: window in days, and the column it sorts by
   cmdSort: "run_s",
@@ -672,6 +691,11 @@ function navigate(page, trigger, back = false){
   }
   UI.page = saved?.page || page;
   if (saved){ UI.profileKey = saved.profileKey; UI.profileFrom = saved.profileFrom; }
+  // Only the open profile carries what ran inside it; the answer re-renders.
+  const open = UI.page === "profile" ? UI.profileKey : null;
+  if (open !== UI.openProfile){ UI.openProfile = open; send({ cmd:"open_profile", key: open }); }
+  // Worktrees change outside Headroom: look again each time the tab opens.
+  if (UI.page === "worktrees" && !back) send({ cmd:"scan_worktrees" });
   render(saved || { scroll:0, section });
 }
 
@@ -702,12 +726,15 @@ function render(destination = null){
   const occurrence = control ? controlsWithKey(control).indexOf(active) : -1;
 
   $("head").innerHTML = renderHead(STATE);
+  UI.renderScroll = destination ? destination.scroll : scroll;
+  virtual.drawn = null;
   view.innerHTML = UI.page === "welcome"  ? renderWelcome(STATE)
                  : UI.page === "main"     ? renderMain(STATE)
                  : UI.page === "history"  ? renderHistory(STATE)
                  : UI.page === "commands" ? renderCommands(STATE)
                  : UI.page === "profile"  ? renderProfile(STATE)
                  : UI.page === "others"   ? renderOthers(STATE)
+                 : UI.page === "worktrees" ? renderWorktrees(STATE)
                  :                          renderSettings(STATE);
   $("foot").innerHTML = renderFoot();
   $("foot").style.display = "";
@@ -718,6 +745,8 @@ function render(destination = null){
 
   // Keep the reader's place and the cursor across the 1 s rerender.
   view.scrollTop = destination ? destination.scroll : scroll;
+  UI.renderScroll = null;
+  measureVirtual(view);
   const section = destination?.section ? $(destination.section) : null;
   const target = section || (destination
     ? (destination.control && controlsWithKey(destination.control)[destination.occurrence]) || $("page-title")
@@ -782,7 +811,6 @@ function renderHead(S){
 }
 
 function renderLastDay(h){
-  const bad = h.failed + h.killed;
   const cell = (value, label, tip, cls = "") => `
         <div class="${cls}" data-tip="${tip}"><b>${value}</b><span>${label}</span></div>`;
   const waits = h.waited
@@ -799,7 +827,7 @@ function renderLastDay(h){
       <div class="day-row num">
         ${cell(`${h.runs}${h.more ? "+" : ""}`, h.runs === 1 ? "run" : "runs",
           h.more ? `At least ${h.runs} jobs finished in the last 24 hours. History keeps 2,000 runs; more than that finished today` : `${h.runs} jobs finished in the last 24 hours.`, h.runs ? "" : "zero")}
-        ${cell(bad, "failed", `${h.failed} exited with an error, ${h.killed} killed to free memory`, bad ? "" : "zero")}
+        ${cell(h.failed, "failed", `Exited with an error, or killed twice to free memory.${h.requeued ? ` ${h.requeued} more ${h.requeued === 1 ? "was" : "were"} killed once and run again.` : ""}`, h.failed ? "" : "zero")}
         ${cell(waited, "waited", ofRuns, h.waited ? "" : "zero")}
         ${cell(dur(h.wait_p50_s), "wait p50", `Median queue wait: ${dur(h.wait_p50_s)}. Half the jobs that waited, waited this long or less. ${waits}`, h.wait_p50_s ? "" : "zero")}
         ${cell(dur(h.wait_p95_s), "wait p95", `95th-percentile queue wait: ${dur(h.wait_p95_s)}. 95 in 100 jobs that waited, waited this long or less. ${waits}`, h.wait_p95_s ? "" : "zero")}
@@ -1029,8 +1057,8 @@ function renderDetail(j){
 function renderFoot(){
   if (UI.page === "welcome") return `<div class="welcome-footer"><span>Revisit this in Settings</span><button data-act="finish_setup"${UI.finishingSetup ? " disabled" : ""}>${UI.finishingSetup ? "Saving…" : "Continue to Queue"}</button></div>`;
   const selected = UI.page === "profile" ? UI.profileFrom || "history" : UI.page;
-  return [["main", "Queue"], ["history", "History"], ["commands", "Commands"], ["others", "Other apps"], ["settings", "Settings"]]
-    .map(([page, label]) => `<button class="${page === selected ? "selected" : ""}" data-act="goto" data-page="${page}"${page === selected ? ' aria-current="page"' : ""}${UI.page === "profile" && page === selected ? ' data-back="true"' : ""}>${label}</button>`).join("");
+  return [["main", "Queue"], ["history", "History"], ["commands", "Commands"], ["worktrees", "Worktrees"], ["others", "Other apps"], ["settings", "Settings"]]
+    .map(([page, label]) => `<button class="${page === selected ? "selected" : ""}" data-act="goto" data-page="${page}"${page === selected ? ' aria-current="page"' : ""}${UI.page === "profile" && page === selected ? ' data-back="true"' : ""}>${label}${page === "settings" && STATE?.update ? `<span class="update-dot" title="Version ${esc(STATE.update.latest)} is available"><span class="sr-only">, update available</span></span>` : ""}</button>`).join("");
 }
 
 function pageHead(title){
@@ -1048,13 +1076,69 @@ function outcomeTag(r){
   return r.exit === 0 ? `<span class="gtag ok">ok</span>` : `<span class="gtag fail">exit ${r.exit}</span>`;
 }
 
+/* Long lists draw only the rows near what #view shows, with spacers for
+   the rest, so the 1 s rerender stays cheap with thousands of rows. Row
+   heights vary (a guard reason wraps), so each is measured once drawn and
+   unmeasured rows count as the average. */
+const VIRTUAL_MIN = 100;
+const virtual = { heights: new Map(), drawn: null };
+
+function virtualRows(items, idOf, html){
+  const view = $("view");
+  const height = view.clientHeight;
+  if (items.length < VIRTUAL_MIN || !height){ virtual.drawn = null; return items.map(html).join(""); }
+  const known = [...virtual.heights.values()];
+  const guess = known.length ? known.reduce((a, b) => a + b, 0) / known.length : 56;
+  const h = items.map(r => virtual.heights.get(idOf(r)) ?? guess);
+  // The list starts below the page's header rows; measured after each draw.
+  const total = h.reduce((n, v) => n + v, 0);
+  // Clamped: the list may have shrunk under a scroll position.
+  const top = Math.min(Math.max(0, total - height), Math.max(0, (UI.renderScroll ?? view.scrollTop) - (virtual.top ?? 0)));
+  const from = top - height, to = top + 2 * height;
+  let y = 0, first = items.length, last = items.length;
+  for (let i = 0; i < items.length; i++){
+    if (first === items.length && y + h[i] > from) first = i;
+    if (y >= to){ last = i; break; }
+    y += h[i];
+  }
+  const sum = (a, b) => h.slice(a, b).reduce((n, v) => n + v, 0);
+  const above = sum(0, first);
+  virtual.drawn = [above, above + sum(first, last)];
+  return `<div class="vspace" data-vtop style="height:${above}px"></div>`
+    + items.slice(first, last).map(r => html(r).replace(/^(\s*<div)/, `$1 data-vrow="${esc(idOf(r))}"`)).join("")
+    + `<div class="vspace" style="height:${sum(last, items.length)}px"></div>`;
+}
+
+/** After a draw: learn row heights and where the list starts. */
+function measureVirtual(view){
+  if (!virtual.drawn) return;
+  const spacer = view.querySelector?.("[data-vtop]");
+  if (spacer) virtual.top = spacer.offsetTop;
+  for (const row of view.querySelectorAll?.("[data-vrow]") || []){
+    if (row.offsetHeight) virtual.heights.set(row.dataset.vrow, row.offsetHeight);
+  }
+}
+
+/** Scrolled past the drawn rows: draw the ones now in view. */
+function onViewScroll(){
+  if (!virtual.drawn || virtual.pending) return;
+  virtual.pending = true;
+  requestAnimationFrame(() => {
+    virtual.pending = false;
+    const view = $("view");
+    const top = view.scrollTop - (virtual.top ?? 0);
+    const [a, b] = virtual.drawn;
+    if (top < a || top + view.clientHeight > b) render();
+  });
+}
+
 function renderHistory(S){
-  return pageHead("History") + (S.history.length ? S.history.map(r => `
-    <div class="hrow" role="button" tabindex="0" data-act="profile" data-key="${esc(r.key)}"${r.ended_at != null ? ` data-run="${esc(JSON.stringify([r.id, r.ended_at, r.guard?.action || null]))}"` : ""}>
+  return pageHead("History") + (S.history.length ? virtualRows(S.history, r => `h:${r.id}:${r.ended_at}:${r.guard?.action || ""}`, r => `
+    <div class="hrow" role="button" tabindex="0" data-act="profile" data-key="${esc(r.profile ?? r.key)}"${r.ended_at != null ? ` data-run="${esc(JSON.stringify([r.id, r.ended_at, r.guard?.action || null]))}"` : ""}>
       <div class="l1"><span class="name"><b>${esc(r.label)}</b> <span class="dim">· ${esc(r.cmd)}</span></span>${outcomeTag(r)}</div>
       <div class="l2 num">${dur(r.duration_s)} · peak ${gb(r.peak)} / est ${gb(r.estimate)} GB${r.tuned ? ` · ${r.tuned.workers}/${r.tuned.default} workers` : ""}${r.ahead_of ? ` · started ahead of ${esc(r.ahead_of)}` : ""} · ${ago(r.ended_ago_s)}
         ${r.guard && r.guard.why ? `<br>${esc(r.guard.why)}` : ""}</div>
-    </div>`).join("") : `<div class="empty">No runs yet</div>`);
+    </div>`) : `<div class="empty">No runs yet</div>`);
 }
 
 const CMD_SORTS = [["run_s", "Time"], ["runs", "Runs"], ["gb_h", "Memory"], ["wait_s", "Waiting"]];
@@ -1092,16 +1176,70 @@ function renderCommands(S){
       ${cell(dur(t.run_s), "running", "Time the commands ran")}
       ${cell(dur(t.wait_s), "waiting", "Time in the queue before starting", t.wait_s ? "" : "zero")}
       ${cell(gbh(t.gb_h), "GB·h", "Peak memory × run time, summed: the memory held from other work")}
-    </div>` + rows.map(r => `
-    <div class="hrow crow" role="button" tabindex="0" data-act="profile" data-key="${esc(r.key)}">
+    </div>` + virtualRows(rows, r => `c:${r.key}`, r => `
+    <div class="hrow crow" role="button" tabindex="0" data-act="profile" data-key="${esc(r.profile ?? r.key)}">
       <div class="l1"><span class="name">${keyName(r.key)}</span>
-        <span class="n num"><b>${r.runs}</b> run${r.runs === 1 ? "" : "s"}</span></div>
+        <span class="n num">${r.runs ? `<b>${r.runs}</b> run${r.runs === 1 ? "" : "s"}` : `<span title="Cancelled or left before it started; only its time waiting counts">never started</span>`}</span></div>
       <div class="cbar"><i style="width:${(r[key] / top * 100).toFixed(1)}%"></i></div>
       <div class="l2 num">${dur(r.run_s)} running · ${gbh(r.gb_h)} GB·h · peak ${gb(r.peak)} GB${
         r.wait_s ? ` · waited ${dur(r.wait_s)}` : ""}${
         r.failed ? ` · ${r.failed} failed` : ""}</div>
-    </div>`).join("") + `
-    <div class="cmd-note">${w.count > rows.length ? `The ${rows.length} with the most time running, of ${w.count} commands. ` : ""}Kept for ${wins[wins.length - 1].days} days. GB·h is peak memory × run time.</div>`;
+    </div>`) + `
+    <div class="cmd-note">${rows.length} command${rows.length === 1 ? "" : "s"}. Every run of a command counts toward it, whatever its arguments. Kept for ${wins[wins.length - 1].days} days, counted in whole UTC days. GB·h is peak memory × run time.</div>`;
+}
+
+/** "/Users/me/Projects/app" → "app". */
+const lastPart = p => String(p ?? "").split("/").filter(Boolean).pop() || String(p ?? "");
+
+function renderWorktrees(S){
+  const w = S.worktrees;
+  const head = pageHead("Worktrees");
+  if (!w) return head + `<div class="empty">Not available in this version</div>`;
+  const removing = new Set(w.removing || []);
+  const results = w.results || {};
+  const repos = (w.repos || []).map(r => ({ ...r, worktrees: r.worktrees.filter(x => !x.main) }));
+  const all = repos.flatMap(r => r.worktrees);
+  const removable = all.filter(x => x.blocker == null);
+  const checked = w.scanning ? "Looking…" : w.scanned_ago_s == null ? "Not looked at yet" : `Checked ${ago(w.scanned_ago_s)}`;
+  const top = `<div class="wt-top num"><span>${all.length} worktree${all.length === 1 ? "" : "s"} · <b>${removable.length}</b> can be removed</span>
+      <span class="dim">${checked}</span>
+      <button class="chip-btn" data-act="scan_worktrees"${w.scanning ? " disabled" : ""}>Check again</button></div>`;
+  if (!repos.length) return head + top + `<div class="empty">${w.scanning ? "Looking at your repositories…" : "No worktrees besides your checkouts"}</div>`;
+  // Removable first, oldest first: those are what this page is for.
+  const order = x => x.blocker == null ? 0 : x.merged ? 1 : 2;
+  const items = repos.flatMap(r => {
+    const can = r.worktrees.filter(x => x.blocker == null && !removing.has(x.path)).length;
+    const key = "rmall:" + r.repo;
+    return [{ head:r, can, key }, ...[...r.worktrees]
+      .sort((a, b) => order(a) - order(b) || (b.last_commit_ago_s ?? 0) - (a.last_commit_ago_s ?? 0))
+      .map(x => ({ repo:r.repo, against:r.default, x }))];
+  });
+  const row = it => {
+    if (it.head){
+      const r = it.head;
+      return `<div class="wt-repo"><div class="l1"><b>${esc(lastPart(r.repo))}</b>
+          <span class="dim">${r.worktrees.length} · against ${esc(r.default ?? "no default branch")}</span>
+          ${it.can ? `<button class="chip-btn ${confirming(it.key) ? "confirm" : "danger"}" data-act="remove_merged_worktrees" data-repo="${esc(r.repo)}" data-confirm="${esc(it.key)}">${confirming(it.key) ? `Remove ${it.can}? Click again` : `Remove ${it.can} merged`}</button>` : ""}</div>
+        ${r.prs_checked ? "" : `<div class="wt-note">Squash merges can't be seen here: no merged pull requests could be read from GitHub (no GitHub remote, or the gh CLI is missing or signed out).</div>`}</div>`;
+    }
+    const x = it.x, key = "rmwt:" + x.path, res = results[x.path];
+    const tag = x.missing ? `<span class="gtag user">folder missing</span>`
+      : x.merged === "pr" ? `<span class="gtag ok" title="Pull request #${x.pr} was merged with this branch's last commit">PR #${x.pr} merged</span>`
+      : x.merged === "branch" ? `<span class="gtag ok" title="In ${esc(it.against ?? "the default branch")}">merged</span>` : "";
+    const action = removing.has(x.path) ? `<span class="dim">Removing…</span>`
+      : x.blocker == null ? `<button class="chip-btn ${confirming(key) ? "confirm" : "danger"}" data-act="remove_worktree" data-repo="${esc(it.repo)}" data-path="${esc(x.path)}" data-confirm="${esc(key)}">${confirming(key) ? "Remove? Click again" : "Remove"}</button>` : "";
+    const why = [
+      x.last_commit_ago_s == null ? null : `last commit ${ago(x.last_commit_ago_s)}`,
+      x.blocker,
+      !x.merged && x.remote_gone ? "remote branch deleted" : null,
+    ].filter(Boolean).map(esc).join(" · ");
+    return `<div class="hrow wt-row"><div class="l1"><span class="name"><b>${esc(x.branch ?? "detached")}</b> <span class="dim">· ${esc(lastPart(x.path))}</span></span>${tag}${action}</div>
+      <div class="l2 num" title="${esc(x.path)}">${why}</div>
+      ${res && !res.ok ? `<div class="wt-note bad" role="alert">${esc(res.message)}</div>` : ""}</div>`;
+  };
+  const done = Object.values(results).filter(r => r.ok).length;
+  return head + top + (done ? `<div class="wt-note">${done} removed this session.</div>` : "")
+    + virtualRows(items, it => it.head ? "wh:" + it.head.repo : "w:" + it.x.path, row);
 }
 
 function sparkline(peaks, p90){
@@ -1122,9 +1260,10 @@ function renderProfile(S){
   const p = S.profiles[UI.profileKey];
   if (!p) return pageHead("Profile") + `<div class="empty">No runs recorded for this command yet.</div>`;
   const key = "reset:" + UI.profileKey;
+  const name = p.command ?? UI.profileKey;
   return pageHead("Profile") + `
     <div class="prof">
-      <div class="key mono" title="${esc(UI.profileKey)}">${esc(keyLabel(UI.profileKey))}</div>
+      <div class="key mono" title="${esc(name)}">${esc(keyLabel(name))}</div>
       ${p.peaks.length ? sparkline(p.peaks, p.p90) : ""}
       <div class="faint" style="font-size:10.5px">Measured peaks from ${p.peaks.length} successful run${p.peaks.length === 1 ? "" : "s"} · dashed line = historical estimate</div>
       <div class="stats num">
@@ -1132,19 +1271,19 @@ function renderProfile(S){
         <div class="stat"><div class="k">median time</div><div class="v">${p.median_s == null ? "Unknown" : dur(p.median_s)}</div></div>
         <div class="stat"><div class="k">measured runs</div><div class="v">${p.samples}</div></div>
       </div>
-      <div class="faint" style="font-size:10.5px">Based on successful measured peaks and the default estimate, with failed or interrupted runs as a lower bound. Scheduling may reserve more for the command's default worker count.</div>
+      <div class="faint" style="font-size:10.5px">Based on successful measured peaks and the default estimate, with failed or interrupted runs as a lower bound. Scheduling may reserve more for the command's default worker count.${p.command == null ? "" : " Covers every run of this command, whatever its arguments; each distinct invocation keeps its last 20 runs."}</div>
       ${(p.parts || []).length ? `
       <div class="parts">
         <div class="k">Runs inside it</div>
         ${p.parts.map(x => `
         <div class="part">
-          <div class="mono" title="${esc(x.cmd)}">${esc(x.cmd)}</div>
-          <div class="num dim">in ${x.runs} of ${p.runs} run${p.runs === 1 ? "" : "s"} · peak ${gb(x.peak)} GB · ${x.median_s == null ? "time unknown" : dur(x.median_s)}${x.procs > 1 ? ` · ${x.procs} processes` : ""}</div>
+          <div class="mono" title="${esc(x.example ?? x.cmd)}">${esc(x.cmd)}</div>
+          <div class="num dim">in ${x.runs} of ${p.runs} recorded run${p.runs === 1 ? "" : "s"} · peak ${gb(x.peak)} GB · ${x.median_s == null ? "time unknown" : dur(x.median_s)}${x.procs > 1 ? ` · ${x.procs} processes` : ""}</div>
         </div>`).join("")}
       </div>` : ""}
       <div style="margin-top:14px">
-        <button class="chip-btn ${confirming(key) ? "confirm" : "danger"}" data-act="reset_profile"
-          data-key="${esc(UI.profileKey)}" data-confirm="${esc(key)}">
+        <button class="chip-btn ${confirming(key) ? "confirm" : "danger"}" data-act="${p.command == null ? "reset_profile" : "reset_command"}"
+          data-key="${esc(UI.profileKey)}"${p.command == null ? "" : ` data-command="${esc(p.command)}"`} data-confirm="${esc(key)}">
           ${confirming(key) ? "Reset? Click again" : "Reset profile"}</button>
         <span class="faint" style="font-size:11px;margin-left:6px">Next run uses broader history or the default estimate.</span>
       </div>
@@ -1254,6 +1393,11 @@ function renderSettings(S){
     <div class="set">
       <div class="k">Version</div>
       <div class="h num">${esc(S.version ?? "Unknown")}</div>
+      ${S.install ? `<div class="faint install-kind" title="${esc(S.install.path)}">${S.install.kind === "homebrew" ? "Installed with Homebrew" : S.install.kind === "local" ? "Local install, from a checkout" : "Development build"}${S.install.kind === "homebrew" ? "" : ` · <span class="mono">${esc(S.install.path)}</span>`}</div>` : ""}
+      ${S.update ? `<div class="update-note"><b>${esc(S.update.latest)} is available.</b> Run in a terminal${S.update.restart ? ", then quit and reopen Headroom" : ""}:
+        <div class="update-cmd"><span class="mono">${esc(S.update.command)}</span>
+        <button class="chip-btn" data-act="copy" data-text="${esc(S.update.command)}">${S.copy_result?.ok && S.copy_result?.text === S.update.command ? "Copied" : "Copy"}</button></div>
+        ${S.copy_result && !S.copy_result.ok && S.copy_result.text === S.update.command ? `<div role="alert">${esc(S.copy_result.message)}</div>` : ""}</div>` : ""}
     </div>
     <div class="set">
       <div class="k">Headroom</div>
@@ -1434,6 +1578,10 @@ $("pop").addEventListener("click", (e) => {
     case "dismiss": send({ cmd:"dismiss", id }); return;
     case "copy":    send({ cmd:"copy", text: d.text }); return;
     case "reset_profile": send({ cmd:"reset_profile", key: d.key }); return;
+    case "reset_command": send({ cmd:"reset_command", command: d.command }); return;
+    case "scan_worktrees": send({ cmd:"scan_worktrees" }); return;
+    case "remove_worktree": send({ cmd:"remove_worktree", repo: d.repo, path: d.path }); return;
+    case "remove_merged_worktrees": send({ cmd:"remove_merged_worktrees", repo: d.repo }); return;
     case "clear_data": send({ cmd:"clear_data" }); return;
     case "set": {
       const v = d.val === "true" ? true : d.val === "false" ? false
@@ -1516,6 +1664,10 @@ function buttonTip(button){
     case "low": return d.on === "1" ? "Use background CPU priority. This job is paused first if memory runs short." : "Restore normal CPU and guard priority.";
     case "clear_data": return "Permanently clear saved profiles, job history and statistics. Running jobs, settings and hook connections are kept. Click twice to confirm.";
     case "reset_profile": return "Forget this workload's learned history. Future estimates use broader history or the default. Click twice to confirm.";
+    case "scan_worktrees": return "Look at every worktree again: which are merged, changed or in use.";
+    case "remove_worktree": return "Delete this worktree's folder and its branch. It is checked again first: merged, no uncommitted files, nothing working in it. Ignored files in it, such as node_modules and .env files, go with it. Click twice to confirm.";
+    case "remove_merged_worktrees": return "Delete every worktree here that is merged, has no uncommitted files and has nothing working in it, with their branches. Each is checked again first. Ignored files in them, such as node_modules and .env files, go with them. Click twice to confirm.";
+    case "reset_command": return "Forget the learned history of every run of this command, whatever its arguments. Future estimates use broader history or the default. Click twice to confirm.";
     case "hold": return STATE.held ? "Allow queued jobs to start again when resources permit." : "Hold new jobs in the queue. Running jobs continue.";
     case "set": if (d.key === "backfill") return "Let jobs that fit pass a job waiting for memory, subject to the pass-count and wait-time limits.";
       break;
@@ -1591,6 +1743,7 @@ $("pop").addEventListener("drop", (e) => {
 $("pop").addEventListener("dragend", () => {
   if (UI.drag){ UI.drag = null; clearDropMarks(); render(); }
 });
+$("view").addEventListener("scroll", onViewScroll, { passive:true });
 
 /* ═══════════════════════════════════════════════════════════
    7. POC scenarios + mock of what Rust would do with each intent
@@ -1685,7 +1838,7 @@ function base(over){
     setup:{complete:true,error:null}, copy_result:null,
     held:false, hooks:{ claude:"installed", codex:"installed", pi:"installed" }, queue_reason:null,
     running:[], queued:[], banners:[],
-    last_day: { runs:3, failed:1, killed:1, waited:2, waited_s:254, longest_wait_s:131, wait_p50_s:12, wait_p95_s:131, went_first:1, more:false },
+    last_day: { runs:3, failed:1, requeued:1, waited:2, waited_s:254, longest_wait_s:131, wait_p50_s:12, wait_p95_s:131, went_first:1, more:false },
     history: [
       { id:"r1", label:"sc-49123", cmd:"vitest run", key:"browser-churchdesk · vitest run", duration_s:151, peak:G(3.9), estimate:G(4.1), exit:0, ended_ago_s:420 },
       { id:"r2", label:"fix-main", cmd:"tsc --noEmit", key:"fix-main · tsc --noEmit", duration_s:47, peak:G(1.2), estimate:G(1.3), exit:2, ended_ago_s:900 },
@@ -1705,7 +1858,7 @@ const MOCK = {
     running:[J.vitest(), J.tsc()], queued:[J.e2e(), J.build(), J.jest()],
     queue_reason:{ kind:"memory", need:G(4.2), free:G(2.9) } }) },
   idle: { title:"Idle", desc:"nothing running", make: () => base({
-    last_day:{ runs:0, failed:0, killed:0, waited:0, waited_s:0, longest_wait_s:0, wait_p50_s:0, wait_p95_s:0, went_first:0, more:false },
+    last_day:{ runs:0, failed:0, requeued:0, waited:0, waited_s:0, longest_wait_s:0, wait_p50_s:0, wait_p95_s:0, went_first:0, more:false },
     system:{ pressure:"normal", mem_total:G(36), mem_used:G(17.6), mem_available:G(18.4), swap_used:G(0), cpu_pct:9 } }) },
   frozen: { title:"Frozen", desc:"critical pressure, guard froze a job", make: () => {
     const v = J.vitest(); v.state = "frozen"; v.frozen_s = 12; v.footprint = G(5.2); v.peak = G(5.2); v.cpu_pct = 0;
@@ -1821,6 +1974,7 @@ function mockApply(m){
       break; }
     case "low": { const j = find(m.id); if (j) j.low = m.on; break; }
     case "dismiss": S.banners = S.banners.filter(b => b.id !== m.id); break;
+    case "reset_command": for (const k of Object.keys(S.profiles)) if (S.profiles[k].command === m.command) delete S.profiles[k]; break;
     case "reset_profile": delete S.profiles[m.key]; all().forEach(j => { if (j.key === m.key){ j.samples = 0; j.memory_range = null; j.estimate = S.settings.default_estimate; } }); break;
     case "check_shims": S.shims = {...S.shims,status:"unverified",message:"Check this in the native app to inspect your default shell."}; break;
     case "clear_data":

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use headroom_core::store::Store;
 use headroomd::app::{App, Next};
-use headroomd::{daemon, sample::Sampler, shell, single, view};
+use headroomd::{daemon, sample::Sampler, shell, single, update, view};
 use tao::dpi::LogicalSize;
 use tao::event::{Event, StartCause, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
@@ -23,7 +23,7 @@ use tao::window::WindowBuilder;
 use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use wry::WebViewBuilder;
 
-const POPOVER_W: f64 = 400.0;
+const POPOVER_W: f64 = 520.0;
 const POPOVER_H: f64 = 600.0;
 const GLYPH: u32 = 18;
 
@@ -172,6 +172,8 @@ fn glyph(filled: u32, ink: Option<[u8; 3]>) -> tray_icon::Icon {
 enum UserEvent {
     Ipc(String),
     Tray(TrayIconEvent),
+    /// What the update check found newer, if anything.
+    Update(Option<String>),
 }
 
 fn home() -> PathBuf {
@@ -247,6 +249,24 @@ fn main() -> wry::Result<()> {
             .unwrap_or_else(|p| p.into_inner())
             .send_event(UserEvent::Tray(e));
     }));
+    // A copy Homebrew installed says when the tap has a newer one. A check
+    // that fails keeps the last answer until the next one.
+    if update::brew_installed(&exe) {
+        let proxy = event_loop.create_proxy();
+        std::thread::spawn(move || {
+            loop {
+                match update::check(env!("CARGO_PKG_VERSION")) {
+                    Ok(latest) => {
+                        if proxy.send_event(UserEvent::Update(latest)).is_err() {
+                            return;
+                        }
+                    }
+                    Err(e) => eprintln!("headroomd: {e}"),
+                }
+                std::thread::sleep(update::CHECK_EVERY);
+            }
+        });
+    }
     let ipc_proxy = event_loop.create_proxy();
     let webview = WebViewBuilder::new()
         .with_html(include_str!("../../ui/index.html"))
@@ -332,6 +352,12 @@ fn main() -> wry::Result<()> {
                 drop(a);
                 push(&webview);
                 update_tray();
+            }
+            Event::UserEvent(UserEvent::Update(latest)) => {
+                app.borrow_mut().set_update(latest);
+                if visible {
+                    push(&webview);
+                }
             }
             // tray-icon reports a click on press and on release; acting on
             // both would open and close the popover in one click.

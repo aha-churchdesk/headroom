@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::classify::command_key;
 use crate::model::{Bytes, HistoryEntry, Outcome};
 
 pub const TALLY_DAYS: u64 = 90;
@@ -105,23 +106,25 @@ impl Tally {
     }
 
     /// Each command's totals over the `days` days up to and including the
-    /// one `wall` falls in, most time running first. Commands with nothing
-    /// in that window are left out.
-    pub fn window(&self, wall: u64, days: u64) -> Vec<(&str, Day)> {
+    /// one `wall` falls in, most time running first. Every invocation of a
+    /// command is one row (see `classify::command_key`): profile keys tell
+    /// `git commit -m a` from `git commit -m b`, this page does not.
+    /// Commands with nothing in that window are left out.
+    pub fn window(&self, wall: u64, days: u64) -> Vec<(String, Day)> {
         let today = wall / DAY_S;
         let first = today.saturating_sub(days.saturating_sub(1));
-        let mut rows: Vec<(&str, Day)> = self
-            .0
-            .iter()
-            .filter_map(|(k, by_day)| {
-                let mut sum = Day::default();
-                for (_, d) in by_day.range(first..=today) {
-                    sum.add(d);
-                }
-                (sum != Day::default()).then_some((k.as_str(), sum))
-            })
-            .collect();
-        rows.sort_by(|a, b| b.1.run_ms.cmp(&a.1.run_ms).then(a.0.cmp(b.0)));
+        let mut by_command: BTreeMap<String, Day> = BTreeMap::new();
+        for (k, by_day) in &self.0 {
+            let mut sum = Day::default();
+            for (_, d) in by_day.range(first..=today) {
+                sum.add(d);
+            }
+            if sum != Day::default() {
+                by_command.entry(command_key(k)).or_default().add(&sum);
+            }
+        }
+        let mut rows: Vec<(String, Day)> = by_command.into_iter().collect();
+        rows.sort_by(|a, b| b.1.run_ms.cmp(&a.1.run_ms).then(a.0.cmp(&b.0)));
         rows
     }
 }
@@ -168,6 +171,41 @@ mod tests {
         assert_eq!(test.mib_s, 2 * 2048 * 60);
         assert_eq!(test.peak, 2 * GIB);
         assert_eq!(rows[1].1.runs, 1);
+    }
+
+    #[test]
+    fn every_invocation_of_a_command_is_one_row() {
+        let key = |c: char, cmd: &str| format!("/r|web|v2:{}|{cmd}", c.to_string().repeat(64));
+        let mut t = Tally::default();
+        t.add(&entry(
+            &key('a', "git commit"),
+            NOW - 10,
+            Outcome::Exited,
+            Some(0),
+        ));
+        t.add(&entry(
+            &key('b', "git commit"),
+            NOW - 5,
+            Outcome::Exited,
+            Some(1),
+        ));
+        t.add(&entry(
+            &key('c', "git commit"),
+            NOW,
+            Outcome::Exited,
+            Some(0),
+        ));
+        // An older key from before digests were added joins it too.
+        t.add(&entry("/r|web|git commit", NOW, Outcome::Exited, Some(0)));
+        t.add(&entry(&key('d', "git push"), NOW, Outcome::Exited, Some(0)));
+        let rows = t.window(NOW, 7);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, "/r|web|git commit");
+        assert_eq!((rows[0].1.runs, rows[0].1.failed), (4, 1));
+        assert_eq!(rows[0].1.run_ms, 4 * 60_000);
+        assert_eq!(rows[1].0, "/r|web|git push");
+        let runs: u32 = rows.iter().map(|r| r.1.runs).sum();
+        assert_eq!(runs, 5, "the rows add up to everything that ran");
     }
 
     #[test]
@@ -247,9 +285,13 @@ mod tests {
             Some(0),
         ));
         t.add(&entry("/r|test", NOW, Outcome::Exited, Some(0)));
-        let keys: Vec<&str> = t.window(NOW, TALLY_DAYS + 10).iter().map(|r| r.0).collect();
+        let keys: Vec<String> = t
+            .window(NOW, TALLY_DAYS + 10)
+            .into_iter()
+            .map(|r| r.0)
+            .collect();
         assert_eq!(keys.len(), 2);
-        assert!(!keys.contains(&"/r|old"));
+        assert!(!keys.iter().any(|k| k == "/r|old"));
     }
 
     #[test]

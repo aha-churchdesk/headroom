@@ -15,6 +15,11 @@ PLIST="$HR_PLIST"
 APP="$HR_APP/Contents/MacOS/headroomd"
 DOMAIN="$HR_DOMAIN"
 
+# The program a LaunchAgent plist starts.
+plist_program() {
+  /usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$1" 2>/dev/null
+}
+
 case "${1:-status}" in
   install)
     if [ ! -x "$APP" ]; then
@@ -22,9 +27,24 @@ case "${1:-status}" in
       echo "run ./scripts/bundle.sh --install first"
       exit 1
     fi
-    if [ -f "$HOME/Library/LaunchAgents/homebrew.mxcl.headroom.plist" ]; then
-      echo "brew services already starts Headroom at login; use that, or 'brew services stop headroom' first"
-      exit 1
+    # brew services names its plist either way, by Homebrew version. One whose
+    # program is gone is left over from an uninstall and starts nothing.
+    for brew_plist in "$HOME/Library/LaunchAgents/homebrew.mxcl.headroom.plist" \
+      "$HOME/Library/LaunchAgents/sh.brew.headroom.plist"; do
+      [ -f "$brew_plist" ] || continue
+      if [ -x "$(plist_program "$brew_plist")" ]; then
+        echo "brew services already starts Headroom at login; use that, or 'brew services stop headroom' first"
+        exit 1
+      fi
+      echo "note: $brew_plist is left over from Homebrew and starts nothing; remove it with: rm '$brew_plist'"
+    done
+    # A plist that starts another copy (a removed Homebrew install, an old
+    # build) would fail at every login. Replace it; keep any other choice.
+    if [ -f "$PLIST" ] && [ "$(plist_program "$PLIST")" != "$APP" ]; then
+      echo "replacing $PLIST: it started $(plist_program "$PLIST")"
+      hr_stop || exit 1
+      launchctl bootout "$HR_SERVICE" 2>/dev/null
+      rm -f "$PLIST"
     fi
     # Existing registration/configuration belongs to the user. Enabling it
     # again need not overwrite the plist or disconnect its live queue.

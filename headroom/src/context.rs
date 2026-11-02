@@ -16,6 +16,10 @@ pub struct GitContext {
     pub subdir: String,
     /// The worktree's directory name, shown in the queue.
     pub label: String,
+    /// The worktree's top directory, and the resolved directory the command
+    /// starts in, for following its `cd`s (see `classify::alike_keys`).
+    pub top: PathBuf,
+    pub cwd: PathBuf,
 }
 
 /// Read the repository around `cwd`. Outside a repository the directory
@@ -26,6 +30,8 @@ pub fn git_context(cwd: &Path) -> GitContext {
         repo: cwd.display().to_string(),
         subdir: String::new(),
         label: basename(&cwd.display().to_string()).to_string(),
+        top: cwd.clone(),
+        cwd: cwd.clone(),
     };
     let out = Command::new("git")
         .arg("-C")
@@ -63,6 +69,8 @@ pub fn git_context(cwd: &Path) -> GitContext {
         repo: repo.display().to_string(),
         subdir,
         label: basename(&top.display().to_string()).to_string(),
+        top,
+        cwd,
     }
 }
 

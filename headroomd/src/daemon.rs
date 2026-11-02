@@ -152,7 +152,7 @@ pub fn run_with(
             Ok(Event::Msg(c, msg)) => match *msg {
                 ClientMsg::Enqueue(spec) => match spec.pid.and_then(|p| enclosing(&sched, p)) {
                     Some(id) => vec![Effect::Send(c, DaemonMsg::Inside { id })],
-                    None => sched.enqueue(c, spec, ms()),
+                    None => sched.enqueue(c, *spec, ms()),
                 },
                 ClientMsg::Started { pgid, .. } => sched.started(c, pgid),
                 ClientMsg::Signal { signal } => match signal {
@@ -273,7 +273,7 @@ fn apply(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use headroom_core::model::{GIB, JobSpec};
+    use headroom_core::model::GIB;
     use headroom_core::protocol::{Control, read_msg, request, write_msg};
     use std::io::{BufReader, Write};
     use std::os::unix::net::UnixStream;
@@ -361,7 +361,7 @@ mod tests {
         lease
             .set_read_timeout(Some(Duration::from_secs(3)))
             .unwrap();
-        write_msg(&mut lease, &ClientMsg::Enqueue(JobSpec::default())).unwrap();
+        write_msg(&mut lease, &ClientMsg::Enqueue(Box::default())).unwrap();
         let mut lease = BufReader::new(lease);
         let id = match read_msg::<_, DaemonMsg>(&mut lease).unwrap().unwrap() {
             DaemonMsg::Granted { id, .. } => id,

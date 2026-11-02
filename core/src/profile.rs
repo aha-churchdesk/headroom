@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
+use crate::classify::{command_key, is_exact_key};
 use crate::model::{Bytes, Part};
 
 /// Runs kept per key.
@@ -244,6 +245,28 @@ impl Profile {
     }
 }
 
+/// The profiles a job's estimate may draw on, most specific first.
+#[derive(Clone, Copy, Debug)]
+pub struct Keys<'a> {
+    pub exact: &'a str,
+    /// Lines running the same workloads; empty when unknown.
+    pub line: &'a str,
+    /// Each of those workloads run alone.
+    pub each: &'a [String],
+    pub fallback: &'a str,
+}
+
+impl<'a> Keys<'a> {
+    pub fn exact(exact: &'a str, fallback: &'a str) -> Self {
+        Keys {
+            exact,
+            line: "",
+            each: &[],
+            fallback,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Profiles(pub BTreeMap<String, Profile>);
@@ -264,16 +287,43 @@ impl Profiles {
         }
     }
 
+    /// Record a finished run under the key of lines running the same
+    /// workloads (see `classify::alike_keys`). It keeps no parts: only the
+    /// peak and outcome inform an estimate.
+    pub fn record_alike(&mut self, line: &str, run: &Run) {
+        if line.is_empty() {
+            return;
+        }
+        let p = self.0.entry(line.to_string()).or_default();
+        p.runs.push_back(Run {
+            parts: Vec::new(),
+            ..run.clone()
+        });
+        while p.runs.len() > KEEP {
+            p.runs.pop_front();
+        }
+    }
+
     /// Use the workload's own p90 from its first successful measured run,
     /// updated with each later run. Broader history or the default supplies
     /// the estimate only while the workload has no qualifying measurements.
     pub fn estimate(&self, key: &str, fallback: &str, default: Bytes) -> Estimate {
-        let prior = self
+        self.estimate_alike(&Keys::exact(key, fallback), default)
+    }
+
+    /// [`Profiles::estimate`], where a workload without its own measured run
+    /// first borrows from lines that run the same workloads: those running
+    /// exactly them, else the most any one needed when it ran alone. Only
+    /// then the coarse fallback or the default.
+    pub fn estimate_alike(&self, keys: &Keys, default: Bytes) -> Estimate {
+        let (key, fallback) = (keys.exact, keys.fallback);
+        let broad = self
             .0
             .get(fallback)
             .filter(|_| fallback != key)
             .and_then(Profile::trusted)
             .unwrap_or(default);
+        let prior = self.alike(keys, broad);
         let Some(own) = self.0.get(key) else {
             return Estimate {
                 bytes: prior,
@@ -302,17 +352,81 @@ impl Profiles {
         default: Bytes,
         workers: Option<u32>,
     ) -> Estimate {
-        let mut est = self.estimate(key, fallback, default);
+        self.estimate_alike_for_workers(&Keys::exact(key, fallback), default, workers)
+    }
+
+    pub fn estimate_alike_for_workers(
+        &self,
+        keys: &Keys,
+        default: Bytes,
+        workers: Option<u32>,
+    ) -> Estimate {
+        let mut est = self.estimate_alike(keys, default);
         if let Some(workers) = workers
-            && let Some(scaling) = self.get(key).and_then(Profile::scaling)
+            && let Some(scaling) = self.get(keys.exact).and_then(Profile::scaling)
         {
             est.bytes = est.bytes.max(scaling.at(workers));
         }
         est
     }
 
+    /// The workload's usual runtime at `workers`, else that of lines running
+    /// the same workloads, else the sum of each run alone: a line runs its
+    /// commands one after another far more often than side by side.
+    pub fn median_alike(&self, keys: &Keys, workers: Option<u32>) -> Option<u64> {
+        let median = |k: &str| self.get(k)?.median_ms_for_workers(workers);
+        if let Some(ms) = median(keys.exact) {
+            return Some(ms);
+        }
+        if !keys.line.is_empty()
+            && let Some(ms) = median(keys.line)
+        {
+            return Some(ms);
+        }
+        if keys.each.len() < 2 {
+            return None;
+        }
+        keys.each.iter().map(|k| median(k)).sum()
+    }
+
+    /// What lines running the same workloads needed, or `broad` when they
+    /// have no measured run. A workload measured alone, and a failed or
+    /// interrupted run of the line, are floors while the rest is unknown.
+    fn alike(&self, keys: &Keys, broad: Bytes) -> Bytes {
+        let measured = |k: &str| {
+            let p = self.0.get(k)?;
+            let peak = (p.samples() >= ESTIMATE_SAMPLES as u32).then(|| p.p90())??;
+            Some(peak.max(p.observed_floor()))
+        };
+        let line = self.0.get(keys.line).filter(|_| !keys.line.is_empty());
+        if let Some(b) = line.and_then(|_| measured(keys.line)) {
+            return b;
+        }
+        let floor = line.map_or(0, Profile::observed_floor);
+        if keys.each.len() < 2 {
+            return broad.max(floor);
+        }
+        let each: Vec<Option<Bytes>> = keys.each.iter().map(|k| measured(k)).collect();
+        let most = each.iter().flatten().copied().max().unwrap_or(0);
+        if each.iter().all(Option::is_some) {
+            most.max(floor)
+        } else {
+            broad.max(most).max(floor)
+        }
+    }
+
     pub fn reset(&mut self, key: &str) -> bool {
         self.0.remove(key).is_some()
+    }
+
+    /// Forget every exact workload key of `command` (see
+    /// `classify::command_key`), or the key itself when it has none.
+    /// Fallback keys stay: other commands in the repository share them.
+    pub fn reset_command(&mut self, command: &str) -> bool {
+        let before = self.0.len();
+        self.0
+            .retain(|k, _| !(is_exact_key(k) && command_key(k) == command));
+        self.0.len() < before || self.reset(command)
     }
 
     pub fn get(&self, key: &str) -> Option<&Profile> {
@@ -852,6 +966,33 @@ mod tests {
     }
 
     #[test]
+    fn reset_command_forgets_every_invocation_but_keeps_the_fallback() {
+        let digest = |c: char| format!("v2:{}", c.to_string().repeat(64));
+        let (a, b) = (
+            format!("/r|{}|git commit", digest('a')),
+            format!("/r|{}|git commit", digest('b')),
+        );
+        let other = format!("/r|{}|git push", digest('c'));
+        let mut p = Profiles::default();
+        for k in [&a, &b, &other] {
+            p.record(k, "/r|git", run(1.0));
+        }
+        assert!(p.reset_command("/r|git commit"));
+        assert!(p.get(&a).is_none() && p.get(&b).is_none());
+        assert!(p.get(&other).is_some());
+        assert_eq!(p.get("/r|git").unwrap().runs.len(), 3, "fallback kept");
+        // Pressed again, there is nothing left to forget.
+        assert!(!p.reset_command("/r|git commit"));
+        // A fallback key named like a command is not an invocation of it.
+        assert!(!p.reset_command("/r|nothing"));
+        assert!(
+            p.reset_command("/r|git"),
+            "a key with no digest is its own command"
+        );
+        assert!(p.get("/r|git").is_none());
+    }
+
+    #[test]
     fn median_duration_of_clean_runs() {
         let mut p = Profiles::default();
         for d in [10, 30, 20] {
@@ -914,5 +1055,142 @@ mod tests {
         assert_eq!(p90(&mut ten), Some(9));
         let mut eleven: Vec<Bytes> = (1..=11).collect();
         assert_eq!(p90(&mut eleven), Some(10));
+    }
+
+    fn alike<'a>(exact: &'a str, line: &'a str, each: &'a [String]) -> Keys<'a> {
+        Keys {
+            exact,
+            line,
+            each,
+            fallback: "f",
+        }
+    }
+
+    #[test]
+    fn a_line_running_the_same_workloads_stands_in_until_its_own_run() {
+        let mut p = Profiles::default();
+        for _ in 0..TRUSTED {
+            p.record("other", "f", run(6.0));
+        }
+        p.record_alike("/r|alike:yarn biome", &run(0.2));
+        let each = ["/r|alike:yarn biome".to_string()];
+        let keys = alike("new", "/r|alike:yarn biome", &each);
+        let e = p.estimate_alike(&keys, DEF);
+        assert_eq!((gb(e.bytes), e.samples), (0.2, 0), "not the 6 GB fallback");
+        p.record("new", "f", run(0.5));
+        assert_eq!(gb(p.estimate_alike(&keys, DEF).bytes), 0.5);
+    }
+
+    #[test]
+    fn a_new_line_needs_the_most_of_its_workloads_run_alone() {
+        let mut p = Profiles::default();
+        p.record_alike("/r|alike:biome", &run(0.1));
+        p.record_alike("/r|alike:typecheck", &run(4.5));
+        let each = [
+            "/r|alike:biome".to_string(),
+            "/r|alike:typecheck".to_string(),
+        ];
+        let keys = alike("new", "/r|alike:biome, typecheck", &each);
+        assert_eq!(gb(p.estimate_alike(&keys, DEF).bytes), 4.5);
+        // Once the line itself has run, its own peak decides.
+        p.record_alike("/r|alike:biome, typecheck", &run(4.8));
+        assert_eq!(gb(p.estimate_alike(&keys, DEF).bytes), 4.8);
+    }
+
+    #[test]
+    fn an_unmeasured_workload_keeps_the_fallback_raised_to_what_is_known() {
+        let mut p = Profiles::default();
+        p.record_alike("/r|alike:biome", &run(0.1));
+        p.record_alike("/r|alike:typecheck", &run(4.5));
+        let each = |known: &str| vec![format!("/r|alike:{known}"), "/r|alike:lint".to_string()];
+        let low = each("biome");
+        let high = each("typecheck");
+        let e = |each| {
+            gb(p.estimate_alike(&alike("new", "/r|alike:x", each), DEF)
+                .bytes)
+        };
+        assert_eq!(
+            e(&low),
+            gb(DEF),
+            "a light known part cannot lower the default"
+        );
+        assert_eq!(e(&high), 4.5, "a heavy known part raises it");
+    }
+
+    #[test]
+    fn failed_runs_of_a_line_raise_its_stand_in_without_counting() {
+        let mut p = Profiles::default();
+        let failed = Run {
+            exit: Some(1),
+            ..run(7.0)
+        };
+        p.record_alike("/r|alike:typecheck", &failed);
+        let each = ["/r|alike:typecheck".to_string()];
+        let e = p.estimate_alike(&alike("new", "/r|alike:typecheck", &each), DEF);
+        assert_eq!((gb(e.bytes), e.samples), (7.0, 0));
+        p.record_alike("/r|alike:typecheck", &run(2.0));
+        let e = p.estimate_alike(&alike("new", "/r|alike:typecheck", &each), DEF);
+        assert_eq!(
+            gb(e.bytes),
+            7.0,
+            "a measured run never goes below a failed peak"
+        );
+    }
+
+    #[test]
+    fn keys_from_older_clients_estimate_as_before() {
+        let mut p = Profiles::default();
+        p.record_alike("/r|alike:typecheck", &run(0.2));
+        for _ in 0..TRUSTED {
+            p.record("other", "f", run(6.0));
+        }
+        let e = p.estimate_alike(&Keys::exact("new", "f"), DEF);
+        assert_eq!(e, p.estimate("new", "f", DEF));
+        assert_eq!(gb(e.bytes), 6.0);
+    }
+
+    #[test]
+    fn alike_history_drops_parts_ignores_an_empty_key_and_keeps_twenty() {
+        let mut p = Profiles::default();
+        let with_parts = Run {
+            parts: vec![Part::default()],
+            ..run(1.0)
+        };
+        p.record_alike("", &with_parts);
+        assert!(p.0.is_empty());
+        for _ in 0..KEEP + 3 {
+            p.record_alike("/r|alike:x", &with_parts);
+        }
+        let runs = &p.get("/r|alike:x").unwrap().runs;
+        assert_eq!(runs.len(), KEEP);
+        assert!(runs.iter().all(|r| r.parts.is_empty()));
+    }
+
+    #[test]
+    fn runtime_comes_from_the_workload_then_alike_lines_then_the_sum_of_parts() {
+        let secs = |s: u64| Run {
+            duration_ms: s * 1000,
+            ..run(1.0)
+        };
+        let mut p = Profiles::default();
+        let each = [
+            "/r|alike:biome".to_string(),
+            "/r|alike:typecheck".to_string(),
+        ];
+        let keys = alike("own", "/r|alike:biome, typecheck", &each);
+        p.record_alike("/r|alike:biome", &secs(5));
+        assert_eq!(
+            p.median_alike(&keys, None),
+            None,
+            "typecheck alone is unknown"
+        );
+        p.record_alike("/r|alike:typecheck", &secs(60));
+        assert_eq!(p.median_alike(&keys, None), Some(65_000));
+        p.record_alike("/r|alike:biome, typecheck", &secs(70));
+        assert_eq!(p.median_alike(&keys, None), Some(70_000));
+        p.record("own", "f", secs(80));
+        assert_eq!(p.median_alike(&keys, None), Some(80_000));
+        assert_eq!(p.median_alike(&keys, Some(4)), None, "another worker count");
+        assert_eq!(p.median_alike(&Keys::exact("none", "f"), None), None);
     }
 }

@@ -20,7 +20,7 @@ use headroom_core::profile::Profiles;
 use headroom_core::protocol::{ClientMsg, Control, DaemonMsg, Listing, request};
 use headroom_core::shims::{self, ShimsStatus};
 use headroom_core::store::{Store, UiPreferences};
-use headroom_core::tally::Tally;
+use headroom_core::tally::{TALLY_DAYS, Tally};
 use serde_json::Value;
 
 use crate::bridge::{self, Do, UiCmd};
@@ -55,6 +55,10 @@ pub struct App {
     since: u64,
     dismissed: HashSet<String>,
     classify: Option<Value>,
+    open_profile: Option<String>,
+    /// A newer version in the Homebrew tap (see `update`).
+    update: Option<String>,
+    worktrees: crate::worktrees::Tab,
     cfg: Config,
     profiles: Profiles,
     tally: Tally,
@@ -77,6 +81,19 @@ pub struct App {
 /// Per agent, the hook as the Settings page words it. A hook pointing at a
 /// different `headroom` that still exists (a dev build, the brew one) works,
 /// so only a missing binary counts as stale.
+/// How this copy was installed, for Settings: by Homebrew, as the app in
+/// /Applications (`scripts/install.sh`), or run from a build in a checkout.
+pub fn install_json(exe: &str) -> Value {
+    let kind = if crate::update::brew_installed(Path::new(exe)) {
+        "homebrew"
+    } else if exe.starts_with("/Applications/") {
+        "local"
+    } else {
+        "build"
+    };
+    serde_json::json!({ "kind": kind, "path": exe })
+}
+
 pub fn hook_states(home: &Path, cli: &str) -> Vec<(&'static str, &'static str)> {
     Agent::ALL
         .iter()
@@ -125,6 +142,9 @@ impl App {
             since: wall(),
             dismissed: HashSet::new(),
             classify: None,
+            open_profile: None,
+            update: None,
+            worktrees: Default::default(),
             others: Vec::new(),
             hooks: Vec::new(),
             hook_verification: HookVerification::default(),
@@ -242,6 +262,7 @@ impl App {
                 others: &self.others,
                 hooks: &self.hooks,
                 classify: self.classify.clone(),
+                open_profile: self.open_profile.as_deref(),
                 dismissed: &self.dismissed,
                 wall: wall(),
                 since: self.since,
@@ -256,7 +277,38 @@ impl App {
         });
         state["copy_result"] = self.copy_result.clone().unwrap_or(Value::Null);
         state["shims"] = serde_json::to_value(&self.shims).unwrap();
+        state["worktrees"] = self.worktrees.json(wall());
+        state["install"] = install_json(&self.exe);
+        state["update"] = self.update.as_deref().map_or(Value::Null, |v| {
+            crate::update::json(v, self.login == Login::Brew)
+        });
         Some(state)
+    }
+
+    /// The repositories Headroom has queued commands in, by the tally's
+    /// keys, and those of the jobs it has now.
+    fn repos(&self) -> Vec<String> {
+        let mut repos: Vec<String> = self
+            .tally
+            .window(wall(), TALLY_DAYS)
+            .into_iter()
+            .map(|(k, _)| k)
+            .chain(self.listing.iter().flat_map(|l| {
+                l.running
+                    .iter()
+                    .chain(&l.queued)
+                    .map(|j| j.spec.key.clone())
+            }))
+            .filter_map(|k| k.split('|').next().map(str::to_string))
+            .collect();
+        repos.sort();
+        repos.dedup();
+        repos
+    }
+
+    /// What the last update check found newer, if anything.
+    pub fn set_update(&mut self, latest: Option<String>) {
+        self.update = latest;
     }
 
     /// One intent from the page. Anything malformed or refused is noted in
@@ -349,6 +401,23 @@ impl App {
                 Err(e) => self.last_error = Some(format!("login item: {e}")),
             },
             Do::Classify(text) => self.classify = Some(bridge::classify_json(&text, &self.cfg)),
+            Do::OpenProfile(key) => {
+                self.open_profile = key;
+                return Next::Continue;
+            }
+            Do::ScanWorktrees => {
+                self.worktrees.scan(self.repos());
+                return Next::Continue;
+            }
+            Do::RemoveWorktree { repo, path } => {
+                self.worktrees.remove(repo, vec![path]);
+                return Next::Continue;
+            }
+            Do::RemoveMergedWorktrees(repo) => {
+                let paths = self.worktrees.removable(&repo);
+                self.worktrees.remove(repo, paths);
+                return Next::Continue;
+            }
         }
         self.poll();
         Next::Continue
@@ -696,6 +765,31 @@ mod tests {
         app.command(r#"{"cmd":"dismiss","id":"k7"}"#);
         assert!(app.dismissed.contains("k7"));
         assert_eq!(app.command(r#"{"cmd":"quit"}"#), Next::Quit);
+    }
+
+    #[test]
+    fn the_state_says_how_this_copy_was_installed() {
+        let (app, _d) = with_daemon("install-kind");
+        let v = app.state().unwrap();
+        assert_eq!(v["install"]["kind"], "local");
+        assert_eq!(
+            v["install"]["path"],
+            "/Applications/Headroom.app/Contents/MacOS/headroomd"
+        );
+        let kind = |exe: &str| install_json(exe)["kind"].clone();
+        assert_eq!(
+            kind("/opt/homebrew/Cellar/headroom/0.4.13/bin/headroomd"),
+            "homebrew"
+        );
+        assert_eq!(
+            kind("/Users/me/src/headroom/target/release/headroomd"),
+            "build"
+        );
+        assert_eq!(
+            kind(""),
+            "build",
+            "an unknown path is not claimed as installed"
+        );
     }
 
     #[test]

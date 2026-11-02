@@ -5,11 +5,12 @@
 //! Ids go out as strings because the page reads them back from DOM data
 //! attributes, which are strings.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
+use headroom_core::classify::{command_key, is_exact_key};
 use headroom_core::config::Config;
 use headroom_core::model::{Bytes, HistoryEntry, Job, JobState, Outcome, Pressure};
-use headroom_core::profile::{ESTIMATE_SAMPLES, Profile, Profiles};
+use headroom_core::profile::{ESTIMATE_SAMPLES, Profile, Profiles, Run};
 use headroom_core::protocol::Listing;
 use headroom_core::scheduler::{HISTORY, HISTORY_DAY_S, HISTORY_MAX};
 use headroom_core::tally::{Day, TALLY_DAYS, Tally};
@@ -56,6 +57,10 @@ pub struct Extras<'a> {
     /// Per agent: installed | not_installed | stale | absent.
     pub hooks: &'a [(&'static str, &'static str)],
     pub classify: Option<Value>,
+    /// The profile the page has open. Only it carries what ran inside its
+    /// runs: those lists hold whole command lines, too much to send for
+    /// every profile every second.
+    pub open_profile: Option<&'a str>,
     pub dismissed: &'a HashSet<String>,
     /// Unix seconds now, and when this app started (older guard actions
     /// are history, not news).
@@ -82,9 +87,18 @@ fn percentile(sorted: &[u64], pct: usize) -> u64 {
 /// wrapper doesn't mention the wait either.
 const WAITED_MS: u64 = 1000;
 
+/// A run that ended for good, as the Commands page counts runs: a run the
+/// guard killed and requeued is not one, its retry is.
+fn finished(h: &HistoryEntry) -> bool {
+    h.has_run() && h.outcome != Outcome::Requeued
+}
+
 /// What finished in the day before `wall`, from the history (newest
 /// first). The history keeps at most `HISTORY_MAX` runs; when all of them
 /// are inside the day the counts are a floor, and `more` says so.
+///
+/// Runs and failures count as the Commands page counts them; `requeued`
+/// says how many runs were killed and run again on top.
 ///
 /// Most jobs never wait, so wait percentiles over every run would read 0s.
 /// They are over the runs that waited, and `waited` says how many did.
@@ -97,30 +111,36 @@ fn last_day(history: &[HistoryEntry], wall: u64) -> Value {
     let count = |f: &dyn Fn(&HistoryEntry) -> bool| recent.iter().filter(|h| f(h)).count();
     let mut waits: Vec<u64> = recent
         .iter()
-        .filter(|h| h.has_run() && h.waited_ms >= WAITED_MS)
+        .filter(|h| finished(h) && h.waited_ms >= WAITED_MS)
         .map(|h| h.waited_ms)
         .collect();
     waits.sort_unstable();
     json!({
-        "runs": count(&HistoryEntry::has_run),
-        "failed": count(&|h| h.has_run() && h.outcome == Outcome::Exited && h.exit != Some(0)),
-        "killed": count(&|h| h.has_run() && matches!(h.outcome, Outcome::Requeued | Outcome::GaveUp)),
+        "runs": count(&finished),
+        "failed": count(&|h| finished(h) && match h.outcome {
+            Outcome::Exited => h.exit != Some(0),
+            Outcome::GaveUp => true,
+            _ => false,
+        }),
+        "requeued": count(&|h| h.has_run() && h.outcome == Outcome::Requeued),
         "waited": waits.len(),
         "waited_s": secs(waits.iter().sum()),
         "longest_wait_s": secs(waits.last().copied().unwrap_or(0)),
         "wait_p50_s": secs(percentile(&waits, 50)),
         "wait_p95_s": secs(percentile(&waits, 95)),
-        "went_first": count(&|h| h.has_run() && h.ahead_of.is_some()),
+        "went_first": count(&|h| finished(h) && h.ahead_of.is_some()),
         "more": history.len() >= HISTORY_MAX && recent.len() == history.len(),
     })
 }
 
 /// The Commands page's windows, in days.
 const WINDOWS: [u64; 3] = [7, 30, TALLY_DAYS];
-/// Commands listed per window. The page re-sorts these by runs, memory or
-/// waiting, so a command that is cheap per run but frequent may be missing
-/// from those orders past this many.
-const COMMANDS: usize = 50;
+
+/// Where a command's profile is in the state's `profiles`. A prefix keeps
+/// it apart from exact and fallback keys, which can read the same.
+fn command_profile_key(command: &str) -> String {
+    format!("cmd:{command}")
+}
 
 fn day_json(d: &Day) -> Value {
     json!({
@@ -133,8 +153,8 @@ fn day_json(d: &Day) -> Value {
     })
 }
 
-/// Per window: the commands that ran in it, most time running first, and
-/// the totals over every command.
+/// Per window: every command that ran in it, most time running first, and
+/// the totals over them, so the rows add up to the totals.
 fn commands(t: &Tally, wall: u64) -> Value {
     WINDOWS
         .iter()
@@ -148,9 +168,10 @@ fn commands(t: &Tally, wall: u64) -> Value {
                 "days": days,
                 "total": day_json(&total),
                 "count": rows.len(),
-                "rows": rows.iter().take(COMMANDS).map(|(k, d)| {
+                "rows": rows.iter().map(|(k, d)| {
                     let mut v = day_json(d);
                     v["key"] = json!(k);
+                    v["profile"] = json!(command_profile_key(k));
                     v
                 }).collect::<Vec<_>>(),
             })
@@ -172,41 +193,93 @@ fn inner(j: &Job) -> Option<&str> {
     j.now.as_deref().filter(|n| !is_own(n, &j.spec.cmd))
 }
 
-/// Inner commands listed on a command's page.
-const PAGE_PARTS: usize = 8;
+/// Words after the program that still name what runs, such as `eslint`
+/// in `yarn eslint src/a.ts`.
+const PART_WORDS: usize = 2;
+/// Characters of an inner command's example line: enough to recognise it.
+/// A linter's line can list hundreds of files.
+const EXAMPLE_CHARS: usize = 300;
+
+/// `line` cut to `EXAMPLE_CHARS`, marked when cut.
+fn example(line: &str) -> String {
+    match line.char_indices().nth(EXAMPLE_CHARS) {
+        Some((i, _)) => format!("{}…", &line[..i]),
+        None => line.to_string(),
+    }
+}
+
+/// What an inner command line runs, without its arguments: the program's
+/// name and up to `PART_WORDS` plain words after it, stopping at the first
+/// flag, path, file or assignment. `eslint.js --fix a.ts b.ts` is
+/// `eslint.js`, `yarn eslint ./src` is `yarn eslint`.
+fn part_label(cmd: &str) -> String {
+    let mut words = cmd.split_whitespace();
+    let Some(program) = words.next() else {
+        return String::new();
+    };
+    let plain = |w: &&str| {
+        w.len() <= 24
+            && !w.starts_with('-')
+            && w.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b':')
+    };
+    let mut label = program.rsplit('/').next().unwrap_or(program).to_string();
+    for w in words.take_while(plain).take(PART_WORDS) {
+        label.push(' ');
+        label.push_str(w);
+    }
+    label
+}
 
 /// What ran inside a command's recent runs, largest first: per inner
-/// command, the runs it was in, its highest peak, the most processes at
-/// once and its median time (samples are a second apart). `own` is the
-/// command itself, left out.
-fn profile_parts(p: &Profile, own: &str) -> Vec<Value> {
+/// command (see `part_label`), the runs it was in, its highest peak, the
+/// most processes at once and its median time (samples are a second
+/// apart). `example` is its largest command line. `own` is the command
+/// itself, left out.
+///
+/// Lines of one label in the same run count once, with their largest
+/// numbers: they may have run side by side, so their sums could overstate.
+fn profile_parts<'a>(runs: impl IntoIterator<Item = &'a Run>, own: &str) -> Vec<Value> {
     #[derive(Default)]
-    struct Seen {
+    struct Seen<'a> {
         runs: u32,
         peak: Bytes,
+        example: &'a str,
         procs: u32,
         secs: Vec<u32>,
     }
-    let mut by_cmd: BTreeMap<&str, Seen> = BTreeMap::new();
-    for r in &p.runs {
+    let mut by_label: BTreeMap<String, Seen> = BTreeMap::new();
+    for r in runs {
+        // Per label in this run: peak, its line, processes, samples.
+        let mut in_run: BTreeMap<String, (Bytes, &str, u32, u32)> = BTreeMap::new();
         for part in r.parts.iter().filter(|x| !is_own(&x.cmd, own)) {
-            let e = by_cmd.entry(part.cmd.as_str()).or_default();
+            let e = in_run.entry(part_label(&part.cmd)).or_insert((0, "", 0, 0));
+            if part.peak >= e.0 {
+                (e.0, e.1) = (part.peak, part.cmd.as_str());
+            }
+            e.2 = e.2.max(part.procs);
+            e.3 = e.3.max(part.samples);
+        }
+        for (label, (peak, example, procs, samples)) in in_run {
+            let e = by_label.entry(label).or_default();
             e.runs += 1;
-            e.peak = e.peak.max(part.peak);
-            e.procs = e.procs.max(part.procs);
+            if peak >= e.peak {
+                (e.peak, e.example) = (peak, example);
+            }
+            e.procs = e.procs.max(procs);
             if r.representative() {
-                e.secs.push(part.samples);
+                e.secs.push(samples);
             }
         }
     }
-    let mut rows: Vec<(&str, Seen)> = by_cmd.into_iter().collect();
-    rows.sort_by(|a, b| b.1.peak.cmp(&a.1.peak).then_with(|| a.0.cmp(b.0)));
+    let mut rows: Vec<(String, Seen)> = by_label.into_iter().collect();
+    rows.sort_by(|a, b| b.1.peak.cmp(&a.1.peak).then_with(|| a.0.cmp(&b.0)));
     rows.into_iter()
-        .take(PAGE_PARTS)
         .map(|(cmd, mut e)| {
             e.secs.sort_unstable();
             json!({
                 "cmd": cmd,
+                "example": example(e.example),
                 "runs": e.runs,
                 "peak": e.peak,
                 "procs": e.procs,
@@ -322,59 +395,128 @@ fn banners(l: &Listing, x: &Extras) -> Vec<Value> {
     out
 }
 
+/// A profile as the page shows it. `parts` are what ran inside its runs,
+/// when it is the open one (see `Extras::open_profile`).
+fn profile_json(p: &Profile, estimate: Bytes, parts: Option<Vec<Value>>) -> Value {
+    let peaks: Vec<Bytes> = p
+        .runs
+        .iter()
+        .filter(|r| r.representative() && r.peak > 0)
+        .map(|r| r.peak)
+        .collect();
+    json!({
+        "peaks": peaks,
+        "p90": estimate,
+        "median_s": p.median_ms().map(secs),
+        "samples": p.samples(),
+        "runs": p.runs.len(),
+        "parts": parts,
+    })
+}
+
+/// The command at the end of a key, which its parts leave out.
+fn own_command(key: &str) -> &str {
+    key.rsplit('|').next().unwrap_or("")
+}
+
+/// Each of `commands` over every invocation profiled for it, oldest run
+/// first, keyed by `command_profile_key`. A command with no exact keys,
+/// from before they existed, is its own old profile. Each key keeps its
+/// last `KEEP` runs, so `runs` counts what is kept, not every run.
+fn command_profiles(
+    profiles: &Profiles,
+    commands: &BTreeSet<String>,
+    default: Bytes,
+    open: Option<&str>,
+) -> Vec<(String, Value)> {
+    let mut runs: BTreeMap<&str, Vec<&Run>> = BTreeMap::new();
+    for (k, p) in &profiles.0 {
+        if !is_exact_key(k) {
+            continue;
+        }
+        if let Some(c) = commands.get(&command_key(k)) {
+            runs.entry(c).or_default().extend(&p.runs);
+        }
+    }
+    for c in commands {
+        if let (false, Some(p)) = (runs.contains_key(c.as_str()), profiles.get(c)) {
+            runs.insert(c, p.runs.iter().collect());
+        }
+    }
+    runs.into_iter()
+        .map(|(c, mut rs)| {
+            rs.sort_by_key(|r| r.at);
+            // The statistics need no parts; copying them would copy most of
+            // the profile store every second.
+            let merged = Profile {
+                runs: rs
+                    .iter()
+                    .map(|r| Run {
+                        peak: r.peak,
+                        duration_ms: r.duration_ms,
+                        exit: r.exit,
+                        flagged: r.flagged,
+                        at: r.at,
+                        workers: r.workers,
+                        parts: Vec::new(),
+                    })
+                    .collect(),
+            };
+            let est = Profiles(BTreeMap::from([(c.to_string(), merged)]));
+            let p = est.get(c).expect("just added");
+            let key = command_profile_key(c);
+            let parts = (open == Some(key.as_str())).then(|| profile_parts(rs, own_command(c)));
+            let mut v = profile_json(p, est.estimate(c, "", default).bytes, parts);
+            v["command"] = json!(c);
+            (key, v)
+        })
+        .collect()
+}
+
 pub fn state(l: &Listing, x: &Extras) -> Value {
     let s = &l.snapshot;
     let cfg = x.cfg;
     let growth = headroom_core::admission::pending_growth(&l.running.iter().collect::<Vec<_>>());
-    let mut keys: Vec<&str> = l
+    // A job's own workload: its estimate comes from exactly this key.
+    let mut profiles: BTreeMap<String, Value> = l
         .running
         .iter()
         .chain(&l.queued)
-        .map(|j| j.spec.key.as_str())
-        .collect();
-    keys.extend(l.history.iter().take(HISTORY).map(|h| h.key.as_str()));
-    // The Commands page opens these too.
-    let listed: Vec<(&str, Day)> = WINDOWS
-        .iter()
-        .flat_map(|&days| x.tally.window(x.wall, days).into_iter().take(COMMANDS))
-        .collect();
-    keys.extend(listed.iter().map(|(k, _)| *k));
-    let profiles: BTreeMap<&str, Value> = keys
-        .into_iter()
-        .filter_map(|k| {
+        .filter_map(|j| {
+            let k = j.spec.key.as_str();
             let p = x.profiles.get(k)?;
-            let peaks: Vec<Bytes> = p
-                .runs
-                .iter()
-                .filter(|r| r.representative() && r.peak > 0)
-                .map(|r| r.peak)
-                .collect();
             // This summarizes observed peaks. Scheduling can reserve more at
             // a known default worker count, which cannot be read from a key.
             let est = x.profiles.estimate(k, "", cfg.default_estimate);
-            Some((
-                k,
-                json!({
-                    "peaks": peaks,
-                    "p90": est.bytes,
-                    "median_s": p.median_ms().map(secs),
-                    "samples": p.samples(),
-                    "runs": p.runs.len(),
-                    "parts": profile_parts(p, k.rsplit('|').next().unwrap_or("")),
-                }),
-            ))
+            let parts = (x.open_profile == Some(k)).then(|| profile_parts(&p.runs, own_command(k)));
+            Some((k.to_string(), profile_json(p, est.bytes, parts)))
         })
         .collect();
+    // Every command on the Commands and History pages, over all its
+    // invocations. The longest window holds every shorter one.
+    let mut listed: BTreeSet<String> = x
+        .tally
+        .window(x.wall, TALLY_DAYS)
+        .into_iter()
+        .map(|(k, _)| k)
+        .collect();
+    listed.extend(l.history.iter().map(|h| command_key(&h.key)));
+    profiles.extend(command_profiles(
+        x.profiles,
+        &listed,
+        cfg.default_estimate,
+        x.open_profile,
+    ));
     let history: Vec<Value> = l
         .history
         .iter()
-        .take(HISTORY)
         .map(|h| {
             json!({
                 "id": h.id.to_string(),
                 "label": h.label,
                 "cmd": h.cmd,
                 "key": h.key,
+                "profile": command_profile_key(&command_key(&h.key)),
                 "duration_s": secs(h.duration_ms),
                 "peak": h.peak,
                 "estimate": h.estimate,
@@ -563,6 +705,7 @@ mod tests {
             others: &[],
             hooks: &[("claude", "installed"), ("codex", "absent")],
             classify: None,
+            open_profile: None,
             dismissed: d,
             wall: 1_100,
             since: 500,
@@ -643,9 +786,10 @@ mod tests {
             ]),
         );
         p.record(key, key, run(vec![part("tsc --noEmit", 2, 1, 45)]));
-        let rows = profile_parts(p.get(key).unwrap(), "git push");
+        let rows = profile_parts(&p.get(key).unwrap().runs, "git push");
         assert_eq!(rows.len(), 2, "git itself is the command, not part of it");
-        assert_eq!(rows[0]["cmd"], "tsc --noEmit");
+        assert_eq!(rows[0]["cmd"], "tsc");
+        assert_eq!(rows[0]["example"], "tsc --noEmit");
         assert_eq!(
             (rows[0]["runs"].clone(), rows[0]["peak"].clone()),
             (json!(3), json!(4u64 << 30))
@@ -653,21 +797,96 @@ mod tests {
         assert_eq!(rows[0]["median_s"], 45);
         assert_eq!(
             (rows[1]["cmd"].clone(), rows[1]["procs"].clone()),
-            (json!("eslint ."), json!(2))
+            (json!("eslint"), json!(2))
         );
         // Only runs from before: nothing to list.
         let mut old = Profiles::default();
         old.record(key, key, run(vec![]));
-        assert!(profile_parts(old.get(key).unwrap(), "git push").is_empty());
-        // Many inner commands: the largest few.
+        assert!(profile_parts(&old.get(key).unwrap().runs, "git push").is_empty());
+        // Many inner commands: all of them, largest first.
         let many: Vec<Part> = (0..12)
             .map(|i| part(&format!("c{i}"), i + 1, 1, 1))
             .collect();
         let mut big = Profiles::default();
         big.record(key, key, run(many));
-        let rows = profile_parts(big.get(key).unwrap(), "git push");
-        assert_eq!(rows.len(), PAGE_PARTS);
+        let rows = profile_parts(&big.get(key).unwrap().runs, "git push");
+        assert_eq!(rows.len(), 12);
         assert_eq!(rows[0]["cmd"], "c11");
+        assert_eq!(rows[11]["cmd"], "c0");
+    }
+
+    #[test]
+    fn an_inner_command_is_named_without_its_arguments() {
+        for (line, label) in [
+            ("eslint.js --fix ./a.ts ./b.ts", "eslint.js"),
+            ("yarn eslint ./src", "yarn eslint"),
+            ("corepack yarn biome check src/x.ts", "corepack yarn biome"),
+            ("git commit -m wip", "git commit"),
+            ("rustc --crate-name foo --edition=2024 src/lib.rs", "rustc"),
+            ("/opt/homebrew/bin/node forks.js", "node"),
+            ("cross-env.js NODE_ENV=test mocha", "cross-env.js"),
+            ("vitest run", "vitest run"),
+            ("fallow audit:deps", "fallow audit:deps"),
+            ("tsc", "tsc"),
+            ("", ""),
+            ("   ", ""),
+        ] {
+            assert_eq!(part_label(line), label, "{line:?}");
+        }
+        // Long example lines are cut, short ones kept whole.
+        let long = format!("eslint.js {}", "ä".repeat(400));
+        let cut = example(&long);
+        assert_eq!(cut.chars().count(), EXAMPLE_CHARS + 1);
+        assert!(cut.ends_with('…'));
+        let exact = "x".repeat(EXAMPLE_CHARS);
+        assert_eq!(example(&exact), exact);
+        assert_eq!(example(""), "");
+        // A word too long to be a subcommand is an argument.
+        assert_eq!(part_label(&format!("tool {}", "a".repeat(25))), "tool");
+        assert_eq!(part_label(&format!("tool {}", "a".repeat(24))).len(), 29);
+    }
+
+    #[test]
+    fn the_same_tool_with_other_arguments_is_one_inner_command() {
+        use headroom_core::model::Part;
+        let part = |cmd: &str, gb: u64, procs: u32, samples: u32| Part {
+            cmd: cmd.into(),
+            peak: gb << 30,
+            procs,
+            samples,
+        };
+        let run = |parts: Vec<Part>| Run {
+            peak: 4 << 30,
+            duration_ms: 60_000,
+            exit: Some(0),
+            flagged: false,
+            at: 1,
+            workers: None,
+            parts,
+        };
+        let runs = [
+            // Two batches in one run: one run, its largest numbers.
+            run(vec![
+                part("eslint.js --fix a.ts", 1, 1, 10),
+                part("eslint.js --fix b.ts c.ts", 3, 2, 30),
+            ]),
+            run(vec![part("eslint.js --fix d.ts", 2, 4, 20)]),
+        ];
+        let rows = profile_parts(&runs, "git commit");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["cmd"], "eslint.js");
+        assert_eq!(rows[0]["runs"], 2, "counted once per run");
+        assert_eq!(rows[0]["peak"], 3u64 << 30);
+        assert_eq!(
+            rows[0]["example"], "eslint.js --fix b.ts c.ts",
+            "the largest line"
+        );
+        assert_eq!(rows[0]["procs"], 4);
+        // Over the runs, each its longest batch: 30 and 20, upper middle.
+        assert_eq!(rows[0]["median_s"], 30);
+        // The command itself, with any arguments, stays out.
+        let own = [run(vec![part("git commit -m wip", 1, 1, 1)])];
+        assert!(profile_parts(&own, "git commit").is_empty());
     }
 
     #[test]
@@ -693,7 +912,7 @@ mod tests {
                 })
                 .collect(),
         };
-        let rows = profile_parts(&p, "git push");
+        let rows = profile_parts(&p.runs, "git push");
         assert_eq!(p.median_ms(), Some(30_000));
         assert_eq!(rows[0]["median_s"], 30);
         assert_eq!(rows[0]["runs"], 3);
@@ -701,7 +920,7 @@ mod tests {
         let flagged = Profile {
             runs: p.runs.into_iter().filter(|r| !r.representative()).collect(),
         };
-        let rows = profile_parts(&flagged, "git push");
+        let rows = profile_parts(&flagged.runs, "git push");
         assert!(rows[0]["median_s"].is_null());
         assert_eq!(rows[0]["runs"], 2);
         assert_eq!(rows[0]["peak"], 900);
@@ -950,7 +1169,9 @@ mod tests {
         assert_eq!(v["history"][0]["ended_at"], 1000);
         assert_eq!(v["history"][0]["ended_ago_s"], 100);
         assert!(v["history"][1]["guard"].is_null());
-        assert_eq!(v["last_day"]["runs"], 2);
+        // The requeued run is counted when its retry ends.
+        assert_eq!(v["last_day"]["runs"], 1);
+        assert_eq!(v["last_day"]["requeued"], 1);
     }
 
     #[test]
@@ -1079,26 +1300,131 @@ mod tests {
         (x.tally, x.wall) = (&t, wall);
         let v = state(&listing(), &x);
         assert_eq!(v["commands"][1]["rows"][0]["key"], "/r|old");
-        assert_eq!(v["profiles"]["/r|old"]["samples"], 1);
+        assert_eq!(v["commands"][1]["rows"][0]["profile"], "cmd:/r|old");
+        assert_eq!(v["profiles"]["cmd:/r|old"]["samples"], 1);
+        assert_eq!(v["profiles"]["cmd:/r|old"]["command"], "/r|old");
         // Not in any window, not sent: the 90-day page stops there too.
         x.wall += 200 * 86_400;
-        assert!(state(&listing(), &x)["profiles"].get("/r|old").is_none());
+        assert!(
+            state(&listing(), &x)["profiles"]
+                .get("cmd:/r|old")
+                .is_none()
+        );
     }
 
     #[test]
-    fn commands_lists_at_most_fifty_per_window_but_totals_all() {
+    fn commands_lists_every_command_and_the_rows_add_up_to_the_totals() {
         let mut t = Tally::default();
         let wall = 100 * 86_400;
-        for i in 0..(COMMANDS as u64 + 5) {
+        for i in 0..205 {
             t.add(&HistoryEntry {
                 key: format!("/r|c{i}"),
-                ..ended(wall, Outcome::Exited, Some(0), 0)
+                ..ended(wall, Outcome::Exited, Some(i % 2), 0)
             });
         }
         let v = commands(&t, wall);
-        assert_eq!(v[0]["rows"].as_array().unwrap().len(), COMMANDS);
-        assert_eq!(v[0]["count"], COMMANDS + 5);
-        assert_eq!(v[0]["total"]["runs"], COMMANDS + 5);
+        let rows = v[0]["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 205);
+        assert_eq!(v[0]["count"], 205);
+        let sum = |f: &str| rows.iter().map(|r| r[f].as_u64().unwrap()).sum::<u64>();
+        assert_eq!(sum("runs"), v[0]["total"]["runs"].as_u64().unwrap());
+        assert_eq!(sum("failed"), v[0]["total"]["failed"].as_u64().unwrap());
+    }
+
+    fn digest_key(c: char, cmd: &str) -> String {
+        format!("/r|v2:{}|{cmd}", c.to_string().repeat(64))
+    }
+
+    #[test]
+    fn a_command_is_one_row_with_one_profile_over_its_invocations() {
+        use headroom_core::model::Part;
+        let (cfg, d) = (Config::default(), HashSet::new());
+        let run = |gb: u64, at: u64, exit: i32, parts: Vec<Part>| Run {
+            peak: gb << 30,
+            duration_ms: 60_000,
+            exit: Some(exit),
+            flagged: false,
+            at,
+            workers: None,
+            parts,
+        };
+        let tsc = |procs| Part {
+            cmd: "tsc --noEmit".into(),
+            peak: 1 << 30,
+            procs,
+            samples: 30,
+        };
+        let (a, b) = (digest_key('a', "git commit"), digest_key('b', "git commit"));
+        let mut p = Profiles::default();
+        // The fallback "/r|git commit" collects these too; it is no invocation.
+        p.record(&b, "/r|git commit", run(3, 20, 0, vec![tsc(1)]));
+        p.record(&a, "/r|git commit", run(1, 10, 0, vec![tsc(2)]));
+        p.record(&a, "/r|git commit", run(5, 30, 1, vec![]));
+        let wall = 100 * 86_400;
+        let mut t = Tally::default();
+        let mut l = listing();
+        l.history.clear();
+        for k in [&a, &b, &a] {
+            let h = HistoryEntry {
+                key: k.clone(),
+                ..ended(wall, Outcome::Exited, Some(0), 0)
+            };
+            t.add(&h);
+            l.history.push(h);
+        }
+        let mut x = extras(&cfg, &p, &d);
+        (x.tally, x.wall) = (&t, wall);
+        let closed = state(&l, &x);
+        assert!(
+            closed["profiles"]["cmd:/r|git commit"]["parts"].is_null(),
+            "only when open"
+        );
+        x.open_profile = Some("cmd:/r|git commit");
+        let v = state(&l, &x);
+        let week = &v["commands"][0];
+        assert_eq!(week["count"], 1);
+        assert_eq!(week["rows"][0]["key"], "/r|git commit");
+        assert_eq!(week["rows"][0]["runs"], week["total"]["runs"]);
+        assert_eq!(week["rows"][0]["runs"], 3);
+        let prof = &v["profiles"]["cmd:/r|git commit"];
+        assert_eq!(prof["command"], "/r|git commit");
+        assert_eq!(
+            prof["runs"], 3,
+            "the fallback's copies are not counted again"
+        );
+        assert_eq!(prof["samples"], 2);
+        assert_eq!(
+            prof["peaks"],
+            json!([1u64 << 30, 3u64 << 30]),
+            "oldest first"
+        );
+        // The failed 5 GB run is a lower bound on what it needs.
+        assert_eq!(prof["p90"], 5u64 << 30);
+        assert_eq!(prof["parts"][0]["runs"], 2);
+        assert_eq!(prof["parts"][0]["procs"], 2);
+        // History rows open the same profile.
+        for h in v["history"].as_array().unwrap() {
+            assert_eq!(h["profile"], "cmd:/r|git commit");
+        }
+        // Exact profiles of past runs are not sent.
+        assert!(v["profiles"].get(&a).is_none());
+    }
+
+    #[test]
+    fn a_command_with_nothing_profiled_has_no_profile() {
+        let (cfg, p, d) = (Config::default(), Profiles::default(), HashSet::new());
+        let wall = 100 * 86_400;
+        let mut t = Tally::default();
+        t.add(&HistoryEntry {
+            key: digest_key('a', "git commit"),
+            ..ended(wall, Outcome::Cancelled, None, 5_000)
+        });
+        let mut x = extras(&cfg, &p, &d);
+        (x.tally, x.wall) = (&t, wall);
+        let v = state(&listing(), &x);
+        assert_eq!(v["commands"][0]["rows"][0]["runs"], 0);
+        assert_eq!(v["commands"][0]["rows"][0]["wait_s"], 5);
+        assert!(v["profiles"].get("cmd:/r|git commit").is_none());
     }
 
     #[test]
@@ -1120,9 +1446,9 @@ mod tests {
         assert_eq!(
             last_day(&h, wall),
             json!({
-                "runs": 7, "failed": 2, "killed": 2,
-                "waited": 3, "waited_s": 121, "longest_wait_s": 90,
-                "wait_p50_s": 30, "wait_p95_s": 90,
+                "runs": 6, "failed": 3, "requeued": 1,
+                "waited": 2, "waited_s": 91, "longest_wait_s": 90,
+                "wait_p50_s": 1, "wait_p95_s": 90,
                 "went_first": 1, "more": false,
             })
         );
@@ -1199,14 +1525,14 @@ mod tests {
     }
 
     #[test]
-    fn the_history_page_shows_the_last_runs_and_the_summary_counts_the_day() {
+    fn the_history_page_shows_every_run_kept_and_the_summary_counts_the_day() {
         let (cfg, p, d) = (Config::default(), Profiles::default(), HashSet::new());
         let mut l = listing();
         l.history = (0..HISTORY as u64 + 10)
             .map(|i| ended(1_000 - i, Outcome::Exited, Some(0), 0))
             .collect();
         let v = state(&l, &extras(&cfg, &p, &d));
-        assert_eq!(v["history"].as_array().unwrap().len(), HISTORY);
+        assert_eq!(v["history"].as_array().unwrap().len(), HISTORY + 10);
         assert_eq!(v["last_day"]["runs"], HISTORY as u64 + 10);
     }
 

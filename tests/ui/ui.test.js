@@ -15,6 +15,7 @@ function test(name, fn) {
   ui.UI.finishingSetup = false;
   ui.UI.welcomeOpen.clear();
   ui.UI.trail.length = 0;
+  ui.UI.openProfile = null;
   ui.UI.cmdDays = 7;
   ui.UI.cmdSort = 'run_s';
   ui.UI.confirm = null;
@@ -312,11 +313,11 @@ test('returning through profiles from different tabs restores the correct select
 
 test('persistent navigation selects each page and returns to Queue without a back button', () => {
   ui.setState(busy);
-  for (const page of ['history', 'commands', 'others', 'settings', 'main']) {
+  for (const page of ['history', 'commands', 'worktrees', 'others', 'settings', 'main']) {
     ui.click({ act:'goto', page }, 0);
     eq(ui.UI.page, page);
     const foot = document.getElementById('foot').innerHTML;
-    eq((foot.match(/data-act="goto"/g) || []).length, 5);
+    eq((foot.match(/data-act="goto"/g) || []).length, 6);
     eq((foot.match(/aria-current="page"/g) || []).length, 1);
     has(foot, `data-page="${page}" aria-current="page"`);
     has(foot, '>Queue</button>');
@@ -724,7 +725,7 @@ test('a guard freeze is a banner with resume and kill', () => {
   const v = ui.view();
   has(v, 'Froze “headroom-hog” (sc-49201)');
   if (!/memory critical for \d+ s/.test(v)) throw new Error('freeze reason missing: ' + v);
-  has(v, '❄︎ Paused');
+  has(v, '❄︎ Auto-paused');
   eq(ui.find({ act: 'resume', id: '4' }).length, 2, 'banner and row both offer resume');
   has(ui.head(), 'CRITICAL');
 });
@@ -778,8 +779,8 @@ test('a head passed over says how often and until when; the job that went first 
 
 test('a strip above what is running sums up the last 24 hours', () => {
   ui.setState(history);
-  has(ui.view(), 'Jobs last 24h 5 runs 3 failed 0 waited 0s wait p50 0s wait p95 0 went first');
-  has(ui.html(), '1 exited with an error, 2 killed to free memory');
+  has(ui.view(), 'Jobs last 24h 4 runs 2 failed 0 waited 0s wait p50 0s wait p95 0 went first');
+  has(ui.html(), 'Exited with an error, or killed twice to free memory. 1 more was killed once and run again.');
   ui.setState(tunedHistory);
   has(ui.view(), '2 runs 0 failed');
   lacks(ui.view(), 'shrunk');
@@ -789,13 +790,13 @@ test('a strip above what is running sums up the last 24 hours', () => {
 
 test('the strip shows how many jobs waited, and the waits of those', () => {
   const day = (d) => ui.setState({ ...history, last_day: { ...history.last_day, ...d } });
-  day({ runs: 426, failed: 0, killed: 0, waited: 44,
+  day({ runs: 426, failed: 0, requeued: 0, waited: 44,
     waited_s: 254, longest_wait_s: 131, wait_p50_s: 12, wait_p95_s: 131 });
   has(ui.view(), '426 runs 0 failed 10% waited 12s wait p50 2m11 wait p95');
   has(ui.html(), '44 of 426 jobs waited in the queue');
   has(ui.html(), 'Of the 44 that waited. Time in the queue before starting: 4m14 in all, longest 2m11');
   day({ runs: 1000, waited: 3 });
-  has(ui.view(), '1000 runs 3 failed <1% waited');
+  has(ui.view(), '1000 runs 2 failed <1% waited');
   day({ runs: 1, waited: 1 });
   has(ui.view(), '100% waited');
   has(ui.html(), '1 of 1 job waited in the queue');
@@ -804,8 +805,36 @@ test('the strip shows how many jobs waited, and the waits of those', () => {
   ui.setState(history);
   has(ui.view(), '0 waited');
   has(ui.html(), 'No job had to wait');
-  day({ runs: 0, failed: 0, killed: 0, waited: 0 });
+  day({ runs: 0, failed: 0, requeued: 0, waited: 0 });
   has(ui.view(), '0 runs 0 failed 0 waited');
+});
+
+test('the last 24 hours and the commands page count runs and failures alike', () => {
+  ui.setState(history);
+  const day = history.last_day, week = history.commands[0].total;
+  eq([day.runs, day.failed], [week.runs, week.failed], 'every run here ended today');
+  has(ui.view(), `${day.runs} runs ${day.failed} failed`);
+  ui.click({ act: 'goto', page: 'commands' });
+  has(ui.view(), `${week.runs} runs ${week.failed} failed`);
+});
+
+test('the commands page rows add up to its totals', () => {
+  ui.setState(history);
+  ui.click({ act: 'goto', page: 'commands' });
+  const week = history.commands[0];
+  const shown = [...ui.view().matchAll(/ (\d+) runs? \d/g)].slice(1).map(m => Number(m[1]));
+  eq(shown.length, week.rows.length, 'every command is listed');
+  eq(shown.reduce((a, b) => a + b, 0), week.total.runs);
+});
+
+test('a command that never started says so instead of 0 runs', () => {
+  const week = history.commands[0];
+  const row = { ...week.rows[0], key: '/r|queued only', profile: 'cmd:/r|queued only', runs: 0, failed: 0, run_s: 0, wait_s: 40, gb_h: 0, peak: 0 };
+  ui.setState({ ...history, commands: [{ ...week, count: week.count + 1, rows: [...week.rows, row] }] });
+  ui.click({ act: 'goto', page: 'commands' });
+  has(ui.view(), 'queued only · r never started');
+  lacks(ui.view(), '0 runs 0s');
+  has(ui.view(), 'waited 40s');
 });
 
 test('the commands page ranks what ran by time, with runs, memory and failures', () => {
@@ -843,30 +872,33 @@ test('the commands page re-sorts and switches windows without asking the daemon'
 test('a command opens its profile, and back returns to the commands page', () => {
   ui.setState(history);
   ui.click({ act: 'goto', page: 'commands' });
-  const key = history.commands[0].rows[0].key;
-  ui.click({ act: 'profile', key });
+  const row = history.commands[0].rows[0];
+  ui.click({ act: 'profile', key: row.profile });
   eq(ui.UI.page, 'profile');
+  has(ui.view(), 'work-scheduler-mcp · headroom · headroom-hog');
+  lacks(ui.view(), 'cmd:');
+  has(ui.view(), 'Covers every run of this command, whatever its arguments');
   eq(ui.find({ act: 'goto', page: 'commands' }).length, 1, 'back goes to commands');
 });
 
 test('a command page lists what ran inside its runs, when that was recorded', () => {
   ui.setState(history);
   ui.click({ act: 'goto', page: 'commands' });
-  const key = history.commands[0].rows[0].key;
+  const key = history.commands[0].rows[0].profile;
   const p = history.profiles[key];
   ui.click({ act: 'profile', key });
   lacks(ui.view(), 'Runs inside it');
   const parts = [{ cmd: 'tsc --noEmit', runs: 3, peak: 3 * 2 ** 30, procs: 1, median_s: 45 },
                  { cmd: 'forks.js', runs: 1, peak: 2 ** 30, procs: 8, median_s: 90 }];
   ui.setState({ ...history, profiles: { ...history.profiles, [key]: { ...p, runs: 4, parts } } });
-  has(ui.view(), 'Runs inside it tsc --noEmit in 3 of 4 runs · peak 3 GB · 45s forks.js in 1 of 4 runs · peak 1 GB · 1m30 · 8 processes');
+  has(ui.view(), 'Runs inside it tsc --noEmit in 3 of 4 recorded runs · peak 3 GB · 45s forks.js in 1 of 4 recorded runs · peak 1 GB · 1m30 · 8 processes');
   ui.setState({ ...history, profiles: { ...history.profiles, [key]: { ...p, runs: 4,
     parts: [{ ...parts[0], median_s: null }] } } });
-  has(ui.view(), 'tsc --noEmit in 3 of 4 runs · peak 3 GB · time unknown');
+  has(ui.view(), 'tsc --noEmit in 3 of 4 recorded runs · peak 3 GB · time unknown');
   lacks(ui.view(), 'peak 3 GB · 0s');
 });
 
-test('the commands page says when there is nothing to show, or more than it lists', () => {
+test('the commands page says when there is nothing to show, and how it counts', () => {
   const { commands, ...older } = history;
   ui.setState(older);
   ui.click({ act: 'goto', page: 'commands' });
@@ -875,8 +907,10 @@ test('the commands page says when there is nothing to show, or more than it list
   ui.setState({ ...history, commands: [empty] });
   has(ui.view(), 'No runs in the last 7 days');
   const week = history.commands[0];
-  ui.setState({ ...history, commands: [{ ...week, count: week.rows.length + 60 }] });
-  has(ui.view(), `The ${week.rows.length} with the most time running, of ${week.rows.length + 60} commands.`);
+  ui.setState(history);
+  has(ui.view(), `${week.rows.length} commands. Every run of a command counts toward it, whatever its arguments.`);
+  has(ui.view(), 'counted in whole UTC days');
+  lacks(ui.view(), 'with the most time running');
 });
 
 test('an empty week keeps the controls for reaching older command activity', () => {
@@ -895,7 +929,7 @@ test('an empty week keeps the controls for reaching older command activity', () 
 test('zeros are dimmed, failures are not coloured, and every stat explains itself on hover', () => {
   ui.setState(history);
   const html = ui.html();
-  has(html, 'class="" data-tip="1 exited with an error');
+  has(html, 'class="" data-tip="Exited with an error, or killed twice');
   has(html, 'class="zero" data-tip="0 smaller jobs started ahead');
   eq((html.match(/data-tip=/g) || []).length, 6, 'one tooltip per stat');
   lacks(html, 'class="bad"');
@@ -1057,18 +1091,46 @@ test('history words every ending', () => {
   eq(ui.sent, [], 'navigation stays in the page');
 });
 
-test('a profile opens from history, labelled without the raw key', () => {
+test('a profile opens from history as its command, labelled without the raw key', () => {
   ui.setState(history);
   ui.click({ act: 'goto', page: 'history' });
-  const key = history.history.find(h => h.cmd === 'echo ok').key;
+  const run = history.history.find(h => h.cmd === 'echo ok');
+  const key = run.profile;
   ui.click({ act: 'profile', key });
   const v = ui.view();
   has(v, 'work-scheduler-mcp · headroom · echo ok');
+  lacks(v, 'v2:');
   has(v, 'historical estimate');
-  ui.click({ act: 'reset_profile', key });
+  const command = history.profiles[key].command;
+  eq(ui.sent, [{ cmd: 'open_profile', key }], 'asks for its details');
+  ui.sent.length = 0;
+  ui.click({ act: 'reset_command', key });
   eq(ui.sent, [], 'reset is armed, not sent');
-  ui.click({ act: 'reset_profile', key });
-  eq(ui.sent, [{ cmd: 'reset_profile', key }]);
+  has(ui.view(), 'Reset? Click again');
+  ui.click({ act: 'reset_command', key });
+  eq(ui.sent, [{ cmd: 'reset_command', command }]);
+});
+
+test('the daemon is told which profile is open, once, and when it closes', () => {
+  ui.setState(history);
+  ui.click({ act: 'goto', page: 'commands' });
+  eq(ui.sent, []);
+  const key = history.commands[0].rows[0].profile;
+  ui.click({ act: 'profile', key });
+  ui.setState(history);
+  eq(ui.sent, [{ cmd: 'open_profile', key }], 'a re-render does not ask again');
+  ui.click({ act: 'goto', page: 'commands', back: 'true' });
+  eq(ui.sent, [{ cmd: 'open_profile', key }, { cmd: 'open_profile', key: null }]);
+  ui.click({ act: 'goto', page: 'history' });
+  eq(ui.sent.length, 2, 'moving between other pages sends nothing');
+});
+
+test('a history row with no profile entry opens an empty profile, not an error', () => {
+  const { profiles, ...rest } = history;
+  ui.setState({ ...rest, profiles: {} });
+  ui.click({ act: 'goto', page: 'history' });
+  ui.click({ act: 'profile', key: history.history.find(h => h.cmd === 'echo ok').profile });
+  has(ui.view(), 'No runs recorded for this command yet.');
 });
 
 test('a profile separates measured runs and historical estimates from scheduling', () => {
@@ -1102,7 +1164,7 @@ test('a profile with no recorded runs says so', () => {
 
 test('profile reset escapes repository names and preserves its confirmation key', () => {
   const key = '/repo/" onpointerenter="alert(1) <&|pnpm test';
-  const profile = Object.values(history.profiles)[0];
+  const { command, ...profile } = Object.values(history.profiles)[0];
   ui.setState({ ...history, profiles: { [key]: profile } });
   ui.UI.page = 'profile';
   ui.UI.profileKey = key;
@@ -1450,6 +1512,221 @@ test('a state arriving mid-drag is held back until the drop', () => {
   ui.UI.drag = null;
   ui.setState(held);
   has(ui.view(), 'held by you');
+});
+
+test('a command profile reset escapes the command it sends', () => {
+  const command = '/repo/" onpointerenter="alert(1) <&|pnpm test';
+  const key = 'cmd:' + command;
+  const profile = { ...Object.values(history.profiles)[0], command };
+  ui.setState({ ...history, profiles: { [key]: profile } });
+  ui.UI.page = 'profile';
+  ui.UI.profileKey = key;
+  ui.setState(ui.STATE);
+  lacks(ui.html(), ' onpointerenter="alert(1)');
+  ui.click({ act: 'reset_command', key });
+  ui.click({ act: 'reset_command', key });
+  eq(ui.sent, [{ cmd: 'reset_command', command }]);
+});
+
+test('a newer version in the tap shows in Settings with the command to get it', () => {
+  const update = { latest: '0.4.13', command: 'brew upgrade aha-churchdesk/tap/headroom && brew services restart headroom', restart: false };
+  ui.setState({ ...history, update });
+  has(ui.page(), 'update available');
+  ui.click({ act: 'goto', page: 'settings' }, 0);
+  has(ui.view(), '0.4.13 is available. Run in a terminal: brew upgrade aha-churchdesk/tap/headroom && brew services restart headroom Copy');
+  lacks(ui.view(), 'quit and reopen');
+  ui.click({ act: 'copy', text: update.command });
+  eq(ui.sent, [{ cmd: 'copy', text: update.command }]);
+  ui.setState({ ...history, update, copy_result: { text: update.command, ok: true, message: 'Copied to clipboard.' } });
+  has(ui.view(), 'restart headroom Copied');
+});
+
+test('an app started by hand is told to reopen after upgrading', () => {
+  ui.setState({ ...history, update: { latest: '0.5.0', command: 'brew upgrade aha-churchdesk/tap/headroom', restart: true } });
+  ui.click({ act: 'goto', page: 'settings' }, 0);
+  has(ui.view(), '0.5.0 is available. Run in a terminal, then quit and reopen Headroom: brew upgrade aha-churchdesk/tap/headroom');
+});
+
+test('a failed copy of the upgrade command says why', () => {
+  const update = { latest: '0.5.0', command: 'brew upgrade aha-churchdesk/tap/headroom', restart: true };
+  ui.setState({ ...history, update, copy_result: { text: update.command, ok: false, message: 'pbcopy failed' } });
+  ui.click({ act: 'goto', page: 'settings' }, 0);
+  has(ui.view(), 'pbcopy failed');
+  has(ui.view(), 'brew upgrade aha-churchdesk/tap/headroom Copy');
+});
+
+test('with no update, Settings shows only the version and the tab has no dot', () => {
+  ui.setState({ ...history, update: null });
+  lacks(ui.page(), 'update available');
+  ui.click({ act: 'goto', page: 'settings' }, 0);
+  lacks(ui.view(), 'is available');
+  const { update, ...older } = history;
+  ui.setState(older);
+  lacks(ui.page(), 'update available');
+});
+
+test('Settings says whether Headroom came from Homebrew, a local install or a build', () => {
+  ui.click({ act: 'goto', page: 'settings' }, 0);
+  const app = '/Applications/Headroom.app/Contents/MacOS/headroomd';
+  ui.setState({ ...history, install: { kind: 'local', path: app } });
+  has(ui.view(), `Local install, from a checkout · ${app}`);
+  ui.setState({ ...history, install: { kind: 'homebrew', path: '/opt/homebrew/Cellar/headroom/0.4.13/bin/headroomd' } });
+  has(ui.view(), 'Installed with Homebrew');
+  lacks(ui.view(), '/opt/homebrew/Cellar');
+  ui.setState({ ...history, install: { kind: 'build', path: '/src/headroom/target/release/headroomd' } });
+  has(ui.view(), 'Development build · /src/headroom/target/release/headroomd');
+  const { install, ...older } = history;
+  ui.setState(older);
+  lacks(ui.view(), 'Installed with');
+  lacks(ui.view(), 'Development build');
+});
+
+test('an inner command shows its name, with a real command line on hover', () => {
+  const key = history.commands[0].rows[0].profile;
+  const p = history.profiles[key];
+  const parts = [{ cmd: 'eslint.js', example: 'eslint.js --fix ./a.ts ./b.ts', runs: 2, peak: 2 ** 30, procs: 1, median_s: 5 },
+                 { cmd: 'tsc', runs: 1, peak: 2 ** 29, procs: 1, median_s: 3 }];
+  ui.setState({ ...history, profiles: { ...history.profiles, [key]: { ...p, runs: 2, parts } } });
+  ui.click({ act: 'goto', page: 'commands' });
+  ui.click({ act: 'profile', key });
+  has(ui.html(), 'title="eslint.js --fix ./a.ts ./b.ts">eslint.js</div>');
+  has(ui.html(), 'title="tsc">tsc</div>');
+});
+
+const WT = (o = {}) => ({ path: '/p/app.worktrees/a', branch: 'sc-1/a', main: false, locked: false, missing: false,
+  merged: 'branch', pr: null, remote_gone: false, last_commit_ago_s: 86400 * 40, changes: 0, in_use: [], blocker: null, ...o });
+const worktreesState = (repos, o = {}) => ({ ...history, worktrees: { scanning: false, scanned_ago_s: 5, repos, removing: [], results: {}, ...o } });
+const appRepo = (worktrees, o = {}) => ({ repo: '/p/app', default: 'origin/main', prs_checked: true,
+  worktrees: [WT({ path: '/p/app', branch: 'main', main: true, merged: null, blocker: 'the main checkout' }), ...worktrees], ...o });
+
+test('opening the worktrees tab asks for a fresh look, once', () => {
+  ui.setState(worktreesState([]));
+  ui.click({ act: 'goto', page: 'worktrees' });
+  eq(ui.sent, [{ cmd: 'scan_worktrees' }]);
+  ui.setState(worktreesState([], { scanning: true }));
+  eq(ui.sent.length, 1, 'a re-render does not ask again');
+  has(ui.view(), 'Looking at your repositories…');
+});
+
+test('merged worktrees can be removed; the rest say why they stay', () => {
+  ui.setState(worktreesState([appRepo([
+    WT(),
+    WT({ path: '/p/app.worktrees/b', branch: 'sc-2/b', merged: 'pr', pr: 42, last_commit_ago_s: 86400 * 3 }),
+    WT({ path: '/p/app.worktrees/c', branch: 'sc-3/c', merged: null, remote_gone: true, changes: null, blocker: 'not merged' }),
+    WT({ path: '/p/app.worktrees/d', branch: 'sc-4/d', changes: 2, blocker: '2 uncommitted files' }),
+    WT({ path: '/p/app.worktrees/e', branch: 'sc-5/e', in_use: ['claude', 'zsh'], changes: null, blocker: 'in use by claude, zsh' }),
+  ])]));
+  ui.click({ act: 'goto', page: 'worktrees' });
+  const v = ui.view();
+  has(v, '5 worktrees · 2 can be removed');
+  lacks(v, 'main checkout');
+  has(v, 'app 5 · against origin/main Remove 2 merged');
+  has(v, 'sc-1/a · a merged Remove');
+  has(v, 'sc-2/b · b PR #42 merged Remove');
+  has(v, 'not merged · remote branch deleted');
+  has(v, '2 uncommitted files');
+  has(v, 'in use by claude, zsh');
+  eq(ui.find({ act: 'remove_worktree' }).length, 2, 'only the two that may go');
+  // The oldest removable first.
+  if (v.indexOf('sc-1/a') > v.indexOf('sc-2/b')) throw new Error('oldest removable should come first');
+});
+
+test('removing a worktree needs a second click and sends it once', () => {
+  ui.setState(worktreesState([appRepo([WT()])]));
+  ui.click({ act: 'goto', page: 'worktrees' });
+  ui.sent.length = 0;
+  const target = { act: 'remove_worktree', path: '/p/app.worktrees/a' };
+  ui.click(target);
+  eq(ui.sent, [], 'armed, not sent');
+  has(ui.view(), 'Remove? Click again');
+  ui.click(target);
+  eq(ui.sent, [{ cmd: 'remove_worktree', repo: '/p/app', path: '/p/app.worktrees/a' }]);
+  ui.setState(worktreesState([appRepo([WT()])], { removing: ['/p/app.worktrees/a'] }));
+  has(ui.view(), 'Removing…');
+  eq(ui.find({ act: 'remove_worktree' }).length, 0, 'no second press while it runs');
+});
+
+test('removing every merged worktree of a repository is confirmed too', () => {
+  ui.setState(worktreesState([appRepo([WT(), WT({ path: '/p/app.worktrees/b', branch: 'b' })])]));
+  ui.click({ act: 'goto', page: 'worktrees' });
+  ui.sent.length = 0;
+  ui.click({ act: 'remove_merged_worktrees', repo: '/p/app' });
+  has(ui.view(), 'Remove 2? Click again');
+  eq(ui.sent, []);
+  ui.click({ act: 'remove_merged_worktrees', repo: '/p/app' });
+  eq(ui.sent, [{ cmd: 'remove_merged_worktrees', repo: '/p/app' }]);
+});
+
+test('a refused removal says why, and successes are counted', () => {
+  const results = { '/p/app.worktrees/a': { ok: false, message: 'not removed: in use by node' }, '/p/app.worktrees/z': { ok: true, message: 'worktree and branch z removed' } };
+  ui.setState(worktreesState([appRepo([WT()])], { results }));
+  ui.click({ act: 'goto', page: 'worktrees' });
+  has(ui.view(), 'not removed: in use by node');
+  has(ui.view(), '1 removed this session.');
+});
+
+test('without gh, the page says squash merges are not seen; with none, it says so', () => {
+  ui.setState(worktreesState([appRepo([WT({ merged: null, blocker: 'not merged', changes: null })], { prs_checked: false, default: null })]));
+  ui.click({ act: 'goto', page: 'worktrees' });
+  has(ui.view(), "Squash merges can't be seen");
+  has(ui.view(), 'against no default branch');
+  lacks(ui.view(), 'Remove');
+  ui.setState(worktreesState([]));
+  has(ui.view(), 'No worktrees besides your checkouts');
+  ui.setState({ ...history, worktrees: undefined });
+  has(ui.view(), 'Not available in this version');
+});
+
+test('a branch or path with markup is shown as text', () => {
+  ui.setState(worktreesState([appRepo([WT({ path: '/p/<b>x', branch: '"><img src=x onerror=1>' })])]));
+  ui.click({ act: 'goto', page: 'worktrees' });
+  lacks(ui.html(), '<img src=x');
+  ui.click({ act: 'remove_worktree', path: '/p/<b>x' });
+  ui.click({ act: 'remove_worktree', path: '/p/<b>x' });
+  eq(ui.sent.at(-1), { cmd: 'remove_worktree', repo: '/p/app', path: '/p/<b>x' });
+});
+
+function manyRuns(n){
+  const r = history.history[0];
+  return { ...history, history: Array.from({ length: n }, (_, i) =>
+    ({ ...r, id: String(i), ended_at: 1000 - i, label: `run-${i}`, guard: null, exit: 0 })) };
+}
+
+test('a short list is drawn whole, with no spacers', () => {
+  document.getElementById('view').clientHeight = 400;
+  ui.setState(manyRuns(99));
+  ui.click({ act: 'goto', page: 'history' });
+  eq((ui.html().match(/class="hrow"/g) || []).length, 99);
+  lacks(ui.html(), 'vspace');
+  document.getElementById('view').clientHeight = undefined;
+});
+
+test('a long list draws the rows near the view, with spacers for the rest', () => {
+  const view = document.getElementById('view');
+  view.clientHeight = 400;
+  ui.setState(manyRuns(2000));
+  ui.click({ act: 'goto', page: 'history' });
+  const drawn = (ui.html().match(/class="hrow"/g) || []).length;
+  if (!(drawn > 0 && drawn < 100)) throw new Error(`drew ${drawn} of 2000 rows`);
+  has(ui.view(), 'run-0 ');
+  lacks(ui.view(), 'run-1999 ');
+  const spacers = [...ui.html().matchAll(/class="vspace"[^>]*height:(\d+(?:\.\d+)?)px/g)].map(m => Number(m[1]));
+  eq(spacers.length, 2);
+  eq(spacers[0], 0, 'at the top nothing is above');
+  // Scrolled to the end, the last rows are drawn and the first are not.
+  view.scrollTop = 1e7;
+  ui.setState(ui.STATE);
+  has(ui.view(), 'run-1999 ');
+  lacks(ui.view(), 'run-0 ');
+  view.scrollTop = 0;
+  view.clientHeight = undefined;
+});
+
+test('a long list with no layout yet is drawn whole', () => {
+  document.getElementById('view').clientHeight = 0;
+  ui.setState(manyRuns(150));
+  ui.click({ act: 'goto', page: 'history' });
+  eq((ui.html().match(/class="hrow"/g) || []).length, 150);
 });
 
 console.log(`ui: ${pass} passed, ${fail} failed`);

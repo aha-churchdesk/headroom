@@ -9,8 +9,11 @@
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
-use headroom_core::classify::{Class, ProfileCommand, classify_in, describe_in, profile_keys};
+use headroom_core::classify::{
+    Class, ProfileCommand, alike_keys, classify_in, describe_in, profile_keys,
+};
 use headroom_core::model::{Bytes, GIB, Job, JobState};
+use headroom_core::profile::Keys;
 use headroom_core::protocol::{ClientMsg, Control, DaemonMsg, Listing, request};
 use headroom_core::store::Store;
 use serde_json::{Map, Value, json};
@@ -165,10 +168,18 @@ fn estimate_execution(
             let git = git_context(cwd);
             let (cmd, program) = describe_in(command, &cfg, &hooked);
             let (key, fallback) = profile_keys(&git.repo, &git.subdir, &cmd, &program, execution);
+            let (line, each) = alike_keys(&git.repo, &git.top, &git.cwd, command, &cfg, &hooked)
+                .unwrap_or_default();
+            let keys = Keys {
+                exact: &key,
+                line: &line,
+                each: &each,
+                fallback: &fallback,
+            };
             let profiles = store.load_profiles();
             let workers = tunable(command, cwd).map(|t| t.default_workers);
-            let observed = profiles.estimate(&key, &fallback, cfg.default_estimate);
-            let e = profiles.estimate_for_workers(&key, &fallback, cfg.default_estimate, workers);
+            let observed = profiles.estimate_alike(&keys, cfg.default_estimate);
+            let e = profiles.estimate_alike_for_workers(&keys, cfg.default_estimate, workers);
             json!({
                 "queued": true,
                 "profile": key,
@@ -177,7 +188,7 @@ fn estimate_execution(
                 "basis": if e.bytes > observed.bytes {
                     "past peaks raised to the memory model at the command's default worker count"
                 } else if e.samples == 0 {
-                    "no measured runs of its own yet: the repository's or the default estimate, with failed or interrupted runs as a lower bound"
+                    "no measured runs of its own yet: lines running the same commands, else the repository's or the default estimate, with failed or interrupted runs as a lower bound"
                 } else {
                     "p90 of this workload's measured past peaks, used from its first successful measured run and updated with later runs; broader repository history or the default is used before then; failed or interrupted runs set a lower bound"
                 },
