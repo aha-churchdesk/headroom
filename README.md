@@ -128,7 +128,23 @@ Queued and running tasks show a fallback arrow until their estimate has one succ
 
 ## The menu bar
 
-The icon is a four-bar memory gauge. It turns amber or red under memory pressure, and the title shows running·queued jobs, with ❄︎ while something is frozen and ⏸︎ while the queue is held.
+The icon is a four-bar memory gauge. The title shows `running·queued`: `1·0` means one job running and none waiting. It is blank when nothing is running or queued.
+
+| You see | Meaning |
+|---|---|
+| Plain icon | Memory is fine. |
+| Amber icon | macOS reports memory pressure. This often means a job is using more memory than Headroom estimated, but other apps count too. |
+| Red icon | Memory pressure is critical. |
+| `❄︎` | A job is frozen (paused). |
+| `⏸︎` | The queue is held. Running jobs carry on; new ones wait. |
+
+When memory runs short, Headroom steps in, in this order:
+
+1. **Freeze.** A job using more than twice its estimate (and over 8 GB) is frozen as soon as the icon turns amber. Otherwise, after 10 seconds of red, the most expendable job is frozen: low priority first, then the newest.
+2. **Kill.** If pressure stays high for 30 seconds while the job is frozen, Headroom kills it and puts it back in the queue once. A job is also killed if swap grows by more than 4 GB while it runs.
+3. **Resume.** Frozen jobs restart once memory is back to normal.
+
+Pinned jobs are never frozen or killed. Set the guard to freeze only, or off, in Settings.
 
 The popover lists running and queued jobs, their reported agent, and why the queue is waiting (`next needs 4.2 GB, 2.9 GB free`). Running jobs show memory, CPU, elapsed time including pauses, and usual runtime when known. The largest process inside a job appears when it differs from the command itself: `git commit`, then `↳ tsc --noEmit` while the hook runs. Expand a job to see its full command, queue wait, memory growth allowance, and how runtime estimates, pinning, or worker counts affect scheduling.
 
