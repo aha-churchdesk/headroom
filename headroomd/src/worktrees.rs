@@ -6,11 +6,17 @@
 //! trace in history; `gh` knows). A remote branch that is gone is only a
 //! hint. Removal re-checks everything first, never forces, and leaves
 //! anything with changes, a lock, or a process working in it.
+//!
+//! The page also says what each worktree holds on disk and how much of
+//! the volume is free.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -48,6 +54,14 @@ pub struct Worktree {
     pub changes: Option<u32>,
     /// Processes working inside it.
     pub in_use: Vec<String>,
+    /// Bytes its folder holds on disk; `None` until measured.
+    pub size: Option<u64>,
+    /// The volume its folder is on, once measured.
+    pub volume: Option<u64>,
+}
+
+fn uncommitted(n: u32) -> String {
+    format!("{n} uncommitted file{}", if n == 1 { "" } else { "s" })
 }
 
 impl Worktree {
@@ -68,10 +82,7 @@ impl Worktree {
         match self.changes {
             _ if self.missing => None,
             Some(0) => None,
-            Some(n) => Some(format!(
-                "{n} uncommitted file{}",
-                if n == 1 { "" } else { "s" }
-            )),
+            Some(n) => Some(uncommitted(n)),
             None => Some("changes not checked".into()),
         }
     }
@@ -370,24 +381,71 @@ pub fn scan(repos: &[String], procs: &Procs) -> Vec<Repo> {
         .collect()
 }
 
-/// Remove one worktree after checking again that it may go, then its
-/// branch: `-d` when it is in the default branch, `-D` when a merged pull
-/// request holds its every commit. A missing folder is pruned instead.
-pub fn remove(repo: &str, path: &str, procs: &Procs) -> Result<String, String> {
-    let fresh = scan_repo(Path::new(repo), procs).ok_or("the repository has no worktrees")?;
-    let w = fresh
-        .worktrees
-        .iter()
-        .find(|w| w.path == path)
-        .ok_or("no longer a worktree")?;
-    if let Some(why) = w.blocker() {
-        return Err(format!("not removed: {why}"));
+/// Why a worktree that could go when `w` was read may not go now: a
+/// batch takes a while, and a session may have started in it meanwhile.
+fn changed_since(w: &Worktree, procs: &Procs) -> Option<String> {
+    if w.missing {
+        return None;
     }
-    let dir = Path::new(repo);
+    let path = Path::new(&w.path);
+    if !path.is_dir() {
+        return Some("no longer there".into());
+    }
+    let users = users_of(&w.path, procs);
+    if !users.is_empty() {
+        return Some(format!("in use by {}", users.join(", ")));
+    }
+    // A new commit is not covered by the merge the scan saw.
+    match git(path, &["rev-parse", "HEAD"]) {
+        Ok(head) if head.trim() == w.head => {}
+        _ => return Some("changed since it was checked".into()),
+    }
+    match changes(path) {
+        Some(0) => None,
+        Some(n) => Some(uncommitted(n)),
+        None => Some("changes not checked".into()),
+    }
+}
+
+/// Take a checked worktree's folder out of the way at once and delete it
+/// in the background: deleting a `node_modules` takes minutes, a rename
+/// on the same volume does not. `false` when that can't be done here (a
+/// worktree with submodules, or a temporary folder on another volume) and
+/// git should remove it the slow way.
+fn set_aside(repo: &Path, path: &str) -> Result<bool, String> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let from = Path::new(path);
+    // git refuses to remove a worktree with submodules; leave that to it.
+    if from.join(".gitmodules").exists() {
+        return Ok(false);
+    }
+    let aside = std::env::temp_dir().join(format!(
+        "headroom-removed-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    if std::fs::rename(from, &aside).is_err() {
+        return Ok(false);
+    }
+    // With its folder gone, git only forgets the worktree.
+    if let Err(e) = git(repo, &["worktree", "remove", path]) {
+        let _ = std::fs::rename(&aside, from);
+        return Err(e);
+    }
+    std::thread::spawn(move || {
+        let _ = std::fs::remove_dir_all(&aside);
+    });
+    Ok(true)
+}
+
+/// Remove a worktree found free to go, then its branch: `-d` when it is
+/// in the default branch, `-D` when a merged pull request holds its every
+/// commit. A missing folder is pruned instead.
+fn take(dir: &Path, w: &Worktree) -> Result<String, String> {
     if w.missing {
         git(dir, &["worktree", "prune"])?;
-    } else {
-        git(dir, &["worktree", "remove", path])?;
+    } else if !set_aside(dir, &w.path)? {
+        git(dir, &["worktree", "remove", &w.path])?;
     }
     let Some(branch) = &w.branch else {
         return Ok("worktree removed".into());
@@ -399,6 +457,109 @@ pub fn remove(repo: &str, path: &str, procs: &Procs) -> Result<String, String> {
     Ok(match git(dir, &["branch", flag, branch]) {
         Ok(_) => format!("worktree and branch {branch} removed"),
         Err(e) => format!("worktree removed; branch {branch} kept ({e})"),
+    })
+}
+
+/// Remove these worktrees of `repo`, telling `done` how each went. The
+/// repository is read once for all of them (its merged pull requests are
+/// a network call); each after the first is then checked again on its
+/// own, for what may have changed while the ones before it went.
+pub fn remove_each(
+    repo: &str,
+    paths: &[String],
+    procs: impl Fn() -> Vec<(String, String)>,
+    mut done: impl FnMut(&str, Result<String, String>),
+) {
+    let dir = Path::new(repo);
+    let fresh = scan_repo(dir, &procs());
+    for (i, path) in paths.iter().enumerate() {
+        let result = (|| {
+            let w = fresh
+                .as_ref()
+                .ok_or("the repository has no worktrees")?
+                .worktrees
+                .iter()
+                .find(|w| &w.path == path)
+                .ok_or("no longer a worktree")?;
+            if let Some(why) = w.blocker() {
+                return Err(format!("not removed: {why}"));
+            }
+            if i > 0
+                && let Some(why) = changed_since(w, &procs())
+            {
+                return Err(format!("not removed: {why}"));
+            }
+            take(dir, w)
+        })();
+        done(path, result);
+    }
+}
+
+/// Remove one worktree after checking again that it may go.
+pub fn remove(repo: &str, path: &str, procs: &Procs) -> Result<String, String> {
+    let mut out = Err("not removed".to_string());
+    remove_each(
+        repo,
+        &[path.to_string()],
+        || procs.to_vec(),
+        |_, result| out = result,
+    );
+    out
+}
+
+/// The volume a folder is on, and bytes on disk of all under the folder:
+/// what `du` counts. A file linked more than once counts once, other
+/// volumes mounted below are left out, and symlinks are not followed.
+pub fn disk_usage(root: &Path) -> Option<(u64, u64)> {
+    let top = std::fs::symlink_metadata(root).ok()?;
+    if !top.is_dir() {
+        return None;
+    }
+    let volume = top.dev();
+    let mut bytes = top.blocks() * 512;
+    let mut linked: HashSet<u64> = HashSet::new();
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(m) = entry.metadata() else { continue };
+            if m.dev() != volume {
+                continue;
+            }
+            if m.is_dir() {
+                dirs.push(entry.path());
+            } else if m.nlink() > 1 && !linked.insert(m.ino()) {
+                continue;
+            }
+            bytes += m.blocks() * 512;
+        }
+    }
+    Some((volume, bytes))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Disk {
+    pub volume: u64,
+    pub total: u64,
+    /// Bytes a user may still write.
+    pub free: u64,
+}
+
+/// The volume `path` is on.
+pub fn disk(path: &Path) -> Option<Disk> {
+    let volume = std::fs::metadata(path).ok()?.dev();
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut s: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(c.as_ptr(), &mut s) } != 0 {
+        return None;
+    }
+    let block = u64::from(s.f_bsize);
+    Some(Disk {
+        volume,
+        total: s.f_blocks * block,
+        free: s.f_bavail * block,
     })
 }
 
@@ -427,6 +588,7 @@ pub fn json(repos: &[Repo], wall: u64) -> Value {
                     "changes": w.changes,
                     "in_use": w.in_use,
                     "blocker": w.blocker(),
+                    "size": w.size,
                 })).collect::<Vec<_>>(),
             }))
             .collect::<Vec<_>>()
@@ -455,6 +617,8 @@ pub fn processes() -> Vec<(String, String)> {
 #[derive(Debug, Default)]
 struct State {
     scanning: bool,
+    /// Worktrees are listed and their folders are still being measured.
+    sizing: bool,
     /// Unix seconds of the last scan that finished.
     scanned_at: Option<u64>,
     repos: Vec<Repo>,
@@ -484,23 +648,75 @@ impl Tab {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// Look at `repos` again, unless a scan is already running.
+    /// Look at `repos` again, unless a scan is already running. The list
+    /// shows as soon as git has answered; sizes follow, a few at a time.
     pub fn scan(&self, repos: Vec<String>) {
         {
             let mut s = self.lock();
-            if s.scanning {
+            if s.scanning || s.sizing {
                 return;
             }
             s.scanning = true;
         }
         let tab = self.clone();
         std::thread::spawn(move || {
-            let found = scan(&repos, &processes());
-            let mut s = tab.lock();
-            s.repos = found;
-            s.scanning = false;
-            s.scanned_at = Some(now());
+            let mut found = scan(&repos, &processes());
+            {
+                let mut s = tab.lock();
+                // Until measured again, a worktree keeps the size it had.
+                let known: HashMap<&str, (Option<u64>, Option<u64>)> = s
+                    .repos
+                    .iter()
+                    .flat_map(|r| &r.worktrees)
+                    .map(|w| (w.path.as_str(), (w.size, w.volume)))
+                    .collect();
+                for w in found.iter_mut().flat_map(|r| r.worktrees.iter_mut()) {
+                    if let Some(&(size, volume)) = known.get(w.path.as_str()) {
+                        (w.size, w.volume) = (size, volume);
+                    }
+                }
+                s.repos = found;
+                s.scanning = false;
+                s.sizing = true;
+                s.scanned_at = Some(now());
+            }
+            tab.measure();
+            tab.lock().sizing = false;
         });
+    }
+
+    /// Measure every worktree's folder. The main checkouts are not
+    /// worktrees to clear out, so they are left unmeasured.
+    fn measure(&self) {
+        let paths: Vec<String> = self
+            .lock()
+            .repos
+            .iter()
+            .flat_map(|r| &r.worktrees)
+            .filter(|w| !w.main && !w.missing)
+            .map(|w| w.path.clone())
+            .collect();
+        for chunk in paths.chunks(PARALLEL) {
+            let measured: Vec<(&String, Option<(u64, u64)>)> = std::thread::scope(|s| {
+                let handles: Vec<_> = chunk
+                    .iter()
+                    .map(|path| s.spawn(move || (path, disk_usage(Path::new(path)))))
+                    .collect();
+                handles.into_iter().filter_map(|h| h.join().ok()).collect()
+            });
+            let mut s = self.lock();
+            for (path, usage) in measured {
+                for w in s
+                    .repos
+                    .iter_mut()
+                    .flat_map(|r| r.worktrees.iter_mut())
+                    .filter(|w| &w.path == path)
+                {
+                    w.volume = usage.map(|(volume, _)| volume);
+                    w.size = usage.map(|(_, bytes)| bytes);
+                }
+            }
+        }
     }
 
     /// Remove these worktrees of `repo`, each checked again first.
@@ -518,10 +734,9 @@ impl Tab {
         let tab = self.clone();
         std::thread::spawn(move || {
             let _one = tab.one_at_a_time.lock().unwrap_or_else(|p| p.into_inner());
-            for path in paths {
-                let result = remove(&repo, &path, &processes());
+            remove_each(&repo, &paths, processes, |path, result| {
                 let mut s = tab.lock();
-                s.removing.remove(&path);
+                s.removing.remove(path);
                 if result.is_ok() {
                     for r in s.repos.iter_mut() {
                         r.worktrees.retain(|w| w.path != path);
@@ -531,8 +746,8 @@ impl Tab {
                     Ok(m) => (true, m),
                     Err(e) => (false, e),
                 };
-                s.results.insert(path, entry);
-            }
+                s.results.insert(path.to_string(), entry);
+            });
         });
     }
 
@@ -550,8 +765,30 @@ impl Tab {
 
     pub fn json(&self, wall: u64) -> Value {
         let s = self.lock();
+        // The volume the worktrees are on, read each time: a removed
+        // folder's space comes back while it is deleted in the background.
+        // Not before the page was first opened: nothing shows it yet.
+        let home = std::env::var_os("HOME");
+        let on = s
+            .repos
+            .first()
+            .map(|r| Path::new(&r.path))
+            .or(home.as_deref().map(Path::new))
+            .filter(|_| s.scanning || s.scanned_at.is_some());
+        let disk = on.and_then(disk).map(|d| {
+            let held: u64 = s
+                .repos
+                .iter()
+                .flat_map(|r| &r.worktrees)
+                .filter(|w| !w.main && w.volume == Some(d.volume))
+                .filter_map(|w| w.size)
+                .sum();
+            json!({ "total": d.total, "free": d.free, "worktrees": held })
+        });
         json!({
             "scanning": s.scanning,
+            "sizing": s.sizing,
+            "disk": disk,
             "scanned_ago_s": s.scanned_at.map(|t| wall.saturating_sub(t)),
             "repos": json(&s.repos, wall),
             "removing": s.removing.iter().collect::<Vec<_>>(),
@@ -822,11 +1059,135 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    #[test]
+    fn a_batch_reads_the_repository_once_and_checks_each_later_worktree_again() {
+        let (root, repo) = fixture("batch");
+        let path = |b: &str| root.join(b).display().to_string();
+        for b in ["second", "third", "fourth"] {
+            sh(&repo, &["worktree", "add", "-q", "-b", b, &path(b)]);
+        }
+        // While the first goes: a file appears in the second, a commit
+        // lands in the third and a session starts in the fourth.
+        let asked = std::cell::Cell::new(0);
+        let procs = || {
+            asked.set(asked.get() + 1);
+            if asked.get() == 2 {
+                std::fs::write(root.join("second/new.txt"), "x").unwrap();
+                sh(
+                    &root.join("third"),
+                    &["commit", "-q", "--allow-empty", "-m", "late"],
+                );
+            }
+            vec![(path("fourth"), "claude".to_string())]
+                .into_iter()
+                .filter(|_| asked.get() > 1)
+                .collect()
+        };
+        let paths: Vec<String> = ["merged", "second", "third", "fourth", "open", "merged"]
+            .map(path)
+            .to_vec();
+        let mut said: Vec<Result<String, String>> = Vec::new();
+        remove_each(&repo.display().to_string(), &paths, procs, |_, r| {
+            said.push(r)
+        });
+        let err = |m: &str| Err(m.to_string());
+        assert_eq!(
+            said,
+            [
+                Ok("worktree and branch merged removed".to_string()),
+                err("not removed: 1 uncommitted file"),
+                err("not removed: changed since it was checked"),
+                err("not removed: in use by claude"),
+                err("not removed: not merged"),
+                // Named twice in one batch: gone by the second time.
+                err("not removed: no longer there"),
+            ]
+        );
+        assert!(!root.join("merged").exists());
+        for b in ["second", "third", "fourth", "open", "dirty"] {
+            assert!(root.join(b).exists(), "{b} kept");
+        }
+        // Nothing to remove: nothing is said and nothing breaks.
+        remove_each(&repo.display().to_string(), &[], Vec::new, |_, _| {
+            panic!("nothing was asked for")
+        });
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_removed_worktree_is_gone_at_once_and_git_no_longer_lists_it() {
+        let (root, repo) = fixture("aside");
+        // A folder with something in it, as a real worktree has.
+        std::fs::create_dir_all(root.join("merged/node_modules/pkg")).unwrap();
+        std::fs::write(root.join("merged/node_modules/pkg/index.js"), "x").unwrap();
+        std::fs::write(repo.join(".git/info/exclude"), "node_modules\n").unwrap();
+        let wt = root.join("merged").display().to_string();
+        assert_eq!(set_aside(&repo, &wt), Ok(true));
+        assert!(!Path::new(&wt).exists());
+        let listed = git(&repo, &["worktree", "list", "--porcelain"]).unwrap();
+        assert!(!listed.contains(&wt), "{listed}");
+        assert!(!listed.contains("prunable"), "{listed}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_worktree_with_submodules_is_left_for_git_to_remove() {
+        let (root, repo) = fixture("modules");
+        std::fs::write(repo.join(".gitmodules"), "").unwrap();
+        sh(&repo, &["add", ".gitmodules"]);
+        sh(&repo, &["commit", "-q", "-m", "modules"]);
+        let wt = root.join("late").display().to_string();
+        sh(&repo, &["worktree", "add", "-q", "-b", "late", &wt]);
+        assert_eq!(
+            set_aside(&repo, &wt),
+            Ok(false),
+            "not moved: git decides about submodules"
+        );
+        assert!(Path::new(&wt).exists());
+        let said = remove(&repo.display().to_string(), &wt, &[]).unwrap();
+        assert_eq!(said, "worktree and branch late removed");
+        assert!(!Path::new(&wt).exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_folder_weighs_what_is_under_it_counting_a_linked_file_once() {
+        let root = std::env::temp_dir().join(format!("hr-wt-du-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("a/deep")).unwrap();
+        let empty = disk_usage(&root).unwrap().1;
+        std::fs::write(root.join("a/deep/big"), vec![1u8; 100_000]).unwrap();
+        let (volume, one) = disk_usage(&root).unwrap();
+        assert!(
+            one >= empty + 100_000 && one < empty + 200_000,
+            "{empty} {one}"
+        );
+        assert_eq!(volume, std::fs::metadata(&root).unwrap().dev());
+        // A second name for the same file takes no more room; a link to
+        // a folder elsewhere is not followed.
+        std::fs::hard_link(root.join("a/deep/big"), root.join("a/again")).unwrap();
+        std::os::unix::fs::symlink("/usr", root.join("a/usr")).unwrap();
+        let linked = disk_usage(&root).unwrap().1;
+        assert!(linked < one + 50_000, "{one} {linked}");
+        assert_eq!(disk_usage(&root.join("a/deep/big")), None, "a file");
+        assert_eq!(disk_usage(&root.join("gone")), None);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_volume_says_how_much_of_it_is_free() {
+        let d = disk(&std::env::temp_dir()).unwrap();
+        assert!(d.total > 0 && d.free <= d.total, "{d:?}");
+        assert_eq!(disk(Path::new("/nonexistent/folder")), None);
+    }
+
     fn settle(tab: &Tab) -> Value {
         let end = Instant::now() + Duration::from_secs(30);
         loop {
             let v = tab.json(now());
-            let busy = v["scanning"] == true || !v["removing"].as_array().unwrap().is_empty();
+            let busy = v["scanning"] == true
+                || v["sizing"] == true
+                || !v["removing"].as_array().unwrap().is_empty();
             if !busy || Instant::now() > end {
                 return v;
             }
@@ -844,9 +1205,24 @@ mod tests {
             Value::Null,
             "nothing scanned yet"
         );
+        assert_eq!(tab.json(0)["disk"], Value::Null, "nor the disk read");
         tab.scan(vec![repo_s.clone()]);
         let v = settle(&tab);
-        assert_eq!(v["repos"][0]["worktrees"].as_array().unwrap().len(), 4);
+        let listed = v["repos"][0]["worktrees"].as_array().unwrap();
+        assert_eq!(listed.len(), 4);
+        // Every worktree is measured; the main checkout is not one.
+        assert_eq!(listed[0]["size"], Value::Null);
+        let sizes: Vec<u64> = listed[1..]
+            .iter()
+            .map(|w| w["size"].as_u64().unwrap())
+            .collect();
+        assert!(sizes.iter().all(|&b| b > 0), "{sizes:?}");
+        assert_eq!(v["disk"]["worktrees"], sizes.iter().sum::<u64>());
+        assert!(v["disk"]["free"].as_u64().unwrap() <= v["disk"]["total"].as_u64().unwrap());
+        // Looked at again: the sizes are still there.
+        tab.scan(vec![repo_s.clone()]);
+        let again = settle(&tab);
+        assert_eq!(again["repos"][0]["worktrees"][1]["size"], listed[1]["size"]);
         let merged = root.join("merged").display().to_string();
         assert_eq!(tab.removable(&repo_s), std::slice::from_ref(&merged));
         assert!(tab.removable("/elsewhere").is_empty());
@@ -881,6 +1257,7 @@ mod tests {
                 merged: Some(Merged::Pr(42)),
                 changes: Some(2),
                 last_commit: Some(900),
+                size: Some(4096),
                 ..Worktree::default()
             }],
         };
@@ -892,6 +1269,7 @@ mod tests {
         );
         assert_eq!(w["blocker"], "2 uncommitted files");
         assert_eq!(w["last_commit_ago_s"], 100);
+        assert_eq!(w["size"], 4096);
         assert_eq!(json(&[], 0), json!([]));
     }
 }

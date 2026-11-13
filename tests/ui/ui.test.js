@@ -1686,6 +1686,153 @@ test('a branch or path with markup is shown as text', () => {
   eq(ui.sent.at(-1), { cmd: 'remove_worktree', repo: '/p/app', path: '/p/<b>x' });
 });
 
+const GB = 1e9;
+const sized = () => [appRepo([
+  WT({ size: 2.5 * GB }),
+  WT({ path: '/p/app.worktrees/b', branch: 'sc-2/b', merged: null, changes: null, blocker: 'not merged', size: 1 * GB }),
+])];
+
+test('the worktrees page leads with free disk space and what worktrees hold of it', () => {
+  ui.setState(worktreesState(sized(), { disk: { total: 500 * GB, free: 120 * GB, worktrees: 3.5 * GB } }));
+  ui.click({ act: 'goto', page: 'worktrees' });
+  const v = ui.view();
+  has(v, '120.0 GB free of 500.0 GB Worktrees 3.5 GB');
+  if (v.indexOf('120.0 GB free') > v.indexOf('2 worktrees')) throw new Error('the disk comes first');
+  has(ui.html(), 'aria-valuenow="76"');
+  has(ui.html(), 'class="wt" style="width:0.7%"');
+  lacks(ui.html(), 'wt-disk num low');
+});
+
+test('a nearly full disk is marked; an unknown or empty one is not drawn', () => {
+  const disk = free => worktreesState(sized(), { disk: { total: 500 * GB, free, worktrees: 3.5 * GB } });
+  ui.click({ act: 'goto', page: 'worktrees' });
+  ui.setState(disk(50 * GB));
+  lacks(ui.html(), 'wt-disk num low');
+  ui.setState(disk(49 * GB));
+  has(ui.html(), 'wt-disk num low');
+  ui.setState(disk(24 * GB));
+  has(ui.html(), 'wt-disk num full');
+  ui.setState(disk(0));
+  has(ui.view(), '0 MB free of 500.0 GB');
+  has(ui.html(), 'aria-valuenow="100"');
+  // Worktrees measured at more than the disk has in use never overflow the bar.
+  ui.setState(worktreesState(sized(), { disk: { total: 500 * GB, free: 499 * GB, worktrees: 3.5 * GB } }));
+  has(ui.view(), 'Worktrees 1.0 GB');
+  for (const none of [null, undefined, { total: 0, free: 0, worktrees: 0 }]) {
+    ui.setState(worktreesState(sized(), { disk: none }));
+    lacks(ui.html(), 'wt-disk');
+    has(ui.view(), '2 worktrees');
+  }
+});
+
+test('each worktree says what it holds on disk, summed per repository and overall', () => {
+  ui.setState(worktreesState(sized()));
+  ui.click({ act: 'goto', page: 'worktrees' });
+  const v = ui.view();
+  has(v, '2 worktrees · 3.5 GB · 1 can be removed (2.5 GB)');
+  has(v, 'app 2 · 3.5 GB · against origin/main');
+  has(v, '2.5 GB · last commit');
+  has(v, '1.0 GB · last commit');
+  ui.setState(worktreesState([appRepo([WT({ size: 0 }), WT({ path: '/p/app.worktrees/b', size: 999 }),
+    WT({ path: '/p/app.worktrees/c', size: 1e6 }), WT({ path: '/p/app.worktrees/d', size: 999.4e6 })])]));
+  has(ui.view(), '0 MB · last commit');
+  has(ui.view(), 'under 1 MB · last commit');
+  has(ui.view(), '1 MB · last commit');
+  has(ui.view(), '999 MB · last commit');
+});
+
+test('sizes still being measured say so, and totals show they are partial', () => {
+  ui.setState(worktreesState([appRepo([WT({ size: 2.5 * GB }), WT({ path: '/p/app.worktrees/b', branch: 'b', size: null }),
+    WT({ path: '/p/app.worktrees/c', branch: 'c', size: null, missing: true })])], { sizing: true }));
+  ui.click({ act: 'goto', page: 'worktrees' });
+  has(ui.view(), '3 worktrees · 2.5 GB+ · 3 can be removed (2.5 GB+)');
+  has(ui.view(), 'Measuring…');
+  eq((ui.view().match(/measuring…/g) || []).length, 1, 'a missing folder has nothing to measure');
+  eq(ui.find({ act: 'scan_worktrees' })[0].disabled, true, 'no second look while measuring');
+  // Measuring over and one never measured: no size, and nothing pending.
+  ui.setState(worktreesState([appRepo([WT({ size: null })])]));
+  lacks(ui.view(), 'measuring…');
+  has(ui.view(), '1 worktree · 1 can be removed');
+});
+
+const twoRepos = () => [
+  appRepo([WT({ size: 2 * GB }), WT({ path: '/p/app.worktrees/b', branch: 'sc-2/b', merged: null, changes: null, blocker: 'not merged', in_use: ['claude'], size: 1 * GB })]),
+  { repo: '/p/site', default: 'origin/main', prs_checked: true, worktrees: [
+    WT({ path: '/p/site', branch: 'main', main: true, merged: null, blocker: 'the main checkout' }),
+    WT({ path: '/p/site.worktrees/x', branch: 'x', changes: 1, blocker: '1 uncommitted file', size: 4 * GB }) ] },
+];
+
+test('the worktrees can be narrowed to one repository', () => {
+  ui.setState(worktreesState(twoRepos()));
+  ui.click({ act: 'goto', page: 'worktrees' });
+  has(ui.view(), 'All 3 app 2 site 1');
+  has(ui.view(), '3 worktrees · 7.0 GB · 1 can be removed (2.0 GB)');
+  ui.click({ act: 'wt_repo', val: '/p/site' });
+  has(ui.view(), '1 worktree · 4.0 GB · 0 can be removed');
+  lacks(ui.view(), 'sc-1/a');
+  eq(ui.find({ act: 'wt_repo', val: '/p/site' })[0].pressed, 'true');
+  // The states count only what the chosen repository has.
+  has(ui.view(), 'All 1 Removable 0 Merged 1 Not merged 0 In use 0');
+  // Pressed again it stays chosen; All brings the rest back.
+  ui.click({ act: 'wt_repo', val: '/p/site' });
+  lacks(ui.view(), 'sc-1/a');
+  ui.click({ act: 'wt_repo', val: '' });
+  has(ui.view(), 'sc-1/a');
+  eq(ui.sent.filter(m => m.cmd !== 'scan_worktrees'), [], 'filtering is local');
+});
+
+test('a chosen repository that is gone falls back to all; one repository needs no chooser', () => {
+  ui.setState(worktreesState(twoRepos()));
+  ui.click({ act: 'goto', page: 'worktrees' });
+  ui.click({ act: 'wt_repo', val: '/p/site' });
+  ui.setState(worktreesState([twoRepos()[0]]));
+  has(ui.view(), 'sc-1/a');
+  eq(ui.find({ act: 'wt_repo' }).length, 0);
+  // Back again later: it is not silently narrowed to it once more.
+  ui.setState(worktreesState(twoRepos()));
+  has(ui.view(), '3 worktrees');
+  ui.setState(worktreesState([twoRepos()[0]]));
+  eq(ui.find({ act: 'wt_state' }).length, 5);
+  ui.setState(worktreesState([]));
+  eq(ui.find({ act: 'wt_state' }).length, 0, 'nothing to filter');
+});
+
+test('the worktrees can be narrowed by state', () => {
+  ui.setState(worktreesState(twoRepos()));
+  ui.click({ act: 'goto', page: 'worktrees' });
+  has(ui.view(), 'All 3 Removable 1 Merged 2 Not merged 1 In use 1');
+  ui.click({ act: 'wt_state', val: 'removable' });
+  has(ui.view(), '1 worktree · 2.0 GB · 1 can be removed (2.0 GB)');
+  lacks(ui.view(), 'sc-2/b');
+  lacks(ui.view(), 'site 1 ·', 'a repository with nothing to show has no heading');
+  // Its heading still counts and removes all of the repository's merged worktrees.
+  has(ui.view(), 'app 2 · 3.0 GB · against origin/main Remove 1 merged');
+  ui.click({ act: 'wt_state', val: 'merged' });
+  has(ui.view(), '2 worktrees');
+  ui.click({ act: 'wt_state', val: 'open' });
+  has(ui.view(), '1 worktree · 1.0 GB · 0 can be removed');
+  ui.click({ act: 'wt_state', val: 'in_use' });
+  has(ui.view(), 'not merged · in use by claude');
+  lacks(ui.view(), 'sc-1/a');
+  // Both filters together.
+  ui.click({ act: 'wt_repo', val: '/p/site' });
+  has(ui.view(), 'No worktrees match.');
+  has(ui.view(), '0 worktrees · 0 can be removed');
+  ui.click({ act: 'wt_state', val: 'all' }, 1);
+  has(ui.view(), 'x · x');
+  ui.click({ act: 'wt_repo', val: '' });
+});
+
+test('a repository name with markup is shown as text in its filter', () => {
+  const [a, b] = twoRepos();
+  ui.setState(worktreesState([a, { ...b, repo: '/p/"><img src=x onerror=1>' }]));
+  ui.click({ act: 'goto', page: 'worktrees' });
+  lacks(ui.html(), '<img src=x');
+  ui.click({ act: 'wt_repo', val: '/p/"><img src=x onerror=1>' });
+  has(ui.view(), '1 worktree · 4.0 GB');
+  ui.click({ act: 'wt_repo', val: '' });
+});
+
 function manyRuns(n){
   const r = history.history[0];
   return { ...history, history: Array.from({ length: n }, (_, i) =>

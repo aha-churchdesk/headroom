@@ -385,6 +385,17 @@ button:disabled[data-tip]{ cursor:default; }
 .wt-note{ padding:2px 14px 6px; font-size:11px; color:var(--text-faint); }
 .wt-row .wt-note{ padding:4px 0 0; }
 .wt-note.bad{ color:var(--bad); }
+.wt-disk{ padding:2px 14px 10px; font-size:12px; }
+.wt-disk .l1{ display:flex; align-items:baseline; gap:6px; }
+.wt-disk .l1 .held{ margin-left:auto; }
+.wt-disk .l1 .held::before{ content:""; display:inline-block; width:7px; height:7px; margin-right:5px; border-radius:2px; background:var(--accent); }
+.wt-disk.low b{ color:var(--warn); }
+.wt-disk.full b{ color:var(--bad); }
+.wt-disk .track{ display:flex; height:8px; margin-top:6px; border-radius:4px; background:var(--track); overflow:hidden; }
+.wt-disk .track i{ display:block; height:100%; background:var(--text-faint); }
+.wt-disk .track i.wt{ background:var(--accent); }
+.wt-filter{ display:flex; flex-wrap:wrap; gap:6px 8px; padding:0 14px 10px; }
+.wt-filter .seg{ flex-wrap:wrap; }
 .cmd-note{ padding:8px 14px 12px; font-size:11px; color:var(--text-faint); }
 .prof{ padding:12px 14px; }
 .prof .parts{ margin-top:14px; }
@@ -579,6 +590,8 @@ const UI = {
   trail: [],             // Previous page, reader position, and the control that opened this page
   cmdDays: 7,             // Commands page: window in days, and the column it sorts by
   cmdSort: "run_s",
+  wtRepo: null,           // Worktrees page: the one repository shown, and the state shown
+  wtState: "all",
   expanded: new Set(),
   openApps: new Set(),    // Other apps rows showing their processes
   confirm: null,          // { key, until } — second click within 3 s acts
@@ -1191,34 +1204,80 @@ function renderCommands(S){
 /** "/Users/me/Projects/app" → "app". */
 const lastPart = p => String(p ?? "").split("/").filter(Boolean).pop() || String(p ?? "");
 
+/** Bytes on disk, in the decimal units Finder and `df -H` use. */
+const diskSize = b => b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : b >= 1e6 ? `${Math.round(b / 1e6)} MB` : b > 0 ? "under 1 MB" : "0 MB";
+
+const WT_STATES = [
+  ["all", "All", () => true],
+  ["removable", "Removable", x => x.blocker == null],
+  ["merged", "Merged", x => !!x.merged],
+  ["open", "Not merged", x => !x.merged && !x.missing],
+  ["in_use", "In use", x => (x.in_use || []).length > 0],
+];
+
+function diskMeter(d){
+  if (!d || !(d.total > 0)) return "";
+  const pct = v => Math.max(0, Math.min(100, 100 * v / d.total));
+  const held = Math.min(d.worktrees || 0, d.total - d.free);
+  const used = pct(d.total - d.free), free = d.free / d.total;
+  return `<div class="wt-disk num${free < 0.05 ? " full" : free < 0.1 ? " low" : ""}">
+      <div class="l1"><b>${diskSize(d.free)} free</b><span class="dim">of ${diskSize(d.total)}</span>
+        ${held ? `<span class="dim held">Worktrees ${diskSize(held)}</span>` : ""}</div>
+      <div class="track" role="meter" aria-label="Disk space used" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(used)}"
+        title="${diskSize(d.total - d.free)} used, ${diskSize(held)} of it in worktrees. Free space is what can be written now; Finder also counts space macOS can clear on demand."><i style="width:${pct(d.total - d.free - held)}%"></i><i class="wt" style="width:${pct(held)}%"></i></div>
+    </div>`;
+}
+
 function renderWorktrees(S){
   const w = S.worktrees;
   const head = pageHead("Worktrees");
   if (!w) return head + `<div class="empty">Not available in this version</div>`;
   const removing = new Set(w.removing || []);
   const results = w.results || {};
-  const repos = (w.repos || []).map(r => ({ ...r, worktrees: r.worktrees.filter(x => !x.main) }));
-  const all = repos.flatMap(r => r.worktrees);
+  const every = (w.repos || []).map(r => ({ ...r, worktrees: r.worktrees.filter(x => !x.main) }));
+  // A repository that is no longer listed can't stay selected.
+  const only = UI.wtRepo = every.some(r => r.repo === UI.wtRepo) ? UI.wtRepo : null;
+  const inRepo = every.filter(r => !only || r.repo === only);
+  const state = WT_STATES.find(([k]) => k === UI.wtState) || WT_STATES[0];
+  const repos = inRepo.map(r => ({ ...r, shown: r.worktrees.filter(state[2]) })).filter(r => r.shown.length);
+  const all = repos.flatMap(r => r.shown);
   const removable = all.filter(x => x.blocker == null);
-  const checked = w.scanning ? "Looking…" : w.scanned_ago_s == null ? "Not looked at yet" : `Checked ${ago(w.scanned_ago_s)}`;
-  const top = `<div class="wt-top num"><span>${all.length} worktree${all.length === 1 ? "" : "s"} · <b>${removable.length}</b> can be removed</span>
+  // A total only of what is measured; "+" while some are still to come.
+  const sum = xs => {
+    const known = xs.filter(x => x.size != null);
+    return known.length ? diskSize(known.reduce((n, x) => n + x.size, 0)) + (known.length < xs.length ? "+" : "") : null;
+  };
+  const took = sum(all), frees = sum(removable);
+  const checked = w.scanning ? "Looking…" : w.sizing ? "Measuring…" : w.scanned_ago_s == null ? "Not looked at yet" : `Checked ${ago(w.scanned_ago_s)}`;
+  const seg = (label, act, items, cur) => `<span class="seg" role="group" aria-label="${label}">${items.map(([v, l, n, tip]) =>
+    `<button class="${v === cur ? "on" : ""}" data-act="${act}" data-val="${esc(v)}" aria-pressed="${v === cur}" title="${esc(tip)}">${esc(l)} <span class="dim">${n}</span></button>`).join("")}</span>`;
+  const count = rs => rs.reduce((n, r) => n + r.worktrees.length, 0);
+  const filters = !every.length ? "" : `<div class="wt-filter num">
+      ${every.length > 1 ? seg("Show repository", "wt_repo", [["", "All", count(every), "Show the worktrees of every repository"],
+        ...every.map(r => [r.repo, lastPart(r.repo), r.worktrees.length, `Show only the worktrees of ${r.repo}`])], only ?? "") : ""}
+      ${seg("Show worktrees that are", "wt_state", WT_STATES.map(([k, l, is]) => [k, l, inRepo.flatMap(r => r.worktrees).filter(is).length,
+        k === "all" ? "Show worktrees in any state" : `Show only worktrees that are ${l.toLowerCase()}`]), state[0])}
+    </div>`;
+  const top = `<div class="wt-top num"><span>${all.length} worktree${all.length === 1 ? "" : "s"}${took ? ` · ${took}` : ""} · <b>${removable.length}</b> can be removed${frees ? ` (${frees})` : ""}</span>
       <span class="dim">${checked}</span>
-      <button class="chip-btn" data-act="scan_worktrees"${w.scanning ? " disabled" : ""}>Check again</button></div>`;
-  if (!repos.length) return head + top + `<div class="empty">${w.scanning ? "Looking at your repositories…" : "No worktrees besides your checkouts"}</div>`;
+      <button class="chip-btn" data-act="scan_worktrees"${w.scanning || w.sizing ? " disabled" : ""}>Check again</button></div>`;
+  const before = head + diskMeter(w.disk) + filters + top;
+  if (!every.length) return before + `<div class="empty">${w.scanning ? "Looking at your repositories…" : "No worktrees besides your checkouts"}</div>`;
   // Removable first, oldest first: those are what this page is for.
   const order = x => x.blocker == null ? 0 : x.merged ? 1 : 2;
   const items = repos.flatMap(r => {
+    // The button removes every merged worktree here, shown or filtered out.
     const can = r.worktrees.filter(x => x.blocker == null && !removing.has(x.path)).length;
     const key = "rmall:" + r.repo;
-    return [{ head:r, can, key }, ...[...r.worktrees]
+    return [{ head:r, can, key }, ...[...r.shown]
       .sort((a, b) => order(a) - order(b) || (b.last_commit_ago_s ?? 0) - (a.last_commit_ago_s ?? 0))
       .map(x => ({ repo:r.repo, against:r.default, x }))];
   });
   const row = it => {
     if (it.head){
-      const r = it.head;
+      const r = it.head, size = sum(r.worktrees);
       return `<div class="wt-repo"><div class="l1"><b>${esc(lastPart(r.repo))}</b>
-          <span class="dim">${r.worktrees.length} · against ${esc(r.default ?? "no default branch")}</span>
+          <span class="dim">${r.worktrees.length}${size ? ` · ${size}` : ""} · against ${esc(r.default ?? "no default branch")}</span>
           ${it.can ? `<button class="chip-btn ${confirming(it.key) ? "confirm" : "danger"}" data-act="remove_merged_worktrees" data-repo="${esc(r.repo)}" data-confirm="${esc(it.key)}">${confirming(it.key) ? `Remove ${it.can}? Click again` : `Remove ${it.can} merged`}</button>` : ""}</div>
         ${r.prs_checked ? "" : `<div class="wt-note">Squash merges can't be seen here: no merged pull requests could be read from GitHub (no GitHub remote, or the gh CLI is missing or signed out).</div>`}</div>`;
     }
@@ -1229,8 +1288,10 @@ function renderWorktrees(S){
     const action = removing.has(x.path) ? `<span class="dim">Removing…</span>`
       : x.blocker == null ? `<button class="chip-btn ${confirming(key) ? "confirm" : "danger"}" data-act="remove_worktree" data-repo="${esc(it.repo)}" data-path="${esc(x.path)}" data-confirm="${esc(key)}">${confirming(key) ? "Remove? Click again" : "Remove"}</button>` : "";
     const why = [
+      x.size != null ? diskSize(x.size) : w.sizing && !x.missing ? "measuring…" : null,
       x.last_commit_ago_s == null ? null : `last commit ${ago(x.last_commit_ago_s)}`,
       x.blocker,
+      (x.in_use || []).length && !String(x.blocker).startsWith("in use") ? `in use by ${x.in_use.join(", ")}` : null,
       !x.merged && x.remote_gone ? "remote branch deleted" : null,
     ].filter(Boolean).map(esc).join(" · ");
     return `<div class="hrow wt-row"><div class="l1"><span class="name"><b>${esc(x.branch ?? "detached")}</b> <span class="dim">· ${esc(lastPart(x.path))}</span></span>${tag}${action}</div>
@@ -1238,8 +1299,9 @@ function renderWorktrees(S){
       ${res && !res.ok ? `<div class="wt-note bad" role="alert">${esc(res.message)}</div>` : ""}</div>`;
   };
   const done = Object.values(results).filter(r => r.ok).length;
-  return head + top + (done ? `<div class="wt-note">${done} removed this session.</div>` : "")
-    + virtualRows(items, it => it.head ? "wh:" + it.head.repo : "w:" + it.x.path, row);
+  return before + (done ? `<div class="wt-note">${done} removed this session.</div>` : "")
+    + (items.length ? virtualRows(items, it => it.head ? "wh:" + it.head.repo : "w:" + it.x.path, row)
+      : `<div class="empty">No worktrees match. <button class="chip-btn" data-act="wt_state" data-val="all">Show all</button></div>`);
 }
 
 function sparkline(peaks, p90){
@@ -1565,6 +1627,8 @@ $("pop").addEventListener("click", (e) => {
     case "snippet": UI.snippet = !UI.snippet; break;
     case "cmd_days": UI.cmdDays = Number(d.val); break;
     case "cmd_sort": UI.cmdSort = d.val; break;
+    case "wt_repo": UI.wtRepo = d.val || null; break;
+    case "wt_state": UI.wtState = d.val; break;
     case "check_shims": send({ cmd:"check_shims" }); return;
     case "finish_setup":
       if (STATE.setup?.complete){ UI.trail = []; UI.page = "main"; render({ scroll:0 }); return; }
@@ -1664,8 +1728,8 @@ function buttonTip(button){
     case "low": return d.on === "1" ? "Use background CPU priority. This job is paused first if memory runs short." : "Restore normal CPU and guard priority.";
     case "clear_data": return "Permanently clear saved profiles, job history and statistics. Running jobs, settings and hook connections are kept. Click twice to confirm.";
     case "reset_profile": return "Forget this workload's learned history. Future estimates use broader history or the default. Click twice to confirm.";
-    case "scan_worktrees": return "Look at every worktree again: which are merged, changed or in use.";
-    case "remove_worktree": return "Delete this worktree's folder and its branch. It is checked again first: merged, no uncommitted files, nothing working in it. Ignored files in it, such as node_modules and .env files, go with it. Click twice to confirm.";
+    case "scan_worktrees": return "Look at every worktree again: which are merged, changed or in use, and what each holds on disk.";
+    case "remove_worktree": return "Delete this worktree's folder and its branch. It is checked again first: merged, no uncommitted files, nothing working in it. Ignored files in it, such as node_modules and .env files, go with it. The folder is gone at once; its space comes back as it is deleted in the background. Click twice to confirm.";
     case "remove_merged_worktrees": return "Delete every worktree here that is merged, has no uncommitted files and has nothing working in it, with their branches. Each is checked again first. Ignored files in them, such as node_modules and .env files, go with them. Click twice to confirm.";
     case "reset_command": return "Forget the learned history of every run of this command, whatever its arguments. Future estimates use broader history or the default. Click twice to confirm.";
     case "hold": return STATE.held ? "Allow queued jobs to start again when resources permit." : "Hold new jobs in the queue. Running jobs continue.";
