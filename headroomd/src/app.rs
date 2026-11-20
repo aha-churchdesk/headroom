@@ -69,8 +69,9 @@ pub struct App {
     stopping: HashMap<Target, Instant>,
     /// Apps killed as a whole, with the processes that were signalled.
     stopping_apps: HashMap<String, (Vec<Target>, Instant)>,
-    /// The last kill from that page that could not do everything asked.
-    kill_result: Option<Value>,
+    /// The last kill from that page that could not do everything asked,
+    /// shown until the next action or `KILL_RESULT_FOR` has passed.
+    kill_result: Option<(Value, Instant)>,
     hooks: Vec<(&'static str, &'static str)>,
     hook_verification: HookVerification,
     shims: ShimsStatus,
@@ -110,6 +111,9 @@ fn verb(c: &Control) -> &'static str {
         Control::Configure { .. } => "save the setting",
     }
 }
+
+/// How long "Could not stop …" stays on the Other apps page.
+const KILL_RESULT_FOR: Duration = Duration::from_secs(60);
 
 /// Hook states the page warns about above the queue.
 const HOOK_NOTICES: [&str; 4] = ["not_installed", "stale", "needs_review", "disabled"];
@@ -237,6 +241,7 @@ impl App {
     pub fn refresh_others_among(&mut self, pids: &[i32]) {
         let skip = self.job_pgids();
         let now = Instant::now();
+        self.kill_result = self.kill_result.take().filter(|(_, until)| *until > now);
         self.stopping.retain(|t, until| *until > now && t.alive());
         self.stopping_apps
             .retain(|_, (ts, until)| *until > now && ts.iter().any(Target::alive));
@@ -274,6 +279,8 @@ impl App {
 
     /// SIGTERM `targets` from the "Other apps" page, SIGKILL after the
     /// grace period, and show the page what happened.
+    /// Callers refresh the listing first, so a job admitted since the last
+    /// one is not taken for another app.
     fn kill_others(&mut self, targets: &[Target], app: Option<String>) {
         let jobs: Vec<i32> = sample::job_pids(&self.job_pgids()).into_iter().collect();
         let grace = Duration::from_secs(self.cfg.kill_grace_s);
@@ -295,7 +302,10 @@ impl App {
                 out.refused.join("; ")
             );
             self.last_error = Some(message.clone());
-            serde_json::json!({ "ok": false, "message": message })
+            (
+                serde_json::json!({ "ok": false, "message": message }),
+                Instant::now() + KILL_RESULT_FOR,
+            )
         });
         self.refresh_others();
     }
@@ -376,7 +386,10 @@ impl App {
             "error": self.setup_error,
         });
         state["copy_result"] = self.copy_result.clone().unwrap_or(Value::Null);
-        state["kill_result"] = self.kill_result.clone().unwrap_or(Value::Null);
+        state["kill_result"] = self
+            .kill_result
+            .as_ref()
+            .map_or(Value::Null, |(r, _)| r.clone());
         state["refused"] = self.refused.clone().map_or(Value::Null, Value::String);
         state["hidden_hook_notices"] = serde_json::json!(self.ui_preferences.hidden_hook_notices);
         state["shims"] = serde_json::to_value(&self.shims).unwrap();
@@ -425,7 +438,15 @@ impl App {
                 return Next::Continue;
             }
         };
-        self.refused = None;
+        // What the page sends by itself (opening a page, typing in the
+        // pattern tester) is not the next action, so a message stays put.
+        if !matches!(
+            cmd,
+            UiCmd::OpenProfile { .. } | UiCmd::ScanWorktrees | UiCmd::Classify { .. }
+        ) {
+            self.refused = None;
+            self.kill_result = None;
+        }
         let action = match bridge::translate(cmd, &self.cfg) {
             Ok(a) => a,
             Err(e) => {
@@ -520,10 +541,12 @@ impl App {
                 return Next::Continue;
             }
             Do::KillProcess(t) => {
+                self.poll();
                 self.kill_others(&[t], None);
                 return Next::Continue;
             }
             Do::KillApp(name) => {
+                self.poll();
                 let targets: Vec<Target> =
                     sample::app_pids(&sample::all_pids(), &self.job_pgids(), &name)
                         .into_iter()
@@ -1085,6 +1108,18 @@ mod tests {
             "Couldn't pin the job: no job 12",
             "the same refusal again is still shown"
         );
+        for page_sent in [
+            r#"{"cmd":"open_profile","key":null}"#,
+            r#"{"cmd":"scan_worktrees"}"#,
+            r#"{"cmd":"classify","text":"pnpm te"}"#,
+        ] {
+            app.command(page_sent);
+            assert_eq!(
+                app.state().unwrap()["refused"],
+                "Couldn't pin the job: no job 12",
+                "{page_sent} is not the next action"
+            );
+        }
         app.command(r#"{"cmd":"hold","on":true}"#);
         assert_eq!(app.state().unwrap()["refused"], Value::Null);
         assert_eq!(app.state().unwrap()["held"], true);
@@ -1187,6 +1222,86 @@ mod tests {
         assert_eq!(app.last_error, None);
         bystander.kill().unwrap();
         bystander.wait().unwrap();
+    }
+
+    #[test]
+    fn killing_an_app_spares_a_job_admitted_since_the_last_listing() {
+        use headroom_core::model::JobSpec;
+        use headroom_core::protocol::{read_msg, write_msg};
+        use std::io::BufReader;
+        use std::os::unix::net::UnixStream;
+        use std::os::unix::process::CommandExt;
+
+        let (mut app, _d) = with_daemon("kill-fresh-job");
+        let root = dir("kill-fresh-job-bin");
+        let sleeper = unique(&root, "/bin/sleep", "hr-fresh-job");
+        let name = sleeper.file_name().unwrap().to_str().unwrap().to_string();
+        let mut job = Command::new(&sleeper)
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = job.id() as i32;
+        // The job's lease, held open as `headroom run` holds it.
+        let stream = UnixStream::connect(&app.socket).unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut writer = stream;
+        let spec = JobSpec {
+            cmd: "vitest run".into(),
+            ..JobSpec::default()
+        };
+        write_msg(&mut writer, &ClientMsg::Enqueue(Box::new(spec))).unwrap();
+        loop {
+            match read_msg::<_, DaemonMsg>(&mut reader).unwrap() {
+                Some(DaemonMsg::Granted { .. }) => break,
+                Some(_) => continue,
+                None => panic!("daemon hung up"),
+            }
+        }
+        write_msg(&mut writer, &ClientMsg::Started { pid, pgid: pid }).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            app.job_pgids().is_empty(),
+            "the app's listing predates the job"
+        );
+
+        app.command(&format!(r#"{{"cmd":"kill_app","name":"{name}"}}"#));
+        assert_eq!(app.job_pgids(), vec![pid], "the kill read the queue again");
+        assert_eq!(exited_by(&mut job, Duration::from_millis(500)), None);
+        job.kill().unwrap();
+        job.wait().unwrap();
+    }
+
+    #[test]
+    fn a_failed_kill_message_goes_with_the_next_action_or_after_a_minute() {
+        let (mut app, _d) = with_daemon("kill-result-expiry");
+        let failed = || {
+            (
+                serde_json::json!({ "ok": false, "message": "Could not stop 1 process" }),
+                Instant::now() + KILL_RESULT_FOR,
+            )
+        };
+        app.kill_result = Some(failed());
+        app.command(r#"{"cmd":"scan_worktrees"}"#);
+        app.command(r#"{"cmd":"classify","text":"pnpm test"}"#);
+        assert_eq!(
+            app.state().unwrap()["kill_result"]["ok"],
+            false,
+            "page-sent"
+        );
+        app.command(r#"{"cmd":"hold","on":true}"#);
+        assert!(app.state().unwrap()["kill_result"].is_null(), "next action");
+
+        app.kill_result = Some(failed());
+        app.refresh_others_among(&[]);
+        assert_eq!(
+            app.state().unwrap()["kill_result"]["ok"],
+            false,
+            "still fresh"
+        );
+        app.kill_result = Some((failed().0, Instant::now()));
+        app.refresh_others_among(&[]);
+        assert!(app.state().unwrap()["kill_result"].is_null(), "expired");
     }
 
     #[test]
