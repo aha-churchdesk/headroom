@@ -91,8 +91,10 @@ esac
 # Hooks and shims written by a copy that is gone, such as a removed Homebrew
 # install, call a missing binary: the hooks then fail every agent shell
 # command and the shell skips the shims. Point them at this copy.
+# A missing or hook-free file is nothing to repoint; grep failing on it must
+# not end the install under pipefail.
 missing_headrooms() {
-  grep -Eho '/[^" ]+/headroom[" ]' "$@" 2>/dev/null | sed 's/.$//' | sort -u |
+  { grep -Eho '/[^" ]+/headroom[" ]' "$@" 2>/dev/null || true; } | sed 's/.$//' | sort -u |
     while read -r p; do [ -x "$p" ] || echo "$p"; done
 }
 SHIMS="$HOME/.local/share/headroom/shims"
