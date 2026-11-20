@@ -84,11 +84,33 @@ pub struct App {
     copy_result: Option<Value>,
     /// The last thing the daemon refused, for stderr; not shown in the page.
     pub last_error: Option<String>,
+    /// The page's last action, if it was refused: shown in the page until
+    /// the next action.
+    refused: Option<String>,
 }
 
 /// Per agent, the hook as the Settings page words it. A hook pointing at a
 /// different `headroom` that still exists (a dev build, the brew one) works,
 /// so only a missing binary counts as stale.
+/// What the page asked the daemon to do, for "Couldn't …".
+fn verb(c: &Control) -> &'static str {
+    match c {
+        Control::Hold { on: true } => "hold the queue",
+        Control::Hold { on: false } => "release the queue",
+        Control::Pin { on: true, .. } => "pin the job",
+        Control::Pin { on: false, .. } => "unpin the job",
+        Control::Low { .. } => "change the job's priority",
+        Control::Top { .. } | Control::Move { .. } => "move the job",
+        Control::Cancel { .. } => "cancel the job",
+        Control::Kill { .. } => "kill the job",
+        Control::Freeze { .. } => "pause the job",
+        Control::Resume { .. } => "resume the job",
+        Control::ResetProfile { .. } | Control::ResetCommand { .. } => "reset the estimate",
+        Control::ClearData => "clear the data",
+        Control::Configure { .. } => "save the setting",
+    }
+}
+
 /// How this copy was installed, for Settings: by Homebrew, as the app in
 /// /Applications (`scripts/install.sh`), or run from a build in a checkout.
 pub fn install_json(exe: &str) -> Value {
@@ -166,6 +188,7 @@ impl App {
             setup_error: None,
             copy_result: None,
             last_error: None,
+            refused: None,
         };
         app.refresh_settings();
         app.refresh_hooks();
@@ -328,6 +351,7 @@ impl App {
         });
         state["copy_result"] = self.copy_result.clone().unwrap_or(Value::Null);
         state["kill_result"] = self.kill_result.clone().unwrap_or(Value::Null);
+        state["refused"] = self.refused.clone().map_or(Value::Null, Value::String);
         state["shims"] = serde_json::to_value(&self.shims).unwrap();
         state["worktrees"] = self.worktrees.json(wall());
         state["install"] = install_json(&self.exe);
@@ -374,10 +398,11 @@ impl App {
                 return Next::Continue;
             }
         };
+        self.refused = None;
         let action = match bridge::translate(cmd, &self.cfg) {
             Ok(a) => a,
             Err(e) => {
-                self.last_error = Some(e);
+                self.refuse("do that", e);
                 return Next::Continue;
             }
         };
@@ -431,14 +456,15 @@ impl App {
                     Control::Configure { config } => Some((**config).clone()),
                     _ => None,
                 };
+                let what = verb(&c);
                 match request(&self.socket, &ClientMsg::Control(c)) {
-                    Ok(DaemonMsg::Error { msg }) => self.last_error = Some(msg),
+                    Ok(DaemonMsg::Error { msg }) => self.refuse(what, msg),
                     Ok(_) => {
                         if let Some(cfg) = sent {
                             self.cfg = cfg;
                         }
                     }
-                    Err(e) => self.last_error = Some(e),
+                    Err(e) => self.refuse(what, e),
                 }
             }
             Do::Dismiss(id) => {
@@ -450,7 +476,7 @@ impl App {
             }
             Do::Login(on) => match login::set(&self.home, on, &self.exe) {
                 Ok(l) => self.login = l,
-                Err(e) => self.last_error = Some(format!("login item: {e}")),
+                Err(e) => self.refuse("change the login item", e.to_string()),
             },
             Do::Classify(text) => self.classify = Some(bridge::classify_json(&text, &self.cfg)),
             Do::OpenProfile(key) => {
@@ -486,6 +512,12 @@ impl App {
         }
         self.poll();
         Next::Continue
+    }
+
+    /// An action the page asked for didn't happen: say so there, and on stderr.
+    fn refuse(&mut self, what: &str, why: String) {
+        self.refused = Some(format!("Couldn't {what}: {why}"));
+        self.last_error = Some(why);
     }
 
     fn record_copy_result(&mut self, text: &str, result: std::io::Result<()>) {
@@ -871,6 +903,64 @@ mod tests {
         assert_eq!(app.command(r#"{"cmd":"kill","id":"999"}"#), Next::Continue);
         assert!(app.last_error.is_some(), "the daemon's refusal is kept");
         assert!(app.state().is_some(), "and the popover still renders");
+    }
+
+    #[test]
+    fn a_refused_action_is_shown_in_the_page_until_the_next_one() {
+        let (mut app, _d) = with_daemon("refused");
+        app.command(r#"{"cmd":"pin","id":"12","on":true}"#);
+        assert_eq!(
+            app.state().unwrap()["refused"],
+            "Couldn't pin the job: no job 12"
+        );
+        app.command(r#"{"cmd":"pin","id":"12","on":true}"#);
+        assert_eq!(
+            app.state().unwrap()["refused"],
+            "Couldn't pin the job: no job 12",
+            "the same refusal again is still shown"
+        );
+        app.command(r#"{"cmd":"hold","on":true}"#);
+        assert_eq!(app.state().unwrap()["refused"], Value::Null);
+        assert_eq!(app.state().unwrap()["held"], true);
+    }
+
+    #[test]
+    fn dismissing_a_refusal_clears_it() {
+        let (mut app, _d) = with_daemon("refused-dismiss");
+        app.command(r#"{"cmd":"kill","id":"999"}"#);
+        assert!(app.state().unwrap()["refused"].is_string());
+        app.command(r#"{"cmd":"dismiss","id":"refused"}"#);
+        assert_eq!(app.state().unwrap()["refused"], Value::Null);
+    }
+
+    #[test]
+    fn a_bad_setting_is_refused_in_the_page() {
+        let (mut app, _d) = with_daemon("refused-setting");
+        app.command(r#"{"cmd":"set","key":"memory_mode","value":"loose"}"#);
+        let refused = app.state().unwrap()["refused"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(refused.starts_with("Couldn't do that: "), "{refused}");
+        assert_eq!(app.state().unwrap()["settings"]["memory_mode"], "strict");
+        app.command(r#"{"cmd":"set","key":"memory_mode","value":"lenient"}"#);
+        let s = app.state().unwrap();
+        assert_eq!(
+            (&s["refused"], &s["settings"]["memory_mode"]),
+            (&Value::Null, &Value::from("lenient"))
+        );
+    }
+
+    #[test]
+    fn a_control_while_the_daemon_is_away_is_refused_in_the_page() {
+        let (mut app, d) = with_daemon("refused-away");
+        drop(d);
+        app.command(r#"{"cmd":"hold","on":true}"#);
+        assert_eq!(app.last_error.as_deref(), Some("headroomd isn't running"));
+        assert_eq!(
+            app.refused.as_deref(),
+            Some("Couldn't hold the queue: headroomd isn't running")
+        );
     }
 
     /// `program` copied under a name no other process on this machine has,

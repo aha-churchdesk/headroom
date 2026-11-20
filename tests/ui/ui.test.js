@@ -717,6 +717,16 @@ test('a requeue banner offers Pin only while its retry is still waiting or runni
   has(ui.view(), 'The retry has ended.');
 });
 
+test('a refused action is shown above the queue and can be dismissed', () => {
+  ui.setState({ ...busy, refused: "Couldn't pin the job: no job 12" });
+  has(ui.headHtml(), 'role="alert"');
+  has(ui.headHtml(), 'Couldn&#39;t pin the job: no job 12');
+  ui.click({ act: 'dismiss', id: 'refused' }, 0);
+  eq(ui.sent, [{ cmd: 'dismiss', id: 'refused' }]);
+  ui.setState({ ...busy, refused: null });
+  lacks(ui.headHtml(), 'role="alert"');
+});
+
 test('memory counting mode is a two-way choice that defaults to strict', () => {
   const s = JSON.parse(JSON.stringify(busy));
   delete s.settings.memory_mode;

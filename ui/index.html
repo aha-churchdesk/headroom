@@ -802,6 +802,10 @@ function renderHead(S){
     ? `<div class="alert"><span>⚠︎ ${gaps.map(([k, n]) => `${n}: ${HOOK_STATUS[S.hooks[k]][3]}`).join(". ")}.</span>
          <button data-act="goto" data-page="settings" data-section="agent-hooks">Hook settings</button></div>`
     : "";
+  const refused = S.refused
+    ? `<div class="alert" role="alert"><span>⚠︎ ${esc(S.refused)}</span>
+         <button data-act="dismiss" data-id="refused" aria-label="Dismiss this error">Dismiss</button></div>`
+    : "";
   return `
     <div class="row1">
       <span class="lbl">Memory</span>
@@ -821,7 +825,7 @@ function renderHead(S){
       ${stat(`${Math.round(m.cpu_pct)}%`, "CPU", `CPU in use across all cores: ${Math.round(m.cpu_pct)}% system-wide.`)}
       ${S.queue_budget ? stat(`${gb(S.queue_budget.available)} GB`, "job budget", `Job budget ${gb(S.queue_budget.available)} GB = available ${gb(m.mem_available)} GB − reserve ${gb(S.settings.headroom)} GB − expected job growth ${gb(S.queue_budget.growth)} GB, with a minimum of zero. Pressure, CPU and queue-order checks still apply.`) + stat(`${gb(S.queue_budget.growth)} GB`, "growth", `${gb(S.queue_budget.growth)} GB reserved for expected growth across ${S.running.filter(j => j.state === "running").length} running jobs. This is an estimate, not memory already used.`) : ""}
     </div>
-    ${alert}`;
+    ${refused}${alert}`;
 }
 
 function renderLastDay(h){
