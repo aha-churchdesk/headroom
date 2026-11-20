@@ -878,6 +878,8 @@ function renderBanner(b){
       <button class="chip-btn ${confirming(killKey) ? "confirm" : "danger"}"
         data-act="kill" data-id="${b.job_id}" data-confirm="${killKey}" aria-label="${confirming(killKey) ? "Confirm kill" : "Kill"} ${jobLabel(b)}">
         ${confirming(killKey) ? "Kill?" : "Kill"}</button>`
+    : b.kind === "requeued" && b.retry === "ended" ? `<span class="dim">The retry has ended.</span>`
+    : b.kind === "requeued" && b.pinned ? `<span class="dim">📌 Pinned</span>`
     : b.kind === "requeued" ? `
       <button class="chip-btn" data-act="pin" data-id="${b.job_id}" data-on="1"
         aria-label="Pin ${jobLabel(b)}" title="Pinned jobs are never frozen or killed">Pin it</button>`

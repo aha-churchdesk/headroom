@@ -700,6 +700,23 @@ test('expanded scheduling explains growth, overruns, pauses and pinned admission
   lacks(ui.view(), 'queue held by you');
 });
 
+test('a requeue banner offers Pin only while its retry is still waiting or running', () => {
+  const withRetry = (retry, pinned) => {
+    const s = JSON.parse(JSON.stringify(history));
+    s.banners = s.banners.filter(b => b.kind === 'requeued').map(b => ({ ...b, retry, pinned }));
+    ui.setState(s);
+  };
+  withRetry('queued', false);
+  ui.click({ act: 'pin', id: '4' }, 0);
+  eq(ui.sent, [{ cmd: 'pin', id: '4', on: true }]);
+  withRetry('running', true);
+  eq(ui.find({ act: 'pin', id: '4' }).length, 0);
+  has(ui.view(), '📌 Pinned');
+  withRetry('ended', false);
+  eq(ui.find({ act: 'pin', id: '4' }).length, 0);
+  has(ui.view(), 'The retry has ended.');
+});
+
 test('disabled backfilling keeps runtime historical below and above the estimate', () => {
   const s = JSON.parse(JSON.stringify(busy));
   const j = s.running[0];

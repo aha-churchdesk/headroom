@@ -395,10 +395,26 @@ fn banners(l: &Listing, x: &Extras) -> Vec<Value> {
                 h.why.as_deref().unwrap_or("killed twice")
             ),
         };
-        out.push(json!({
+        let mut banner = json!({
             "id": id, "kind": kind, "job_id": h.id.to_string(),
             "label": h.label, "cmd": h.cmd, "why": why,
-        }));
+        });
+        if h.outcome == Outcome::Requeued {
+            // The banner outlives the retry, so only a retry still in the
+            // daemon can be pinned. Job ids restart with the daemon, hence
+            // the key and retry check too.
+            let retry = l
+                .running
+                .iter()
+                .chain(&l.queued)
+                .find(|j| j.id == h.id && j.spec.key == h.key && j.retry > 0);
+            banner["retry"] = match retry {
+                Some(j) => json!(j.state),
+                None => json!("ended"),
+            };
+            banner["pinned"] = json!(retry.is_some_and(|j| j.pinned));
+        }
+        out.push(banner);
     }
     out
 }
@@ -1571,6 +1587,79 @@ mod tests {
         let d: HashSet<String> = ["f7".to_string(), "h5-1000".to_string()].into();
         let v = state(&listing(), &extras(&cfg, &p, &d));
         assert!(v["banners"].as_array().unwrap().is_empty());
+    }
+
+    /// The requeue banner for job 5, with `retry` as that job now.
+    fn requeue_banner(retry: Option<Job>) -> Value {
+        let mut l = listing();
+        if let Some(j) = retry {
+            l.queued = vec![j];
+        }
+        let (cfg, p, d) = (Config::default(), Profiles::default(), HashSet::new());
+        let v = state(&l, &extras(&cfg, &p, &d));
+        v["banners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["kind"] == "requeued")
+            .unwrap()
+            .clone()
+    }
+
+    fn retry_of_5() -> Job {
+        let spec = JobSpec {
+            cmd: "pnpm build".into(),
+            key: "/r|pnpm build".into(),
+            ..JobSpec::default()
+        };
+        let mut j = Job::queued(5, spec, 7 * GIB, 3, 1_000);
+        j.retry = 1;
+        j
+    }
+
+    #[test]
+    fn a_requeue_banner_says_whether_its_retry_can_still_be_pinned() {
+        let b = requeue_banner(Some(retry_of_5()));
+        assert_eq!(
+            (&b["retry"], &b["pinned"]),
+            (&json!("queued"), &json!(false))
+        );
+
+        let mut running = retry_of_5();
+        running.state = JobState::Running;
+        running.pinned = true;
+        let b = requeue_banner(Some(running));
+        assert_eq!(
+            (&b["retry"], &b["pinned"]),
+            (&json!("running"), &json!(true))
+        );
+    }
+
+    #[test]
+    fn a_requeue_banner_whose_retry_is_gone_offers_nothing_to_pin() {
+        let b = requeue_banner(None);
+        assert_eq!(
+            (&b["retry"], &b["pinned"]),
+            (&json!("ended"), &json!(false))
+        );
+    }
+
+    #[test]
+    fn a_new_job_reusing_the_id_after_a_restart_is_not_the_retry() {
+        let mut other = retry_of_5();
+        other.spec.key = "/r|vitest run".into();
+        assert_eq!(
+            requeue_banner(Some(other))["retry"],
+            "ended",
+            "another command"
+        );
+        let mut first_try = retry_of_5();
+        first_try.retry = 0;
+        assert_eq!(
+            requeue_banner(Some(first_try))["retry"],
+            "ended",
+            "never requeued"
+        );
     }
 
     #[test]
