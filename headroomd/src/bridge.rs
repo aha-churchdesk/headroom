@@ -6,7 +6,7 @@
 //! the app (dismissing a banner, copying, the login item).
 
 use headroom_core::classify::{Class, classify};
-use headroom_core::config::{Config, KillMode};
+use headroom_core::config::{Config, KillMode, MemoryMode};
 use headroom_core::model::JobId;
 use headroom_core::protocol::Control;
 use serde::Deserialize;
@@ -142,6 +142,10 @@ pub fn translate(cmd: UiCmd, cfg: &Config) -> Result<Do, String> {
                 "backfill" => c.backfill = value.as_bool().ok_or("backfill needs true or false")?,
                 "kill_mode" => {
                     c.kill_mode = serde_json::from_value::<KillMode>(value.clone())
+                        .map_err(|e| e.to_string())?
+                }
+                "memory_mode" => {
+                    c.memory_mode = serde_json::from_value::<MemoryMode>(value.clone())
                         .map_err(|e| e.to_string())?
                 }
                 "start_at_login" => {
@@ -293,6 +297,8 @@ mod tests {
         );
         let c = config_of(t(r#"{"cmd":"set","key":"kill_mode","value":"freeze"}"#));
         assert_eq!(c.kill_mode, KillMode::Freeze);
+        let c = config_of(t(r#"{"cmd":"set","key":"memory_mode","value":"lenient"}"#));
+        assert_eq!(c.memory_mode, MemoryMode::Lenient);
         assert!(t(r#"{"cmd":"set","key":"tune","value":false}"#).is_err());
         let c = config_of(t(r#"{"cmd":"set","key":"backfill","value":false}"#));
         assert!(!c.backfill);
@@ -306,6 +312,8 @@ mod tests {
     fn bad_settings_are_refused() {
         assert!(t(r#"{"cmd":"set","key":"headroom","value":"lots"}"#).is_err());
         assert!(t(r#"{"cmd":"set","key":"kill_mode","value":"nuke"}"#).is_err());
+        assert!(t(r#"{"cmd":"set","key":"memory_mode","value":"loose"}"#).is_err());
+        assert!(t(r#"{"cmd":"set","key":"memory_mode","value":true}"#).is_err());
         assert!(
             t(r#"{"cmd":"set","key":"colour","value":1}"#)
                 .unwrap_err()

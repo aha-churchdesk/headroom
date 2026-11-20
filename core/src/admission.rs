@@ -233,6 +233,7 @@ mod tests {
             mem_total: 36 * GIB,
             mem_used: 36 * GIB - (avail_gb * GIB as f64) as Bytes,
             mem_available: (avail_gb * GIB as f64) as Bytes,
+            mem_compressed: 0,
             swap_used: 0,
             load1: 2.0,
             cores: 10,

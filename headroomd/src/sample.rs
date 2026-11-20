@@ -189,6 +189,11 @@ impl Sampler {
                 &mut count,
             )
         };
+        let compressed = if rc == 0 {
+            (vm.compressor_page_count as u64 * self.page).min(self.total)
+        } else {
+            0
+        };
         let used = if rc == 0 {
             used_bytes(
                 vm.internal_page_count as u64,
@@ -215,6 +220,7 @@ impl Sampler {
             mem_total: self.total,
             mem_used: used,
             mem_available: self.total.saturating_sub(used),
+            mem_compressed: compressed,
             swap_used: swap,
             load1,
             cores: self.cores,

@@ -19,11 +19,26 @@ pub enum KillMode {
     FreezeKill,
 }
 
+/// How much of the machine's memory counts as available to jobs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryMode {
+    /// App memory, wired and compressed all count as used, as in Activity
+    /// Monitor's "Memory Used".
+    #[default]
+    Strict,
+    /// Compressed memory also counts as available while pressure is normal
+    /// and swap has held steady for a while. Those pages are cold; freeing
+    /// them means macOS writes them to swap.
+    Lenient,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     /// Memory kept free before a new job may start.
     pub headroom: Bytes,
+    pub memory_mode: MemoryMode,
     pub kill_mode: KillMode,
     /// How long a foreground command waits in the queue before it is told
     /// to retry. Background commands wait as long as needed.
@@ -127,6 +142,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             headroom: 2 * GIB,
+            memory_mode: MemoryMode::Strict,
             kill_mode: KillMode::FreezeKill,
             wait_cap_s: 480,
             default_estimate: 3 * GIB / 2,
@@ -232,6 +248,20 @@ mod tests {
         let mut c: Config = serde_json::from_str("{}").unwrap();
         c.adopt_new_defaults();
         assert_eq!(c, Config::default());
+    }
+
+    #[test]
+    fn memory_mode_defaults_to_strict_and_round_trips() {
+        assert_eq!(Config::default().memory_mode, MemoryMode::Strict);
+        let c: Config = serde_json::from_str(r#"{"memory_mode": "lenient"}"#).unwrap();
+        assert_eq!(c.memory_mode, MemoryMode::Lenient);
+        let again: Config = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert_eq!(again.memory_mode, MemoryMode::Lenient);
+    }
+
+    #[test]
+    fn unknown_memory_mode_is_rejected_rather_than_guessed() {
+        assert!(serde_json::from_str::<Config>(r#"{"memory_mode": "yolo"}"#).is_err());
     }
 
     #[test]

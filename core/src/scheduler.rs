@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use crate::admission::{self, Blocked};
-use crate::config::Config;
+use crate::config::{Config, MemoryMode};
 use crate::guard::{self, Action, GuardState};
 use crate::model::{
     Bytes, FrozenBy, HistoryEntry, Job, JobId, JobSpec, JobState, Millis, Outcome, Part, Pressure,
@@ -102,6 +102,40 @@ pub struct Scheduler {
     kills: Vec<(i32, Millis)>,
     /// The latest time any event carried, for listings.
     clock: Millis,
+    swap: SwapWatch,
+}
+
+/// How long swap must hold steady before lenient mode counts compressed
+/// memory as available again.
+pub const SWAP_STEADY_MS: Millis = 30_000;
+
+/// Swap use at the last tick and when it last grew.
+#[derive(Default)]
+struct SwapWatch {
+    last: Option<Bytes>,
+    grew_at: Millis,
+}
+
+impl SwapWatch {
+    /// Record a reading. True once swap hasn't grown for `SWAP_STEADY_MS`;
+    /// the first reading starts the wait, so a restart begins strict.
+    fn steady(&mut self, swap: Bytes, now: Millis) -> bool {
+        if self.last.is_none_or(|prev| swap > prev) {
+            self.grew_at = now;
+        }
+        self.last = Some(swap);
+        now.saturating_sub(self.grew_at) >= SWAP_STEADY_MS
+    }
+}
+
+/// In lenient mode, compressed memory counts as available while pressure is
+/// normal and swap is steady: macOS can push those cold pages to swap
+/// without anyone waiting on them. Any sign it is already doing that under
+/// strain, and the credit is gone.
+fn credit_compressed(snap: &mut Snapshot, mode: MemoryMode, swap_steady: bool) {
+    if mode == MemoryMode::Lenient && swap_steady && snap.pressure == Pressure::Normal {
+        snap.mem_available = (snap.mem_available + snap.mem_compressed).min(snap.mem_total);
+    }
 }
 
 fn reply(conn: ConnId, r: Result<(), String>) -> Effect {
@@ -127,6 +161,7 @@ impl Scheduler {
             blocked: None,
             kills: Vec::new(),
             clock: 0,
+            swap: SwapWatch::default(),
         }
     }
 
@@ -556,6 +591,8 @@ impl Scheduler {
     ) -> Vec<Effect> {
         self.clock = self.clock.max(now);
         self.snap = snap;
+        let swap_steady = self.swap.steady(self.snap.swap_used, now);
+        credit_compressed(&mut self.snap, self.cfg.memory_mode, swap_steady);
         let normal = self.snap.pressure == Pressure::Normal;
         for e in self.jobs.values_mut() {
             e.job.spared &= !normal;
@@ -976,6 +1013,7 @@ mod tests {
             mem_total: 36 * GIB,
             mem_used: (36 - avail_gb) * GIB,
             mem_available: avail_gb * GIB,
+            mem_compressed: 0,
             swap_used: 0,
             load1: 1.0,
             cores: 10,
@@ -2401,5 +2439,155 @@ mod tests {
         s.disconnected(2, 0, 0);
         // 200 is gone from the jobs but still owed a SIGKILL check.
         assert_eq!(s.pgids(), vec![100, 200]);
+    }
+
+    /// 4 GB available as measured, plus 6 GB in the compressor.
+    fn compressed_snap(swap: Bytes) -> Snapshot {
+        Snapshot {
+            mem_compressed: 6 * GIB,
+            swap_used: swap,
+            ..snap(4)
+        }
+    }
+
+    fn lenient() -> Scheduler {
+        let cfg = Config {
+            default_estimate: 3 * GIB,
+            memory_mode: MemoryMode::Lenient,
+            ..Config::default()
+        };
+        Scheduler::new(cfg, Profiles::default(), VecDeque::new())
+    }
+
+    #[test]
+    fn lenient_counts_compressed_memory_once_swap_has_held_steady() {
+        let mut s = lenient();
+        s.tick(compressed_snap(GIB), &HashMap::new(), 0);
+        assert_eq!(
+            s.snapshot().mem_available,
+            4 * GIB,
+            "first reading starts the wait"
+        );
+        s.tick(compressed_snap(GIB), &HashMap::new(), SWAP_STEADY_MS - 1);
+        assert_eq!(
+            s.snapshot().mem_available,
+            4 * GIB,
+            "just short of the window"
+        );
+        s.tick(compressed_snap(GIB), &HashMap::new(), SWAP_STEADY_MS);
+        assert_eq!(s.snapshot().mem_available, 10 * GIB);
+        assert_eq!(
+            s.snapshot().mem_used,
+            32 * GIB,
+            "used is still what was measured"
+        );
+    }
+
+    #[test]
+    fn strict_never_counts_compressed_memory() {
+        let mut s = sched(4);
+        for t in [0, SWAP_STEADY_MS, 10 * SWAP_STEADY_MS] {
+            s.tick(compressed_snap(GIB), &HashMap::new(), t);
+            assert_eq!(s.snapshot().mem_available, 4 * GIB);
+        }
+    }
+
+    #[test]
+    fn lenient_admits_a_job_that_strict_holds() {
+        for (mode, admitted) in [(MemoryMode::Strict, false), (MemoryMode::Lenient, true)] {
+            let mut s = Scheduler::new(
+                Config {
+                    default_estimate: 3 * GIB,
+                    memory_mode: mode,
+                    ..Config::default()
+                },
+                Profiles::default(),
+                VecDeque::new(),
+            );
+            s.tick(compressed_snap(0), &HashMap::new(), 0);
+            s.enqueue(1, spec("a"), 0);
+            s.started(1, 100);
+            s.enqueue(2, spec("b"), 0);
+            // 4 GB measured minus 2 GB headroom can't fit a 3 GB estimate;
+            // with 6 GB of compressed memory counted, it can.
+            let fx = s.tick(compressed_snap(0), &usage(100, 0.5), SWAP_STEADY_MS);
+            assert_eq!(granted(&fx, 2), admitted, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn lenient_drops_the_credit_under_pressure() {
+        let mut s = lenient();
+        s.tick(compressed_snap(0), &HashMap::new(), 0);
+        for pressure in [Pressure::Warn, Pressure::Critical] {
+            let snap = Snapshot {
+                pressure,
+                ..compressed_snap(0)
+            };
+            s.tick(snap, &HashMap::new(), SWAP_STEADY_MS);
+            assert_eq!(s.snapshot().mem_available, 4 * GIB, "{pressure:?}");
+        }
+    }
+
+    #[test]
+    fn swap_growth_withdraws_the_credit_until_it_is_steady_again() {
+        let mut s = lenient();
+        s.tick(compressed_snap(GIB), &HashMap::new(), 0);
+        s.tick(compressed_snap(GIB), &HashMap::new(), SWAP_STEADY_MS);
+        assert_eq!(s.snapshot().mem_available, 10 * GIB);
+        let grew = SWAP_STEADY_MS + 1_000;
+        s.tick(compressed_snap(GIB + 1), &HashMap::new(), grew);
+        assert_eq!(s.snapshot().mem_available, 4 * GIB, "any growth counts");
+        s.tick(
+            compressed_snap(GIB + 1),
+            &HashMap::new(),
+            grew + SWAP_STEADY_MS - 1,
+        );
+        assert_eq!(s.snapshot().mem_available, 4 * GIB);
+        s.tick(
+            compressed_snap(GIB + 1),
+            &HashMap::new(),
+            grew + SWAP_STEADY_MS,
+        );
+        assert_eq!(s.snapshot().mem_available, 10 * GIB);
+    }
+
+    #[test]
+    fn shrinking_swap_does_not_restart_the_wait() {
+        let mut s = lenient();
+        s.tick(compressed_snap(2 * GIB), &HashMap::new(), 0);
+        s.tick(compressed_snap(GIB), &HashMap::new(), SWAP_STEADY_MS);
+        assert_eq!(s.snapshot().mem_available, 10 * GIB);
+    }
+
+    #[test]
+    fn credited_memory_never_exceeds_the_machine() {
+        let mut snap = Snapshot {
+            mem_available: 30 * GIB,
+            mem_compressed: 20 * GIB,
+            ..snap(30)
+        };
+        credit_compressed(&mut snap, MemoryMode::Lenient, true);
+        assert_eq!(snap.mem_available, snap.mem_total);
+    }
+
+    #[test]
+    fn switching_to_lenient_applies_on_the_next_tick_without_a_new_wait() {
+        let mut s = sched(4);
+        s.tick(compressed_snap(0), &HashMap::new(), SWAP_STEADY_MS);
+        let cfg = Config {
+            memory_mode: MemoryMode::Lenient,
+            ..s.cfg.clone()
+        };
+        s.control(
+            9,
+            Control::Configure {
+                config: Box::new(cfg),
+            },
+            SWAP_STEADY_MS,
+            0,
+        );
+        s.tick(compressed_snap(0), &HashMap::new(), SWAP_STEADY_MS + 1_000);
+        assert_eq!(s.snapshot().mem_available, 10 * GIB);
     }
 }

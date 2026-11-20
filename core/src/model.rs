@@ -30,6 +30,8 @@ pub struct Snapshot {
     pub mem_total: Bytes,
     pub mem_used: Bytes,
     pub mem_available: Bytes,
+    /// Physical memory the compressor occupies. Part of `mem_used`.
+    pub mem_compressed: Bytes,
     pub swap_used: Bytes,
     pub load1: f64,
     /// Physical cores, performance and efficiency. Zero means unknown, which

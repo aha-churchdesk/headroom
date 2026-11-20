@@ -717,6 +717,31 @@ test('a requeue banner offers Pin only while its retry is still waiting or runni
   has(ui.view(), 'The retry has ended.');
 });
 
+test('memory counting mode is a two-way choice that defaults to strict', () => {
+  const s = JSON.parse(JSON.stringify(busy));
+  delete s.settings.memory_mode;
+  ui.setState(s);
+  lacks(ui.headHtml(), 'compressed memory');
+  ui.click({ act: 'goto', page: 'settings' }, 0);
+  const [strict, lenient] = ui.find({ act: 'set', key: 'memory_mode' });
+  eq([strict.dataset.val, strict.pressed, lenient.dataset.val, lenient.pressed],
+    ['strict', 'true', 'lenient', 'false']);
+  has(ui.view(), 'compressed memory all count as used');
+  ui.click({ act: 'set', key: 'memory_mode', val: 'lenient' }, 0);
+  eq(ui.sent, [{ cmd: 'set', key: 'memory_mode', value: 'lenient' }]);
+});
+
+test('lenient memory counting explains what it trades away', () => {
+  const s = JSON.parse(JSON.stringify(busy));
+  s.settings.memory_mode = 'lenient';
+  ui.setState(s);
+  has(ui.headHtml(), 'and, while pressure is normal and swap is steady, compressed memory');
+  ui.click({ act: 'goto', page: 'settings' }, 0);
+  const [strict, lenient] = ui.find({ act: 'set', key: 'memory_mode' });
+  eq([strict.pressed, lenient.pressed], ['false', 'true']);
+  has(ui.view(), 'push idle apps');
+});
+
 test('disabled backfilling keeps runtime historical below and above the estimate', () => {
   const s = JSON.parse(JSON.stringify(busy));
   const j = s.running[0];

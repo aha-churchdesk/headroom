@@ -38,6 +38,7 @@ impl Probe for Scripted {
             mem_total: 64 * GIB,
             mem_used: 16 * GIB,
             mem_available: 48 * GIB,
+            mem_compressed: 0,
             swap_used: 0,
             load1: 0.0,
             cores: 8,

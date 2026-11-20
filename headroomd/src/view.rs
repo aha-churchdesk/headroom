@@ -603,6 +603,7 @@ pub fn state(l: &Listing, x: &Extras) -> Value {
         "settings": {
             "headroom": cfg.headroom,
             "kill_mode": cfg.kill_mode,
+            "memory_mode": cfg.memory_mode,
             "wait_cap_s": cfg.wait_cap_s,
             "default_estimate": cfg.default_estimate,
             "start_at_login": x.login != Login::Off,
@@ -1193,6 +1194,7 @@ mod tests {
         assert_eq!(v["queued"][0]["waited_s"], 22);
         assert_eq!(v["hooks"]["codex"], "absent");
         assert_eq!(v["settings"]["kill_mode"], "freeze_kill");
+        assert_eq!(v["settings"]["memory_mode"], "strict");
         assert_eq!(v["settings"]["login_managed_by_brew"], true);
         assert_eq!(v["history"][0]["guard"]["action"], "requeued");
         assert_eq!(v["history"][0]["ended_at"], 1000);
