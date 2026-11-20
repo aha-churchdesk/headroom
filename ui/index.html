@@ -191,6 +191,8 @@ button:disabled[data-tip]{ cursor:default; }
   display:flex; justify-content:space-between; align-items:center; gap:8px;
 }
 .head .alert button{ font-size:11px; font-weight:600; color:var(--accent); white-space:nowrap; }
+.head .alert-acts{ display:flex; align-items:center; gap:8px; }
+.head .alert .alert-x{ color:var(--text-dim); font-weight:400; }
 
 /* ── Scroll body ──────────────────────────────────────────── */
 .body{ flex:1 1 auto; overflow:auto; min-height:0; }
@@ -797,11 +799,13 @@ function renderHead(S){
   const usedPct = Math.min(100, m.mem_used / m.mem_total * 100);
   const reservePct = Math.min(100, S.settings.headroom / m.mem_total * 100);
   const color = { normal:"var(--accent)", warn:"var(--warn)", critical:"var(--bad)" }[m.pressure];
-  const gaps = AGENTS.filter(([k]) => ["not_installed", "stale", "needs_review", "disabled"].includes(S.hooks[k]));
-  const alert = gaps.length
-    ? `<div class="alert"><span>⚠︎ ${gaps.map(([k, n]) => `${n}: ${HOOK_STATUS[S.hooks[k]][3]}`).join(". ")}.</span>
-         <button data-act="goto" data-page="settings" data-section="agent-hooks">Hook settings</button></div>`
-    : "";
+  // One notice per agent, so one can be hidden for good without the other.
+  const hidden = new Set(S.hidden_hook_notices || []);
+  const gaps = AGENTS.filter(([k]) => ["not_installed", "stale", "needs_review", "disabled"].includes(S.hooks[k])
+    && !hidden.has(`${k}:${S.hooks[k]}`));
+  const alert = gaps.map(([k, n]) => `<div class="alert"><span>⚠︎ ${n}: ${HOOK_STATUS[S.hooks[k]][3]}.</span>
+         <span class="alert-acts"><button data-act="goto" data-page="settings" data-section="agent-hooks">Hook settings</button>
+         <button class="alert-x" data-act="hide_hook_notice" data-name="${k}" aria-label="Don't warn about the ${n} hook again">✕</button></span></div>`).join("");
   const refused = S.refused
     ? `<div class="alert" role="alert"><span>⚠︎ ${esc(S.refused)}</span>
          <button data-act="dismiss" data-id="refused" aria-label="Dismiss this error">Dismiss</button></div>`
@@ -1677,6 +1681,7 @@ $("pop").addEventListener("click", (e) => {
     case "pin": case "low":
                     send({ cmd: d.act, id, on: d.on === "1" }); return;
     case "dismiss": send({ cmd:"dismiss", id }); return;
+    case "hide_hook_notice": send({ cmd:"hide_hook_notice", agent: d.name }); return;
     case "copy":    send({ cmd:"copy", text: d.text }); return;
     case "reset_profile": send({ cmd:"reset_profile", key: d.key }); return;
     case "reset_command": send({ cmd:"reset_command", command: d.command }); return;
@@ -1767,6 +1772,7 @@ function buttonTip(button){
     case "low": return d.on === "1" ? "Use background CPU priority. This job is paused first if memory runs short." : "Restore normal CPU and guard priority.";
     case "kill_app": return "Quit every process of this app, including ones too small to list. Any still running after the kill grace period are force-killed. Unsaved work in them is lost. Click twice to confirm.";
     case "kill_process": return "Quit this process. If it is still running after the kill grace period it is force-killed. Unsaved work in it is lost. Click twice to confirm.";
+    case "hide_hook_notice": return "Stop showing this warning, also after a restart. Agent hooks in Settings still show the hook's status, and a different problem with it warns again.";
     case "clear_data": return "Permanently clear saved profiles, job history and statistics. Running jobs, settings and hook connections are kept. Click twice to confirm.";
     case "reset_profile": return "Forget this workload's learned history. Future estimates use broader history or the default. Click twice to confirm.";
     case "scan_worktrees": return "Look at every worktree again: which are merged, changed or in use, and what each holds on disk.";
@@ -2084,6 +2090,7 @@ function mockApply(m){
       break; }
     case "low": { const j = find(m.id); if (j) j.low = m.on; break; }
     case "dismiss": S.banners = S.banners.filter(b => b.id !== m.id); break;
+    case "hide_hook_notice": S.hidden_hook_notices = [...(S.hidden_hook_notices || []), `${m.agent}:${S.hooks[m.agent]}`]; break;
     case "reset_command": for (const k of Object.keys(S.profiles)) if (S.profiles[k].command === m.command) delete S.profiles[k]; break;
     case "reset_profile": delete S.profiles[m.key]; all().forEach(j => { if (j.key === m.key){ j.samples = 0; j.memory_range = null; j.estimate = S.settings.default_estimate; } }); break;
     case "check_shims": S.shims = {...S.shims,status:"unverified",message:"Check this in the native app to inspect your default shell."}; break;

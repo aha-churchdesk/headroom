@@ -5,7 +5,7 @@
 //! state apart. Writes go through a temp file and a rename: the daemon runs
 //! all day, and a crash mid-write must not corrupt the profiles it has learned.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -29,6 +29,10 @@ static SAVE_ID: AtomicU64 = AtomicU64::new(0);
 #[serde(default)]
 pub struct UiPreferences {
     pub setup_complete: bool,
+    /// Hook problems the user chose not to be warned about above the
+    /// queue, as `agent:status` ("codex:not_installed"). A different
+    /// problem with the same agent warns again.
+    pub hidden_hook_notices: BTreeSet<String>,
 }
 
 unsafe extern "C" {
@@ -294,6 +298,7 @@ mod tests {
         s.save_config(&config).unwrap();
         let preferences = UiPreferences {
             setup_complete: true,
+            hidden_hook_notices: BTreeSet::from(["codex:not_installed".to_string()]),
         };
         s.save_ui_preferences(&preferences).unwrap();
         for name in [
@@ -338,6 +343,7 @@ mod tests {
         assert!(!s.root().join("ui.json").exists());
         let preferences = UiPreferences {
             setup_complete: true,
+            hidden_hook_notices: BTreeSet::from(["claude:stale".to_string()]),
         };
         s.save_ui_preferences(&preferences).unwrap();
         assert_eq!(
@@ -360,12 +366,23 @@ mod tests {
     }
 
     #[test]
+    fn ui_preferences_from_before_hidden_notices_load_with_none_hidden() {
+        let s = tmp("ui-preferences-old");
+        fs::write(s.root().join("ui.json"), r#"{"setup_complete":true}"#).unwrap();
+        let p = s.load_ui_preferences();
+        assert!(p.setup_complete);
+        assert!(p.hidden_hook_notices.is_empty());
+        assert!(!s.root().join("ui.json.corrupt").exists());
+    }
+
+    #[test]
     fn a_failed_ui_save_cleans_up_its_temporary_file() {
         let s = tmp("ui-save-failed");
         fs::create_dir(s.root().join("ui.json")).unwrap();
         assert!(
             s.save_ui_preferences(&UiPreferences {
-                setup_complete: true
+                setup_complete: true,
+                ..UiPreferences::default()
             })
             .is_err()
         );

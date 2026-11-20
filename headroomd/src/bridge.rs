@@ -27,6 +27,7 @@ pub enum UiCmd {
     Low { id: String, on: bool },
     Move { id: String, to: usize },
     Dismiss { id: String },
+    HideHookNotice { agent: String },
     Copy { text: String },
     FinishSetup,
     CheckShims,
@@ -50,6 +51,8 @@ pub enum UiCmd {
 pub enum Do {
     Control(Control),
     Dismiss(String),
+    /// Stop warning above the queue about this agent's hook problem.
+    HideHookNotice(String),
     Copy(String),
     FinishSetup,
     CheckShims,
@@ -107,6 +110,7 @@ pub fn translate(cmd: UiCmd, cfg: &Config) -> Result<Do, String> {
         UiCmd::KillApp { name } => Do::KillApp(name),
         UiCmd::ClearData => Do::Control(Control::ClearData),
         UiCmd::Dismiss { id } => Do::Dismiss(id),
+        UiCmd::HideHookNotice { agent } => Do::HideHookNotice(agent),
         UiCmd::Copy { text } => Do::Copy(text),
         UiCmd::FinishSetup => Do::FinishSetup,
         UiCmd::CheckShims => Do::CheckShims,
@@ -274,6 +278,15 @@ mod tests {
         );
         assert!(t(r#"{"cmd":"kill_process","pid":4121,"start":12}"#).is_err());
         assert!(t(r#"{"cmd":"kill_app"}"#).is_err(), "no name");
+    }
+
+    #[test]
+    fn hiding_a_hook_notice_names_the_agent() {
+        assert_eq!(
+            t(r#"{"cmd":"hide_hook_notice","agent":"codex"}"#),
+            Ok(Do::HideHookNotice("codex".into()))
+        );
+        assert!(t(r#"{"cmd":"hide_hook_notice"}"#).is_err(), "no agent");
     }
 
     #[test]

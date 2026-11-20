@@ -1574,12 +1574,35 @@ test('pending and unavailable Codex checks stay neutral in the header and Settin
 
 test('mixed hook issues keep installation and Codex review actions available', () => {
   ui.setState({ ...busy, hooks: { claude: 'stale', codex: 'review_unknown', pi: 'not_installed' } });
-  has(ui.head(), 'Claude Code: hook path is stale. pi: hook not installed.');
+  has(ui.head(), 'Claude Code: hook path is stale.');
+  has(ui.head(), 'pi: hook not installed.');
   lacks(ui.head(), 'Codex:');
   ui.click({ act: 'goto', page: 'settings' }, 0);
   ui.click({ act: 'copy', text: 'headroom hook install' });
   ui.click({ act: 'copy', text: '/hooks' });
   eq(ui.sent, [{ cmd: 'copy', text: 'headroom hook install' }, { cmd: 'copy', text: '/hooks' }]);
+});
+
+test('a hook notice can be hidden per agent and stays hidden while the problem is the same', () => {
+  const both = { ...busy, hooks: { claude: 'not_installed', codex: 'not_installed', pi: 'absent' } };
+  ui.setState(both);
+  eq(ui.find({ act: 'hide_hook_notice' }).map(b => b.dataset.name), ['claude', 'codex']);
+  ui.click({ act: 'hide_hook_notice', name: 'codex' });
+  eq(ui.sent, [{ cmd: 'hide_hook_notice', agent: 'codex' }]);
+  ui.setState({ ...both, hidden_hook_notices: ['codex:not_installed'] });
+  has(ui.head(), 'Claude Code: hook not installed.');
+  lacks(ui.head(), 'Codex:');
+  ui.click({ act: 'goto', page: 'settings' }, 1);
+  has(ui.view(), 'Codex not installed');
+});
+
+test('a hidden hook notice comes back for a different problem', () => {
+  const hidden = ['claude:not_installed', 'codex:not_installed'];
+  ui.setState({ ...busy, hooks: { claude: 'not_installed', codex: 'not_installed', pi: 'absent' }, hidden_hook_notices: hidden });
+  lacks(document.getElementById('head').innerHTML, 'class="alert"');
+  ui.setState({ ...busy, hooks: { claude: 'not_installed', codex: 'disabled', pi: 'absent' }, hidden_hook_notices: hidden });
+  has(ui.head(), 'Codex: hook disabled.');
+  lacks(ui.head(), 'Claude Code:');
 });
 
 test('hook status updates remove obsolete notices and suggested actions', () => {

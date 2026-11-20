@@ -111,6 +111,9 @@ fn verb(c: &Control) -> &'static str {
     }
 }
 
+/// Hook states the page warns about above the queue.
+const HOOK_NOTICES: [&str; 4] = ["not_installed", "stale", "needs_review", "disabled"];
+
 /// How this copy was installed, for Settings: by Homebrew, as the app in
 /// /Applications (`scripts/install.sh`), or run from a build in a checkout.
 pub fn install_json(exe: &str) -> Value {
@@ -352,6 +355,7 @@ impl App {
         state["copy_result"] = self.copy_result.clone().unwrap_or(Value::Null);
         state["kill_result"] = self.kill_result.clone().unwrap_or(Value::Null);
         state["refused"] = self.refused.clone().map_or(Value::Null, Value::String);
+        state["hidden_hook_notices"] = serde_json::json!(self.ui_preferences.hidden_hook_notices);
         state["shims"] = serde_json::to_value(&self.shims).unwrap();
         state["worktrees"] = self.worktrees.json(wall());
         state["install"] = install_json(&self.exe);
@@ -470,6 +474,7 @@ impl App {
             Do::Dismiss(id) => {
                 self.dismissed.insert(id);
             }
+            Do::HideHookNotice(agent) => self.hide_hook_notice(&agent),
             Do::Copy(text) => {
                 let result = copy(&text);
                 self.record_copy_result(&text, result);
@@ -512,6 +517,25 @@ impl App {
         }
         self.poll();
         Next::Continue
+    }
+
+    /// Stop warning about `agent`'s hook as it is now, across restarts. The
+    /// hook settings still show it, and a different problem warns again.
+    fn hide_hook_notice(&mut self, agent: &str) {
+        let Some(&(_, status)) = self.hooks.iter().find(|(a, _)| *a == agent) else {
+            return self.refuse("hide the notice", format!("no agent {agent}"));
+        };
+        if !HOOK_NOTICES.contains(&status) {
+            return self.refuse("hide the notice", format!("{agent}'s hook is {status}"));
+        }
+        let mut preferences = self.ui_preferences.clone();
+        preferences
+            .hidden_hook_notices
+            .insert(format!("{agent}:{status}"));
+        match self.store.save_ui_preferences(&preferences) {
+            Ok(()) => self.ui_preferences = preferences,
+            Err(e) => self.refuse("hide the notice", e.to_string()),
+        }
     }
 
     /// An action the page asked for didn't happen: say so there, and on stderr.
@@ -714,6 +738,80 @@ mod tests {
         assert!(app.store.load_ui_preferences().setup_complete);
         assert_eq!(app.last_error, None, "no daemon request is needed");
         assert!(!app.store.root().join("config.json").exists());
+    }
+
+    #[test]
+    fn a_hidden_hook_notice_stays_hidden_after_a_restart() {
+        let (mut app, _d) = with_daemon("hide-hook-notice");
+        app.hooks = vec![("claude", "installed"), ("codex", "not_installed")];
+        app.command(r#"{"cmd":"hide_hook_notice","agent":"codex"}"#);
+        let s = app.state().unwrap();
+        assert_eq!(s["refused"], Value::Null);
+        assert_eq!(
+            s["hidden_hook_notices"],
+            serde_json::json!(["codex:not_installed"])
+        );
+        app.command(r#"{"cmd":"hide_hook_notice","agent":"codex"}"#);
+        assert_eq!(
+            app.state().unwrap()["hidden_hook_notices"],
+            serde_json::json!(["codex:not_installed"]),
+            "hiding it again changes nothing"
+        );
+        let reopened = App::new(
+            app.store.clone(),
+            app.home.clone(),
+            app.cli.clone(),
+            app.exe.clone(),
+        );
+        assert!(
+            reopened
+                .ui_preferences
+                .hidden_hook_notices
+                .contains("codex:not_installed")
+        );
+    }
+
+    #[test]
+    fn only_a_hook_problem_shown_now_can_be_hidden() {
+        let (mut app, _d) = with_daemon("hide-hook-notice-refused");
+        app.hooks = vec![("claude", "installed"), ("codex", "checking")];
+        for (agent, why) in [
+            ("cursor", "no agent cursor"),
+            ("claude", "claude's hook is installed"),
+            ("codex", "codex's hook is checking"),
+        ] {
+            app.command(&format!(
+                r#"{{"cmd":"hide_hook_notice","agent":"{agent}"}}"#
+            ));
+            assert_eq!(
+                app.state().unwrap()["refused"],
+                format!("Couldn't hide the notice: {why}")
+            );
+        }
+        assert!(app.ui_preferences.hidden_hook_notices.is_empty());
+        assert!(!app.store.root().join("ui.json").exists());
+    }
+
+    #[test]
+    fn a_hook_notice_that_cannot_be_saved_stays_shown() {
+        let root = dir("hide-hook-notice-unsaved");
+        let mut app = App::new(
+            Store::at(root.join("data")).unwrap(),
+            root.join("home"),
+            "h".into(),
+            "d".into(),
+        );
+        fs::create_dir(app.store.root().join("ui.json")).unwrap();
+        app.hooks = vec![("claude", "stale")];
+        app.command(r#"{"cmd":"hide_hook_notice","agent":"claude"}"#);
+        assert!(app.ui_preferences.hidden_hook_notices.is_empty());
+        assert!(
+            app.refused
+                .as_deref()
+                .is_some_and(|r| r.starts_with("Couldn't hide the notice: ")),
+            "{:?}",
+            app.refused
+        );
     }
 
     #[test]
