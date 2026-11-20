@@ -88,7 +88,9 @@ impl ProcessTracker {
     }
 }
 
-fn process_start(pid: i32) -> Option<u64> {
+/// When a process started, in mach time: with the pid, it names one
+/// process, since pids are reused.
+pub(crate) fn process_start(pid: i32) -> Option<u64> {
     let mut ri: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
     let rc = unsafe {
         libc::proc_pid_rusage(
@@ -380,7 +382,7 @@ fn footprint(pid: i32) -> Option<Bytes> {
     (rc == 0).then_some(ri.ri_phys_footprint)
 }
 
-fn exe_path(pid: i32) -> Option<String> {
+pub(crate) fn exe_path(pid: i32) -> Option<String> {
     let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
     (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())
@@ -570,6 +572,8 @@ fn proc_info(pid: i32, bytes: Bytes, path: &str) -> ProcInfo {
     let cmd = args(pid).map_or_else(|| path.to_string(), |a| headroom_core::shell::join(&a));
     ProcInfo {
         pid,
+        start: process_start(pid),
+        stopping: false,
         bytes,
         cmd,
         cwd: cwd(pid).filter(|c| c != "/"),
@@ -582,21 +586,45 @@ pub fn all_pids() -> Vec<i32> {
     list_pids(PROC_ALL_PIDS, 0)
 }
 
+/// The processes of Headroom's jobs: their groups, and descendants that
+/// moved to groups of their own.
+pub(crate) fn job_pids(pgids: &[i32]) -> HashSet<i32> {
+    if pgids.is_empty() {
+        return HashSet::new();
+    }
+    let table = procs();
+    pgids
+        .iter()
+        .flat_map(|&g| proctree::job_pids(&table, g))
+        .collect()
+}
+
+/// Headroom itself: the menu bar app, the daemon and the CLI that hooks,
+/// shims and `headroom run` start. Ending one of these from the "Other
+/// apps" page would take the queue or a waiting command with it.
+pub fn is_headroom(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    name == "headroom" || name == "headroomd" || path.contains("/Headroom.app/")
+}
+
+/// Every process among `pids` that the "Other apps" page counts under
+/// `name`, leaving out Headroom's jobs.
+pub fn app_pids(pids: &[i32], skip_pgids: &[i32], name: &str) -> Vec<i32> {
+    let skip = job_pids(skip_pgids);
+    pids.iter()
+        .copied()
+        .filter(|p| !skip.contains(p))
+        .filter(|&p| footprint(p).is_some())
+        .filter(|&p| exe_path(p).is_some_and(|path| app_name(&path) == name))
+        .collect()
+}
+
 /// Memory by app among `pids`, largest first, leaving out the process
 /// groups Headroom manages. Processes we may not inspect (other users',
 /// the kernel's) are skipped. The largest apps get their largest processes
 /// listed in detail.
 pub fn top_apps(pids: &[i32], skip_pgids: &[i32], limit: usize) -> Vec<AppUsage> {
-    // A job's processes include descendants in other groups.
-    let skip: HashSet<i32> = if skip_pgids.is_empty() {
-        HashSet::new()
-    } else {
-        let table = procs();
-        skip_pgids
-            .iter()
-            .flat_map(|&g| proctree::job_pids(&table, g))
-            .collect()
-    };
+    let skip = job_pids(skip_pgids);
     // (pid, footprint, executable path)
     type Proc = (i32, Bytes, String);
     let mut by_app: HashMap<String, Vec<Proc>> = HashMap::new();
@@ -623,6 +651,8 @@ pub fn top_apps(pids: &[i32], skip_pgids: &[i32], limit: usize) -> Vec<AppUsage>
                 bytes: total(&procs),
                 procs: procs.len() as u32,
                 path: bundle_path(&procs[0].2),
+                own: procs.iter().any(|p| is_headroom(&p.2)),
+                stopping: false,
                 top: procs
                     .iter()
                     .take(PER_APP)
@@ -889,6 +919,44 @@ mod tests {
             apps.iter()
                 .all(|a| !a.top.is_empty() && a.top.len() <= PER_APP)
         );
+    }
+
+    #[test]
+    fn headroom_is_its_app_its_daemon_and_its_cli_by_any_install() {
+        for p in [
+            "/Applications/Headroom.app/Contents/MacOS/headroomd",
+            "/opt/homebrew/bin/headroomd",
+            "/opt/homebrew/Cellar/headroom/0.4.15/bin/headroom",
+            "/Users/me/Projects/work-scheduler-mcp/target/debug/headroom",
+        ] {
+            assert!(is_headroom(p), "{p}");
+        }
+        for p in [
+            "/Users/me/Projects/work-scheduler-mcp/target/debug/headroom-hog",
+            "/opt/homebrew/bin/node",
+            "/Applications/Headroom Notes.app/Contents/MacOS/notes",
+            "",
+        ] {
+            assert!(!is_headroom(p), "{p}");
+        }
+    }
+
+    #[test]
+    fn an_apps_processes_are_found_by_its_name_leaving_out_jobs() {
+        let me = std::process::id() as i32;
+        let path = exe_path(me).unwrap();
+        let name = app_name(&path);
+        let mine = vec![me];
+        assert_eq!(app_pids(&mine, &[], &name), mine);
+        assert!(app_pids(&mine, &[], "no such app").is_empty());
+        let group = unsafe { libc::getpgid(0) };
+        assert!(app_pids(&mine, &[group], &name).is_empty(), "a job's");
+        assert!(app_pids(&[], &[], &name).is_empty());
+        // Listed processes carry the start time a kill names them by.
+        let apps = top_apps(&mine, &[], 1);
+        assert_eq!(apps[0].top[0].start, process_start(me));
+        assert!(apps[0].top[0].start.is_some());
+        assert!(!apps[0].own && !apps[0].stopping && !apps[0].top[0].stopping);
     }
 
     #[test]

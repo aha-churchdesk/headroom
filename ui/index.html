@@ -425,6 +425,7 @@ button:disabled[data-tip]{ cursor:default; }
 .odetail .where{ color:var(--text-faint); word-break:break-all; }
 .oproc{ padding:6px 0 0; border-top:1px solid var(--sep); margin-top:6px; }
 .oproc .l1{ display:flex; gap:8px; }
+.orow .l1 .ib, .oproc .l1 .ib{ flex:none; align-self:center; }
 .oproc .cmd{ word-break:break-all; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
 .oproc .k{ color:var(--text-dim); margin-top:2px; word-break:break-all; }
 .note-foot{ padding:10px 14px 14px; font-size:11px; color:var(--text-faint); }
@@ -1352,6 +1353,23 @@ function renderProfile(S){
     </div>`;
 }
 
+/* ✕ ends an app or one of its processes; Headroom's own have none. A
+   process goes by pid and start time, since its pid may be reused by the
+   time the click arrives. */
+function otherKill(key, attrs, label, confirmText, stopping){
+  if (stopping) return `<span class="dim">Stopping…</span>`;
+  return confirming(key)
+    ? `<button class="ib kill-confirm" ${attrs} data-confirm="${esc(key)}" aria-label="Confirm kill ${label}">${confirmText}</button>`
+    : `<button class="ib" ${attrs} data-confirm="${esc(key)}" aria-label="Kill ${label}" title="Kill (click twice)">✕</button>`;
+}
+const appKill = o => o.own ? "" : otherKill("kill_app:" + o.name,
+  `data-act="kill_app" data-name="${esc(o.name)}"`,
+  esc(`all ${o.procs} ${o.name} process${o.procs === 1 ? "" : "es"}`),
+  o.procs === 1 ? "Kill?" : `Kill all ${o.procs}?`, o.stopping);
+const procKill = (o, p) => o.own || p.start == null ? "" : otherKill(`kill_proc:${p.pid}:${p.start}`,
+  `data-act="kill_process" data-pid="${p.pid}" data-start="${esc(p.start)}"`,
+  esc(`${o.name} pid ${p.pid}`), "Kill?", p.stopping || o.stopping);
+
 function renderOthers(S){
   const max = Math.max(1, ...S.others.map(o => o.bytes));
   // The apps below add up to the first figure. The second is the rest of
@@ -1361,19 +1379,20 @@ function renderOthers(S){
   const rest = Math.max(0, S.system.mem_used - apps);
   const total = `
     <div class="ototal num"><span>Other apps</span><b>${gb(apps)} GB</b><span class="sep"></span>
-      <span title="macOS, apps too small to list, and Headroom's jobs">System</span><b>${gb(rest)} GB</b></div>`;
+      <span title="macOS, apps too small to list, and Headroom's jobs">System</span><b>${gb(rest)} GB</b></div>
+    ${S.kill_result && !S.kill_result.ok ? `<div class="wt-note bad" role="alert" style="padding-top:8px">${esc(S.kill_result.message)}</div>` : ""}`;
   return pageHead("Other apps") + total + S.others.map(o => {
     const open = UI.openApps.has(o.name);
     const top = o.top || [];
     return `
     <div class="orow ${open ? "open" : ""}">
       <div class="l1 num"><span class="name" role="button" tabindex="0" aria-expanded="${open}" data-act="expand_app" data-name="${esc(o.name)}">${esc(o.name)}</span>
-        <span class="dim">${o.procs} proc${o.procs === 1 ? "" : "s"}</span><b>${gb(o.bytes)} GB</b></div>
+        <span class="dim">${o.procs} proc${o.procs === 1 ? "" : "s"}</span><b>${gb(o.bytes)} GB</b>${appKill(o)}</div>
       <div class="bar"><div style="width:${o.bytes / max * 100}%"></div></div>
       ${open ? `<div class="odetail">
         ${o.path ? `<div class="where mono">${esc(o.path)}</div>` : ""}
         ${top.map(p => `<div class="oproc">
-          <div class="l1 num"><span class="dim">pid ${p.pid}</span><span style="flex:1"></span><b>${gb(p.bytes)} GB</b></div>
+          <div class="l1 num"><span class="dim">pid ${p.pid}</span><span style="flex:1"></span><b>${gb(p.bytes)} GB</b>${procKill(o, p)}</div>
           <div class="cmd mono" title="${esc(p.cmd)}">${esc(p.cmd)}</div>
           ${p.cwd ? `<div class="k">in <span class="mono">${esc(p.cwd)}</span></div>` : ""}
           ${p.started_by.length ? `<div class="k">started by ${p.started_by.map(esc).join(" › ")}</div>` : ""}
@@ -1382,8 +1401,8 @@ function renderOthers(S){
       </div>` : ""}
     </div>`;
   }).join("") + `
-    <div class="note-foot">Not managed: the scheduler never pauses or kills these. They count toward
-      memory in use, so they affect when queued jobs can start.</div>`;
+    <div class="note-foot">Not managed: the scheduler never pauses or kills these, though you can with ✕.
+      They count toward memory in use, so they affect when queued jobs can start.</div>`;
 }
 
 const KILL_MODES = [
@@ -1647,6 +1666,8 @@ $("pop").addEventListener("click", (e) => {
     case "remove_worktree": send({ cmd:"remove_worktree", repo: d.repo, path: d.path }); return;
     case "remove_merged_worktrees": send({ cmd:"remove_merged_worktrees", repo: d.repo }); return;
     case "clear_data": send({ cmd:"clear_data" }); return;
+    case "kill_app": send({ cmd:"kill_app", name: d.name }); return;
+    case "kill_process": send({ cmd:"kill_process", pid: Number(d.pid), start: d.start }); return;
     case "set": {
       const v = d.val === "true" ? true : d.val === "false" ? false
               : isNaN(Number(d.val)) ? d.val : Number(d.val);
@@ -1726,6 +1747,8 @@ function buttonTip(button){
     case "cancel": return "Remove this queued job before it starts; its waiting command exits.";
     case "top": return "Move this job to the front of the unpinned queue. Memory and pressure checks still apply.";
     case "low": return d.on === "1" ? "Use background CPU priority. This job is paused first if memory runs short." : "Restore normal CPU and guard priority.";
+    case "kill_app": return "Quit every process of this app, including ones too small to list. Any still running after the kill grace period are force-killed. Unsaved work in them is lost. Click twice to confirm.";
+    case "kill_process": return "Quit this process. If it is still running after the kill grace period it is force-killed. Unsaved work in it is lost. Click twice to confirm.";
     case "clear_data": return "Permanently clear saved profiles, job history and statistics. Running jobs, settings and hook connections are kept. Click twice to confirm.";
     case "reset_profile": return "Forget this workload's learned history. Future estimates use broader history or the default. Click twice to confirm.";
     case "scan_worktrees": return "Look at every worktree again: which are merged, changed or in use, and what each holds on disk.";
@@ -1830,9 +1853,9 @@ const OTHERS = [
   { name:"Cursor", bytes:G(3.9), procs:18 },
   { name:"Docker", bytes:G(3.1), procs:6 },
   { name:"node", bytes:G(2.4), procs:5, path:"/opt/homebrew/bin/node", top:[
-    { pid:4121, bytes:G(1.6), cmd:"node ~/Projects/browser-churchdesk/node_modules/typescript/lib/tsserver.js --stdio",
+    { pid:4121, start:"4121", bytes:G(1.6), cmd:"node ~/Projects/browser-churchdesk/node_modules/typescript/lib/tsserver.js --stdio",
       cwd:"~/Projects/browser-churchdesk", started_by:["Cursor"] },
-    { pid:5310, bytes:G(0.6), cmd:"node ~/Projects/form-service/node_modules/.bin/vite", cwd:"~/Projects/form-service",
+    { pid:5310, start:"5310", bytes:G(0.6), cmd:"node ~/Projects/form-service/node_modules/.bin/vite", cwd:"~/Projects/form-service",
       started_by:["pnpm", "zsh", "cmux"] } ] },
   { name:"Slack", bytes:G(1.2), procs:7 },
   { name:"cmux", bytes:G(0.9), procs:12 },
@@ -2021,6 +2044,11 @@ function mockApply(m){
       S.queued = S.queued.filter(x => x.id !== m.id);
       if (j) S.history.unshift({ id:"r" + Date.now(), label:j.label, cmd:j.cmd, key:j.key, duration_s:0,
         peak:0, estimate:j.estimate, exit:null, ended_ago_s:0, guard:{ action:"cancelled", why:"cancelled from menu bar" } });
+      break;
+    }
+    case "kill_app": { const o = S.others.find(x => x.name === m.name); if (o) o.stopping = true; break; }
+    case "kill_process": {
+      for (const o of S.others) for (const p of o.top || []) if (p.pid === m.pid && p.start === m.start) p.stopping = true;
       break;
     }
     case "top": {

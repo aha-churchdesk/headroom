@@ -7,11 +7,11 @@
 //! event loop, so everything here can be exercised against a real daemon in
 //! a test without a window.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use headroom_core::config::Config;
 use headroom_core::hookio::Agent;
@@ -26,6 +26,7 @@ use serde_json::Value;
 use crate::bridge::{self, Do, UiCmd};
 use crate::hook_refresh::HookVerification;
 use crate::shim_refresh::ShimsVerification;
+use crate::stop::{self, Target};
 use crate::view::{self, AppUsage, Extras, Login};
 use crate::{login, sample};
 
@@ -63,6 +64,13 @@ pub struct App {
     profiles: Profiles,
     tally: Tally,
     others: Vec<AppUsage>,
+    /// Processes sent SIGTERM from the "Other apps" page, until they exit
+    /// or the page stops waiting for them (shortly after their SIGKILL).
+    stopping: HashMap<Target, Instant>,
+    /// Apps killed as a whole, with the processes that were signalled.
+    stopping_apps: HashMap<String, (Vec<Target>, Instant)>,
+    /// The last kill from that page that could not do everything asked.
+    kill_result: Option<Value>,
     hooks: Vec<(&'static str, &'static str)>,
     hook_verification: HookVerification,
     shims: ShimsStatus,
@@ -146,6 +154,9 @@ impl App {
             update: None,
             worktrees: Default::default(),
             others: Vec::new(),
+            stopping: HashMap::new(),
+            stopping_apps: HashMap::new(),
+            kill_result: None,
             hooks: Vec::new(),
             hook_verification: HookVerification::default(),
             login: Login::Off,
@@ -198,11 +209,11 @@ impl App {
     /// The "Other apps" page from just these processes. Paths under the
     /// home directory are shown from `~`.
     pub fn refresh_others_among(&mut self, pids: &[i32]) {
-        let skip: Vec<i32> = self
-            .listing
-            .iter()
-            .flat_map(|l| l.running.iter().filter_map(|j| j.pgid))
-            .collect();
+        let skip = self.job_pgids();
+        let now = Instant::now();
+        self.stopping.retain(|t, until| *until > now && t.alive());
+        self.stopping_apps
+            .retain(|_, (ts, until)| *until > now && ts.iter().any(Target::alive));
         let home = self.home.display().to_string();
         let short = |s: &str| match s.strip_prefix(&home) {
             Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => {
@@ -217,10 +228,50 @@ impl App {
                 for p in &mut a.top {
                     p.cmd = p.cmd.replace(&format!("{home}/"), "~/");
                     p.cwd = p.cwd.as_deref().map(short);
+                    p.stopping = p.start.is_some_and(|start| {
+                        self.stopping.contains_key(&Target { pid: p.pid, start })
+                    });
                 }
+                a.stopping = self.stopping_apps.contains_key(&a.name);
                 a
             })
             .collect();
+    }
+
+    /// The process groups of the jobs running now.
+    fn job_pgids(&self) -> Vec<i32> {
+        self.listing
+            .iter()
+            .flat_map(|l| l.running.iter().filter_map(|j| j.pgid))
+            .collect()
+    }
+
+    /// SIGTERM `targets` from the "Other apps" page, SIGKILL after the
+    /// grace period, and show the page what happened.
+    fn kill_others(&mut self, targets: &[Target], app: Option<String>) {
+        let jobs: Vec<i32> = sample::job_pids(&self.job_pgids()).into_iter().collect();
+        let grace = Duration::from_secs(self.cfg.kill_grace_s);
+        let out = stop::term(targets, &jobs, grace);
+        // A little past the SIGKILL: what survives that can't be ended here.
+        let until = Instant::now() + grace + Duration::from_secs(2);
+        for t in &out.signalled {
+            self.stopping.insert(*t, until);
+        }
+        if let Some(name) = app.filter(|_| !out.signalled.is_empty()) {
+            self.stopping_apps
+                .insert(name, (out.signalled.clone(), until));
+        }
+        self.kill_result = (!out.refused.is_empty()).then(|| {
+            let n = out.refused.len();
+            let message = format!(
+                "Could not stop {n} process{}: {}",
+                if n == 1 { "" } else { "es" },
+                out.refused.join("; ")
+            );
+            self.last_error = Some(message.clone());
+            serde_json::json!({ "ok": false, "message": message })
+        });
+        self.refresh_others();
     }
 
     pub fn refresh_hooks(&mut self) {
@@ -276,6 +327,7 @@ impl App {
             "error": self.setup_error,
         });
         state["copy_result"] = self.copy_result.clone().unwrap_or(Value::Null);
+        state["kill_result"] = self.kill_result.clone().unwrap_or(Value::Null);
         state["shims"] = serde_json::to_value(&self.shims).unwrap();
         state["worktrees"] = self.worktrees.json(wall());
         state["install"] = install_json(&self.exe);
@@ -411,6 +463,19 @@ impl App {
             }
             Do::RemoveWorktree { repo, path } => {
                 self.worktrees.remove(repo, vec![path]);
+                return Next::Continue;
+            }
+            Do::KillProcess(t) => {
+                self.kill_others(&[t], None);
+                return Next::Continue;
+            }
+            Do::KillApp(name) => {
+                let targets: Vec<Target> =
+                    sample::app_pids(&sample::all_pids(), &self.job_pgids(), &name)
+                        .into_iter()
+                        .filter_map(Target::of)
+                        .collect();
+                self.kill_others(&targets, Some(name));
                 return Next::Continue;
             }
             Do::RemoveMergedWorktrees(repo) => {
@@ -806,6 +871,139 @@ mod tests {
         assert_eq!(app.command(r#"{"cmd":"kill","id":"999"}"#), Next::Continue);
         assert!(app.last_error.is_some(), "the daemon's refusal is kept");
         assert!(app.state().is_some(), "and the popover still renders");
+    }
+
+    /// `program` copied under a name no other process on this machine has,
+    /// so killing that "app" can only reach what the test started.
+    fn unique(root: &Path, program: &str, name: &str) -> PathBuf {
+        let p = root.join(format!("{name}-{}", std::process::id()));
+        fs::copy(program, &p).unwrap();
+        // A copied system binary keeps Apple's signature, which no longer
+        // matches where it is, and is killed at launch; sign it ad hoc.
+        let signed = Command::new("/usr/bin/codesign")
+            .args(["-f", "-s", "-"])
+            .arg(&p)
+            .output()
+            .unwrap();
+        assert!(signed.status.success(), "{signed:?}");
+        p
+    }
+
+    fn exited_by(c: &mut std::process::Child, within: Duration) -> Option<i32> {
+        use std::os::unix::process::ExitStatusExt;
+        let until = Instant::now() + within;
+        while Instant::now() < until {
+            if let Some(st) = c.try_wait().unwrap() {
+                return st.signal();
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        None
+    }
+
+    #[test]
+    fn killing_an_app_ends_every_process_it_has_and_nothing_else() {
+        let (mut app, _d) = with_daemon("kill-app");
+        let root = dir("kill-app-bin");
+        let sleeper = unique(&root, "/bin/sleep", "hr-kill-app");
+        let name = sleeper.file_name().unwrap().to_str().unwrap().to_string();
+        let mut mine: Vec<_> = (0..2)
+            .map(|_| Command::new(&sleeper).arg("30").spawn().unwrap())
+            .collect();
+        let mut bystander = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        app.command(&format!(r#"{{"cmd":"kill_app","name":"{name}"}}"#));
+        for c in &mut mine {
+            assert_eq!(exited_by(c, Duration::from_secs(5)), Some(libc::SIGTERM));
+        }
+        assert!(
+            app.state().unwrap()["kill_result"].is_null(),
+            "nothing refused"
+        );
+        assert!(
+            bystander.try_wait().unwrap().is_none(),
+            "another app is untouched"
+        );
+        // Pressed again once they are gone: nothing to do, nothing wrong.
+        app.last_error = None;
+        app.command(&format!(r#"{{"cmd":"kill_app","name":"{name}"}}"#));
+        assert!(app.state().unwrap()["kill_result"].is_null());
+        assert_eq!(app.last_error, None);
+        bystander.kill().unwrap();
+        bystander.wait().unwrap();
+    }
+
+    #[test]
+    fn a_process_that_ignores_quit_shows_as_stopping_until_it_is_killed() {
+        let (mut app, _d) = with_daemon("kill-stubborn");
+        app.cfg.kill_grace_s = 1;
+        let root = dir("kill-stubborn-bin");
+        let sleeper = unique(&root, "/bin/sleep", "hr-stubborn");
+        let mut cmd = Command::new(&sleeper);
+        cmd.arg("30");
+        // An ignored signal stays ignored across exec.
+        unsafe {
+            std::os::unix::process::CommandExt::pre_exec(&mut cmd, || {
+                libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                Ok(())
+            });
+        }
+        let mut c = cmd.spawn().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        let pid = c.id() as i32;
+        let start = Target::of(pid).unwrap().start;
+        app.command(&format!(
+            r#"{{"cmd":"kill_process","pid":{pid},"start":"{start}"}}"#
+        ));
+        app.refresh_others_among(&[pid]);
+        let s = app.state().unwrap();
+        let p = &s["others"][0]["top"][0];
+        assert_eq!(p["pid"], pid);
+        assert_eq!(p["start"], start.to_string(), "sent as a string");
+        assert_eq!(p["stopping"], true);
+        assert_eq!(
+            s["others"][0]["stopping"], false,
+            "one process, not the app"
+        );
+        assert_eq!(s["others"][0]["own"], false);
+        assert_eq!(
+            exited_by(&mut c, Duration::from_secs(5)),
+            Some(libc::SIGKILL)
+        );
+    }
+
+    #[test]
+    fn a_kill_for_a_reused_pid_or_this_app_signals_nothing() {
+        let (mut app, _d) = with_daemon("kill-refused");
+        let mut c = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let pid = c.id() as i32;
+        let stale = Target::of(pid).unwrap().start.wrapping_sub(1);
+        app.command(&format!(
+            r#"{{"cmd":"kill_process","pid":{pid},"start":"{stale}"}}"#
+        ));
+        assert!(
+            app.state().unwrap()["kill_result"].is_null(),
+            "gone is not an error"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            c.try_wait().unwrap().is_none(),
+            "the process now at that pid runs on"
+        );
+        c.kill().unwrap();
+        c.wait().unwrap();
+
+        let me = Target::of(std::process::id() as i32).unwrap();
+        app.command(&format!(
+            r#"{{"cmd":"kill_process","pid":{},"start":"{}"}}"#,
+            me.pid, me.start
+        ));
+        let r = &app.state().unwrap()["kill_result"];
+        assert_eq!(r["ok"], false);
+        assert!(
+            r["message"].as_str().unwrap().contains("this menu bar app"),
+            "{r}"
+        );
     }
 
     #[test]

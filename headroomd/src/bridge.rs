@@ -12,6 +12,8 @@ use headroom_core::protocol::Control;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::stop::Target;
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum UiCmd {
@@ -34,6 +36,8 @@ pub enum UiCmd {
     ScanWorktrees,
     RemoveWorktree { repo: String, path: String },
     RemoveMergedWorktrees { repo: String },
+    KillProcess { pid: i32, start: String },
+    KillApp { name: String },
     ClearData,
     Set { key: String, value: Value },
     AddPattern { pattern: String },
@@ -59,6 +63,11 @@ pub enum Do {
         path: String,
     },
     RemoveMergedWorktrees(String),
+    /// One process on the "Other apps" page. The page sends its start time
+    /// as a string: mach time can pass what a JS number holds exactly.
+    KillProcess(Target),
+    /// Every process of one app on the "Other apps" page, by its name.
+    KillApp(String),
     Quit,
 }
 
@@ -89,6 +98,13 @@ pub fn translate(cmd: UiCmd, cfg: &Config) -> Result<Do, String> {
         UiCmd::ScanWorktrees => Do::ScanWorktrees,
         UiCmd::RemoveWorktree { repo, path } => Do::RemoveWorktree { repo, path },
         UiCmd::RemoveMergedWorktrees { repo } => Do::RemoveMergedWorktrees(repo),
+        UiCmd::KillProcess { pid, start } => Do::KillProcess(Target {
+            pid,
+            start: start
+                .parse()
+                .map_err(|_| format!("bad process start {start:?}"))?,
+        }),
+        UiCmd::KillApp { name } => Do::KillApp(name),
         UiCmd::ClearData => Do::Control(Control::ClearData),
         UiCmd::Dismiss { id } => Do::Dismiss(id),
         UiCmd::Copy { text } => Do::Copy(text),
@@ -227,6 +243,33 @@ mod tests {
         );
         assert!(t(r#"{"cmd":"self_destruct"}"#).is_err());
         assert!(t(r#"{"cmd":"pin","id":"4"}"#).is_err(), "missing field");
+    }
+
+    #[test]
+    fn killing_other_apps_names_processes_by_pid_and_start_time() {
+        // Start times pass 2^53, so the page sends them as strings.
+        assert_eq!(
+            t(r#"{"cmd":"kill_process","pid":4121,"start":"18446744073709551615"}"#),
+            Ok(Do::KillProcess(Target {
+                pid: 4121,
+                start: u64::MAX
+            }))
+        );
+        assert_eq!(
+            t(r#"{"cmd":"kill_app","name":"node"}"#),
+            Ok(Do::KillApp("node".into()))
+        );
+        assert!(
+            t(r#"{"cmd":"kill_process","pid":4121,"start":"soon"}"#)
+                .unwrap_err()
+                .contains("bad process start")
+        );
+        assert!(
+            t(r#"{"cmd":"kill_process","pid":4121}"#).is_err(),
+            "a pid alone could be a reused one"
+        );
+        assert!(t(r#"{"cmd":"kill_process","pid":4121,"start":12}"#).is_err());
+        assert!(t(r#"{"cmd":"kill_app"}"#).is_err(), "no name");
     }
 
     #[test]

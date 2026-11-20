@@ -26,11 +26,19 @@ pub struct AppUsage {
     pub path: String,
     /// Its largest processes, with what they run and who started them.
     pub top: Vec<ProcInfo>,
+    /// Headroom's own processes: the page offers no kill for them.
+    pub own: bool,
+    /// Asked to quit from the page, and some of it is still running.
+    pub stopping: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProcInfo {
     pub pid: i32,
+    /// With the pid, names this process for a kill (pids are reused).
+    pub start: Option<u64>,
+    /// Sent SIGTERM from the page and not gone yet.
+    pub stopping: bool,
     pub bytes: Bytes,
     /// The command line, or the executable when it can't be read.
     pub cmd: String,
@@ -563,8 +571,13 @@ pub fn state(l: &Listing, x: &Extras) -> Value {
             "bytes": o.bytes,
             "procs": o.procs,
             "path": o.path,
+            "own": o.own,
+            "stopping": o.stopping,
             "top": o.top.iter().map(|p| json!({
                 "pid": p.pid,
+                // Mach time can pass 2^53; JSON numbers in the page can't.
+                "start": p.start.map(|s| s.to_string()),
+                "stopping": p.stopping,
                 "bytes": p.bytes,
                 "cmd": p.cmd,
                 "cwd": p.cwd,

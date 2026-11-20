@@ -1004,6 +1004,92 @@ test('an app with more processes than listed says how many are left out', () => 
   has(ui.view(), 'and 4 smaller');
 });
 
+// The fixture predates kills; these add what the daemon now sends.
+const killable = (o, over = {}) => ({ ...o, own: false, stopping: false,
+  top: o.top.map((p, i) => ({ ...p, start: String(9007199254740993n + BigInt(i)), stopping: false })), ...over });
+// The Other apps page with nothing expanded from an earlier test.
+function showOthers(state) {
+  ui.UI.openApps.clear();
+  ui.setState(state);
+  ui.click({ act: 'goto', page: 'others' });
+}
+
+test('a whole app is killed after a second click, by name', () => {
+  const hog = killable(others.others.find(o => o.name === 'headroom-hog'));
+  showOthers({ ...others, others: [hog] });
+  ui.click({ act: 'kill_app', name: 'headroom-hog' });
+  eq(ui.sent, [], 'nothing sent on the first click');
+  has(ui.view(), 'Kill?');
+  ui.click({ act: 'kill_app', name: 'headroom-hog' });
+  eq(ui.sent, [{ cmd: 'kill_app', name: 'headroom-hog' }]);
+  eq(ui.UI.openApps.has('headroom-hog'), false, 'the kill button does not expand the app');
+});
+
+test('killing an app with several processes says how many', () => {
+  const app = killable(others.others[0], { procs: 5 });
+  showOthers({ ...others, others: [app] });
+  const [btn] = ui.find({ act: 'kill_app' });
+  has(btn.label, `Kill all 5 ${app.name} processes`);
+  ui.click({ act: 'kill_app' });
+  has(ui.view(), 'Kill all 5?');
+});
+
+test('one process is killed from the expanded app, by pid and start time', () => {
+  const hog = killable(others.others.find(o => o.name === 'headroom-hog'));
+  const p = hog.top[0];
+  showOthers({ ...others, others: [hog] });
+  eq(ui.find({ act: 'kill_process' }).length, 0, 'collapsed: no process buttons');
+  ui.click({ act: 'expand_app', name: 'headroom-hog' });
+  ui.click({ act: 'kill_process', pid: p.pid });
+  eq(ui.sent, []);
+  ui.click({ act: 'kill_process', pid: p.pid });
+  // The start time stays a string: it is past what a JS number holds exactly.
+  eq(ui.sent, [{ cmd: 'kill_process', pid: p.pid, start: '9007199254740993' }]);
+});
+
+test('arming one process kill does not arm its app or another process', () => {
+  const app = killable(others.others[0]);
+  const two = { ...app, procs: 2, top: [app.top[0], { ...app.top[0], pid: app.top[0].pid + 1, start: '7' }] };
+  showOthers({ ...others, others: [two] });
+  ui.click({ act: 'expand_app', name: two.name });
+  ui.click({ act: 'kill_process', pid: two.top[0].pid });
+  ui.click({ act: 'kill_process', pid: two.top[1].pid });
+  ui.click({ act: 'kill_app', name: two.name });
+  eq(ui.sent, [], 'each needs its own second click');
+});
+
+test('a process being stopped shows that instead of a second kill', () => {
+  const hog = killable(others.others.find(o => o.name === 'headroom-hog'));
+  hog.top[0].stopping = true;
+  showOthers({ ...others, others: [hog] });
+  ui.click({ act: 'expand_app', name: 'headroom-hog' });
+  has(ui.view(), 'Stopping…');
+  eq(ui.find({ act: 'kill_process' }).length, 0);
+  eq(ui.find({ act: 'kill_app' }).length, 1, 'the rest of the app can still be killed');
+  ui.setState({ ...others, others: [{ ...hog, stopping: true }] });
+  eq(ui.find({ act: 'kill_app' }).length, 0, 'a whole app being stopped');
+});
+
+test("Headroom's own processes, and ones without a start time, offer no kill", () => {
+  const app = killable(others.others[0], { own: true });
+  showOthers({ ...others, others: [app] });
+  ui.click({ act: 'expand_app', name: app.name });
+  eq(ui.find({ act: 'kill_app' }).length, 0);
+  eq(ui.find({ act: 'kill_process' }).length, 0);
+  // The checked-in fixture has no start times: apps can be killed, single processes not.
+  ui.setState(others);
+  eq(ui.find({ act: 'kill_process' }).length, 0);
+  eq(ui.find({ act: 'kill_app' }).length, others.others.length);
+});
+
+test('a kill that could not stop everything says why', () => {
+  const message = 'Could not stop 1 process: pid 88 belongs to another user';
+  showOthers({ ...others, kill_result: { ok: false, message } });
+  has(ui.view(), message);
+  ui.setState({ ...others, kill_result: null });
+  lacks(ui.view(), 'Could not stop');
+});
+
 // ── intents ───────────────────────────────────────────────────────────────
 
 test('hold toggles from whatever the daemon says now', () => {
@@ -1188,6 +1274,8 @@ test('button tooltips expose action consequences to assistive technology', () =>
     [{ act:'freeze' }, 'It keeps its RAM'],
     [{ act:'resume' }, 'until memory pressure returns to normal'],
     [{ act:'clear_data' }, 'Click twice to confirm'],
+    [{ act:'kill_app' }, 'Quit every process of this app'],
+    [{ act:'kill_process' }, 'force-killed'],
     [{ act:'copy' }, 'Copy command'],
   ]) {
     const attrs = { title:'Copy command' };
