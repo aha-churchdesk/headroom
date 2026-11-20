@@ -1081,7 +1081,7 @@ function renderDetail(j){
 function renderFoot(){
   if (UI.page === "welcome") return `<div class="welcome-footer"><span>Revisit this in Settings</span><button data-act="finish_setup"${UI.finishingSetup ? " disabled" : ""}>${UI.finishingSetup ? "Saving…" : "Continue to Queue"}</button></div>`;
   const selected = UI.page === "profile" ? UI.profileFrom || "history" : UI.page;
-  return [["main", "Queue"], ["history", "History"], ["commands", "Commands"], ["worktrees", "Worktrees"], ["others", "Other apps"], ["settings", "Settings"]]
+  return [["main", "Queue"], ["history", "History"], ["commands", "Commands"], ["others", "Other apps"], ["worktrees", "Worktrees"], ["settings", "Settings"]]
     .map(([page, label]) => `<button class="${page === selected ? "selected" : ""}" data-act="goto" data-page="${page}"${page === selected ? ' aria-current="page"' : ""}${UI.page === "profile" && page === selected ? ' data-back="true"' : ""}>${label}${page === "settings" && STATE?.update ? `<span class="update-dot" title="Version ${esc(STATE.update.latest)} is available"><span class="sr-only">, update available</span></span>` : ""}</button>`).join("");
 }
 

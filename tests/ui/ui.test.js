@@ -1605,6 +1605,12 @@ test('a hidden hook notice comes back for a different problem', () => {
   lacks(ui.head(), 'Claude Code:');
 });
 
+test('the tabs put Other apps before Worktrees', () => {
+  ui.setState(busy);
+  eq(ui.find({ act: 'goto' }).map(b => b.dataset.page).slice(-4),
+    ['commands', 'others', 'worktrees', 'settings']);
+});
+
 test('hook status updates remove obsolete notices and suggested actions', () => {
   ui.setState({ ...busy, hooks: { claude: 'installed', codex: 'disabled', pi: 'absent' } });
   ui.click({ act: 'goto', page: 'settings' }, 0);
