@@ -1300,8 +1300,13 @@ function renderWorktrees(S){
     const tag = x.missing ? `<span class="gtag user">folder missing</span>`
       : x.merged === "pr" ? `<span class="gtag ok" title="Pull request #${x.pr} was merged with this branch's last commit">PR #${x.pr} merged</span>`
       : x.merged === "branch" ? `<span class="gtag ok" title="In ${esc(it.against ?? "the default branch")}">merged</span>` : "";
+    // One worktree may go from its row even unmerged: its branch stays.
+    const unmerged = !x.merged && !x.missing;
+    const alone = x.alone_blocker !== undefined ? x.alone_blocker : x.blocker;
+    const label = unmerged ? (confirming(key) ? "Remove folder? Branch stays" : "Remove folder")
+      : confirming(key) ? "Remove? Click again" : "Remove";
     const action = removing.has(x.path) ? `<span class="dim">Removing…</span>`
-      : x.blocker == null ? `<button class="chip-btn ${confirming(key) ? "confirm" : "danger"}" data-act="remove_worktree" data-repo="${esc(it.repo)}" data-path="${esc(x.path)}" data-confirm="${esc(key)}">${confirming(key) ? "Remove? Click again" : "Remove"}</button>` : "";
+      : alone == null ? `<button class="chip-btn ${confirming(key) ? "confirm" : "danger"}" data-act="remove_worktree" data-repo="${esc(it.repo)}" data-path="${esc(x.path)}" data-confirm="${esc(key)}"${unmerged ? ` data-unmerged="1"` : ""}>${label}</button>` : "";
     const why = [
       x.size != null ? diskSize(x.size) : w.sizing && !x.missing ? "measuring…" : null,
       x.last_commit_ago_s == null ? null : `last commit ${ago(x.last_commit_ago_s)}`,
@@ -1787,7 +1792,8 @@ function buttonTip(button){
     case "clear_data": return "Permanently clear saved profiles, job history and statistics. Running jobs, settings and hook connections are kept. Click twice to confirm.";
     case "reset_profile": return "Forget this workload's learned history. Future estimates use broader history or the default. Click twice to confirm.";
     case "scan_worktrees": return "Look at every worktree again: which are merged, changed or in use, and what each holds on disk.";
-    case "remove_worktree": return "Delete this worktree's folder and its branch. It is checked again first: merged, no uncommitted files, nothing working in it. Ignored files in it, such as node_modules and .env files, go with it. The folder is gone at once; its space comes back as it is deleted in the background. Click twice to confirm.";
+    case "remove_worktree": if (d.unmerged === "1") return "Delete this worktree's folder. Its branch isn't merged, so the branch and its commits stay in the repository; check it out again to carry on. It is checked again first: no uncommitted files, nothing working in it. Ignored files in it, such as node_modules and .env files, go with it. Click twice to confirm.";
+      return "Delete this worktree's folder and its branch. It is checked again first: merged, no uncommitted files, nothing working in it. Ignored files in it, such as node_modules and .env files, go with it. The folder is gone at once; its space comes back as it is deleted in the background. Click twice to confirm.";
     case "remove_merged_worktrees": return "Delete every worktree here that is merged, has no uncommitted files and has nothing working in it, with their branches. Each is checked again first. Ignored files in them, such as node_modules and .env files, go with them. Click twice to confirm.";
     case "reset_command": return "Forget the learned history of every run of this command, whatever its arguments. Future estimates use broader history or the default. Click twice to confirm.";
     case "hold": return STATE.held ? "Allow queued jobs to start again when resources permit." : "Hold new jobs in the queue. Running jobs continue.";

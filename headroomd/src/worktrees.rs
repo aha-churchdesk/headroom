@@ -91,6 +91,28 @@ impl Worktree {
             None => Some("changes not checked".into()),
         }
     }
+
+    /// Why it may not be removed on its own, from its row, if anything
+    /// stops it. Unlike "remove merged", an unmerged worktree may go: only
+    /// its folder does, while its branch and commits stay in the
+    /// repository. Uncommitted files would be lost, so they still stop it;
+    /// they aren't counted for unmerged worktrees until removal (see
+    /// `remove_alone`). A detached head would leave its commits on no
+    /// branch, so that stops it too.
+    pub fn alone_blocker(&self) -> Option<String> {
+        if self.merged.is_some() || self.missing || self.main || self.locked {
+            return self.blocker();
+        }
+        if self.branch.is_none() {
+            return Some("not merged, and on no branch".into());
+        }
+        Worktree {
+            merged: Some(Merged::Branch),
+            changes: self.changes.or(Some(0)),
+            ..self.clone()
+        }
+        .blocker()
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -463,6 +485,9 @@ fn take(dir: &Path, w: &Worktree) -> Result<String, String> {
     let Some(branch) = &w.branch else {
         return Ok("worktree removed".into());
     };
+    if w.merged.is_none() && !w.missing {
+        return Ok(format!("worktree removed; unmerged branch {branch} kept"));
+    }
     let flag = match w.merged {
         Some(Merged::Pr(_)) => "-D",
         _ => "-d",
@@ -506,6 +531,29 @@ pub fn remove_each(
         })();
         done(path, result);
     }
+}
+
+/// Remove one worktree from its row, merged or not, after checking again
+/// that it may go: its uncommitted files are counted now, whatever the
+/// last scan skipped, and any at all keep it.
+pub fn remove_alone(repo: &str, path: &str, procs: &Procs) -> Result<String, String> {
+    let dir = Path::new(repo);
+    let fresh = scan_repo(dir, procs).ok_or("the repository has no worktrees")?;
+    let mut w = fresh
+        .worktrees
+        .into_iter()
+        .find(|w| w.path == path)
+        .ok_or("no longer a worktree")?;
+    if !w.missing {
+        w.changes = w.changes.or_else(|| changes(Path::new(path)));
+        if w.changes.is_none() {
+            return Err("not removed: changes not checked".into());
+        }
+    }
+    if let Some(why) = w.alone_blocker() {
+        return Err(format!("not removed: {why}"));
+    }
+    take(dir, &w)
 }
 
 /// Remove one worktree after checking again that it may go.
@@ -601,6 +649,7 @@ pub fn json(repos: &[Repo], wall: u64) -> Value {
                     "changes": w.changes,
                     "in_use": w.in_use,
                     "blocker": w.blocker(),
+                    "alone_blocker": w.alone_blocker(),
                     "size": w.size,
                     "claude_ago_s": w.claude_at.map(|t| wall.saturating_sub(t)),
                     "codex_ago_s": w.codex_at.map(|t| wall.saturating_sub(t)),
@@ -739,6 +788,15 @@ impl Tab {
 
     /// Remove these worktrees of `repo`, each checked again first.
     pub fn remove(&self, repo: String, paths: Vec<String>) {
+        self.run_removal(repo, paths, false);
+    }
+
+    /// Remove one worktree from its row; it need not be merged.
+    pub fn remove_one(&self, repo: String, path: String) {
+        self.run_removal(repo, vec![path], true);
+    }
+
+    fn run_removal(&self, repo: String, paths: Vec<String>, alone: bool) {
         let paths: Vec<String> = {
             let mut s = self.lock();
             paths
@@ -752,7 +810,7 @@ impl Tab {
         let tab = self.clone();
         std::thread::spawn(move || {
             let _one = tab.one_at_a_time.lock().unwrap_or_else(|p| p.into_inner());
-            remove_each(&repo, &paths, processes, |path, result| {
+            let record = |path: &str, result: Result<String, String>| {
                 let mut s = tab.lock();
                 s.removing.remove(path);
                 if result.is_ok() {
@@ -765,7 +823,14 @@ impl Tab {
                     Err(e) => (false, e),
                 };
                 s.results.insert(path.to_string(), entry);
-            });
+            };
+            if alone {
+                for path in &paths {
+                    record(path, remove_alone(&repo, path, &processes()));
+                }
+            } else {
+                remove_each(&repo, &paths, processes, record);
+            }
         });
     }
 
@@ -1165,6 +1230,142 @@ mod tests {
         let said = remove(&repo.display().to_string(), &wt, &[]).unwrap();
         assert_eq!(said, "worktree and branch late removed");
         assert!(!Path::new(&wt).exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_unmerged_worktree_can_go_alone_and_its_branch_and_commits_stay() {
+        let (root, repo) = fixture("alone");
+        let repo_s = repo.display().to_string();
+        let r = scan_repo(&repo, &[]).unwrap();
+        let open = find(&r, "open");
+        assert_eq!(open.blocker().as_deref(), Some("not merged"), "not in bulk");
+        assert_eq!(open.alone_blocker(), None, "but from its row");
+        let said = remove_alone(&repo_s, &open.path, &[]).unwrap();
+        assert_eq!(said, "worktree removed; unmerged branch open kept");
+        assert!(!root.join("open").exists());
+        let log = git(&repo, &["log", "--format=%s", "open"]).unwrap();
+        assert!(log.starts_with("work"), "its commit is still there: {log}");
+        // Pressed again once it is gone.
+        assert_eq!(
+            remove_alone(&repo_s, &open.path, &[]),
+            Err("no longer a worktree".to_string())
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_unmerged_worktree_with_uncommitted_files_is_kept_when_removed_alone() {
+        let (root, repo) = fixture("alone-dirty");
+        std::fs::write(root.join("open/notes.txt"), "x").unwrap();
+        let r = scan_repo(&repo, &[]).unwrap();
+        let open = find(&r, "open");
+        assert_eq!(open.changes, None, "not counted by the scan");
+        assert_eq!(open.alone_blocker(), None, "so the row offers it");
+        assert_eq!(
+            remove_alone(&repo.display().to_string(), &open.path, &[]),
+            Err("not removed: 1 uncommitted file".to_string())
+        );
+        assert!(root.join("open/notes.txt").exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_unmerged_worktree_in_use_or_on_no_branch_stays() {
+        let (root, repo) = fixture("alone-blocked");
+        let repo_s = repo.display().to_string();
+        let open = root.join("open").display().to_string();
+        let procs = vec![(open.clone(), "codex".to_string())];
+        assert_eq!(
+            remove_alone(&repo_s, &open, &procs),
+            Err("not removed: in use by codex".to_string())
+        );
+        let detached = root.join("detached");
+        sh(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                detached.to_str().unwrap(),
+            ],
+        );
+        sh(&detached, &["commit", "-q", "--allow-empty", "-m", "lost?"]);
+        let d = detached.display().to_string();
+        assert_eq!(
+            remove_alone(&repo_s, &d, &[]),
+            Err("not removed: not merged, and on no branch".to_string())
+        );
+        assert!(root.join("open").exists() && detached.exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn removing_alone_keeps_every_other_guard() {
+        let unmerged = Worktree {
+            path: "/r.worktrees/a".into(),
+            branch: Some("a".into()),
+            ..Worktree::default()
+        };
+        let with = |f: fn(&mut Worktree)| {
+            let mut w = unmerged.clone();
+            f(&mut w);
+            w.alone_blocker()
+        };
+        assert_eq!(unmerged.alone_blocker(), None);
+        assert_eq!(
+            with(|w| w.main = true).as_deref(),
+            Some("the main checkout")
+        );
+        assert_eq!(with(|w| w.locked = true).as_deref(), Some("locked"));
+        assert_eq!(
+            with(|w| w.changes = Some(3)).as_deref(),
+            Some("3 uncommitted files")
+        );
+        assert_eq!(with(|w| w.changes = Some(0)), None);
+        let merged = Worktree {
+            merged: Some(Merged::Branch),
+            ..unmerged.clone()
+        };
+        assert_eq!(
+            merged.alone_blocker(),
+            merged.blocker(),
+            "merged: as before"
+        );
+    }
+
+    #[test]
+    fn the_tab_removes_one_unmerged_worktree_and_says_its_branch_stays() {
+        let (root, repo) = fixture("tab-alone");
+        let repo_s = repo.display().to_string();
+        let tab = Tab::default();
+        tab.scan(vec![repo_s.clone()]);
+        settle(&tab);
+        let open = root.join("open").display().to_string();
+        let v = tab.json(now());
+        let row = v["repos"][0]["worktrees"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["path"] == open.as_str())
+            .unwrap()
+            .clone();
+        assert_eq!(
+            (&row["blocker"], &row["alone_blocker"]),
+            (&json!("not merged"), &Value::Null)
+        );
+        assert!(
+            !tab.removable(&repo_s).contains(&open),
+            "not in remove-merged"
+        );
+        tab.remove_one(repo_s.clone(), open.clone());
+        let v = settle(&tab);
+        assert_eq!(v["results"][&open]["ok"], true, "{v}");
+        assert_eq!(
+            v["results"][&open]["message"],
+            "worktree removed; unmerged branch open kept"
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 

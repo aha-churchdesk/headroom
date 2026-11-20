@@ -537,7 +537,7 @@ impl App {
                 return Next::Continue;
             }
             Do::RemoveWorktree { repo, path } => {
-                self.worktrees.remove(repo, vec![path]);
+                self.worktrees.remove_one(repo, path);
                 return Next::Continue;
             }
             Do::KillProcess(t) => {

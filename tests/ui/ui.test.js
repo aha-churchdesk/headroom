@@ -1815,6 +1815,33 @@ test('removing a worktree needs a second click and sends it once', () => {
   eq(ui.find({ act: 'remove_worktree' }).length, 0, 'no second press while it runs');
 });
 
+test('an unmerged worktree can be removed alone, saying its branch stays', () => {
+  const open = WT({ path: '/p/app.worktrees/o', branch: 'sc-9/o', merged: null, changes: null,
+    blocker: 'not merged', alone_blocker: null });
+  const busyOne = WT({ path: '/p/app.worktrees/u', branch: 'sc-8/u', merged: null, in_use: ['claude'],
+    blocker: 'not merged', alone_blocker: 'in use by claude' });
+  ui.setState(worktreesState([appRepo([WT(), open, busyOne])]));
+  ui.click({ act: 'goto', page: 'worktrees' });
+  ui.sent.length = 0;
+  has(ui.view(), '3 worktrees · 1 can be removed');
+  has(ui.view(), 'Remove 1 merged');
+  eq(ui.find({ act: 'remove_worktree', path: busyOne.path }).length, 0, 'in use: no button');
+  const target = { act: 'remove_worktree', path: open.path };
+  eq(ui.find(target)[0].dataset.unmerged, '1');
+  for (const [unmergedFlag, expected] of [['1', 'the branch and its commits stay'], [undefined, 'its branch']]) {
+    const attrs = {};
+    const button = { dataset: { act: 'remove_worktree', unmerged: unmergedFlag }, textContent: '', getAttribute: k => attrs[k],
+      setAttribute: (k, v) => { attrs[k] = v; }, removeAttribute: k => { delete attrs[k]; } };
+    ui.describeButton(button);
+    has(button.dataset.tip, expected);
+  }
+  ui.click(target);
+  eq(ui.sent, [], 'armed, not sent');
+  has(ui.view(), 'Remove folder? Branch stays');
+  ui.click(target);
+  eq(ui.sent, [{ cmd: 'remove_worktree', repo: '/p/app', path: open.path }]);
+});
+
 test('removing every merged worktree of a repository is confirmed too', () => {
   ui.setState(worktreesState([appRepo([WT(), WT({ path: '/p/app.worktrees/b', branch: 'b' })])]));
   ui.click({ act: 'goto', page: 'worktrees' });
