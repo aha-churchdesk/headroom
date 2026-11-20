@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use headroom_core::store::Store;
 use headroomd::app::{App, Next};
-use headroomd::{daemon, sample::Sampler, shell, single, update, view};
+use headroomd::{daemon, sample::Sampler, shell, single, storage, update, view};
 use tao::dpi::LogicalSize;
 use tao::event::{Event, StartCause, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
@@ -32,6 +32,7 @@ const GLYPH: u32 = 18;
 const LIST_EVERY: Duration = Duration::from_secs(1);
 const SETTINGS_EVERY: Duration = Duration::from_secs(3);
 const HOOKS_EVERY: Duration = Duration::from_secs(5);
+const DISK_EVERY: Duration = Duration::from_secs(60);
 
 static STOP: AtomicBool = AtomicBool::new(false);
 
@@ -318,6 +319,8 @@ fn main() -> wry::Result<()> {
     let mut next_list = Instant::now();
     let mut next_settings = Instant::now();
     let mut next_hooks = Instant::now();
+    let mut next_disk = Instant::now();
+    let mut disk = storage::Watch::new(home());
     let mut daemon_thread = Some(daemon_thread);
 
     event_loop.run(move |event, _, control_flow| {
@@ -407,6 +410,14 @@ fn main() -> wry::Result<()> {
             window.set_visible(false);
             visible = false;
             clicks.dismissed(now);
+        }
+        if now >= next_disk {
+            next_disk = now + DISK_EVERY;
+            if let Some((title, body)) = disk.check()
+                && let Err(e) = storage::notify(&title, &body)
+            {
+                eprintln!("headroomd: disk notice: {e}");
+            }
         }
         if now >= next_list {
             next_list = now + LIST_EVERY;

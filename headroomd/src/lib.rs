@@ -11,6 +11,7 @@ pub mod shell;
 mod shim_refresh;
 pub mod single;
 pub mod stop;
+pub mod storage;
 pub mod update;
 pub mod view;
 pub mod worktrees;
