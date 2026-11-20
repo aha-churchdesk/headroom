@@ -22,6 +22,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use crate::last_run::LastRuns;
+
 /// A worktree with something working in it belongs to someone: an agent
 /// session, a shell, an editor.
 pub type Procs = [(String, String)];
@@ -58,6 +60,9 @@ pub struct Worktree {
     pub size: Option<u64>,
     /// The volume its folder is on, once measured.
     pub volume: Option<u64>,
+    /// Unix seconds Claude Code and Codex last worked in it, if known.
+    pub claude_at: Option<u64>,
+    pub codex_at: Option<u64>,
 }
 
 fn uncommitted(n: u32) -> String {
@@ -374,6 +379,14 @@ pub fn scan_repo(repo: &Path, procs: &Procs) -> Option<Repo> {
     })
 }
 
+/// When Claude Code and Codex last worked in each worktree.
+pub fn last_ran(repos: &mut [Repo], runs: &LastRuns) {
+    for w in repos.iter_mut().flat_map(|r| r.worktrees.iter_mut()) {
+        w.claude_at = runs.claude(&w.path);
+        w.codex_at = runs.codex(&w.path);
+    }
+}
+
 pub fn scan(repos: &[String], procs: &Procs) -> Vec<Repo> {
     repos
         .iter()
@@ -589,6 +602,8 @@ pub fn json(repos: &[Repo], wall: u64) -> Value {
                     "in_use": w.in_use,
                     "blocker": w.blocker(),
                     "size": w.size,
+                    "claude_ago_s": w.claude_at.map(|t| wall.saturating_sub(t)),
+                    "codex_ago_s": w.codex_at.map(|t| wall.saturating_sub(t)),
                 })).collect::<Vec<_>>(),
             }))
             .collect::<Vec<_>>()
@@ -661,6 +676,9 @@ impl Tab {
         let tab = self.clone();
         std::thread::spawn(move || {
             let mut found = scan(&repos, &processes());
+            if let Some(home) = std::env::home_dir() {
+                last_ran(&mut found, &LastRuns::read(&home));
+            }
             {
                 let mut s = tab.lock();
                 // Until measured again, a worktree keeps the size it had.
@@ -1270,6 +1288,50 @@ mod tests {
         assert_eq!(w["blocker"], "2 uncommitted files");
         assert_eq!(w["last_commit_ago_s"], 100);
         assert_eq!(w["size"], 4096);
+        assert_eq!(
+            (&w["claude_ago_s"], &w["codex_ago_s"]),
+            (&Value::Null, &Value::Null),
+            "no agent known to have run in it"
+        );
         assert_eq!(json(&[], 0), json!([]));
+    }
+
+    #[test]
+    fn each_worktree_says_when_claude_and_codex_last_worked_in_it() {
+        let home = std::env::temp_dir().join(format!("hr-wt-last-run-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let projects = home.join(".claude/projects");
+        let folder = projects.join(crate::last_run::claude_folder("/r.worktrees/a"));
+        std::fs::create_dir_all(&folder).unwrap();
+        let t = std::fs::File::create(folder.join("s.jsonl")).unwrap();
+        t.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(700))
+            .unwrap();
+        let mut repos = vec![Repo {
+            path: "/r".into(),
+            default: None,
+            prs_checked: true,
+            worktrees: vec![
+                Worktree {
+                    path: "/r.worktrees/a".into(),
+                    ..Worktree::default()
+                },
+                Worktree {
+                    path: "/r.worktrees/b".into(),
+                    ..Worktree::default()
+                },
+            ],
+        }];
+        last_ran(&mut repos, &LastRuns::read(&home));
+        let v = json(&repos, 1_000);
+        let (a, b) = (&v[0]["worktrees"][0], &v[0]["worktrees"][1]);
+        assert_eq!(
+            (&a["claude_ago_s"], &a["codex_ago_s"]),
+            (&json!(300), &Value::Null)
+        );
+        assert_eq!(
+            (&b["claude_ago_s"], &b["codex_ago_s"]),
+            (&Value::Null, &Value::Null)
+        );
+        std::fs::remove_dir_all(&home).unwrap();
     }
 }

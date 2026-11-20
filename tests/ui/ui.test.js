@@ -1910,6 +1910,19 @@ test('each worktree says what it holds on disk, summed per repository and overal
   has(ui.view(), '999 MB · last commit');
 });
 
+test('each worktree says when Claude and Codex last worked in it', () => {
+  ui.setState(worktreesState([appRepo([
+    WT({ claude_ago_s: 7200, codex_ago_s: 3 * 86400 }),
+    WT({ path: '/p/app.worktrees/b', branch: 'b', claude_ago_s: 30 }),
+    WT({ path: '/p/app.worktrees/c', branch: 'c' })])]));
+  ui.click({ act: 'goto', page: 'worktrees' });
+  const v = ui.view();
+  has(v, 'Claude 2 h ago · Codex 3 d ago');
+  has(v, 'Claude just now');
+  eq((v.match(/Codex /g) || []).length, 1, 'only where Codex is known to have run');
+  eq((v.match(/Claude /g) || []).length, 2);
+});
+
 test('sizes still being measured say so, and totals show they are partial', () => {
   ui.setState(worktreesState([appRepo([WT({ size: 2.5 * GB }), WT({ path: '/p/app.worktrees/b', branch: 'b', size: null }),
     WT({ path: '/p/app.worktrees/c', branch: 'c', size: null, missing: true })])], { sizing: true }));

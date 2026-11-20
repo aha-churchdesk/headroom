@@ -1305,6 +1305,8 @@ function renderWorktrees(S){
     const why = [
       x.size != null ? diskSize(x.size) : w.sizing && !x.missing ? "measuring…" : null,
       x.last_commit_ago_s == null ? null : `last commit ${ago(x.last_commit_ago_s)}`,
+      x.claude_ago_s == null ? null : `Claude ${ago(x.claude_ago_s)}`,
+      x.codex_ago_s == null ? null : `Codex ${ago(x.codex_ago_s)}`,
       x.blocker,
       (x.in_use || []).length && !String(x.blocker).startsWith("in use") ? `in use by ${x.in_use.join(", ")}` : null,
       !x.merged && x.remote_gone ? "remote branch deleted" : null,
