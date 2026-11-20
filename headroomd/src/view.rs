@@ -620,12 +620,15 @@ pub fn state(l: &Listing, x: &Extras) -> Value {
 }
 
 /// The menu bar item: glyph fill, glyph colour (`None` = template), title, tooltip.
-/// The glyph fills with memory as `mode` counts it: in lenient mode the
-/// daemon's available memory includes compressed memory while that is
-/// allowed, so the bars match what queued jobs are admitted against.
+/// The glyph fills with memory as the daemon counts it: in lenient mode its
+/// available memory includes compressed memory while that is allowed, so
+/// the bars match what queued jobs are admitted against. Whether it did is
+/// read from the snapshot, which can't lag behind a setting changed
+/// elsewhere; `mode` only words the tooltip when nothing is credited.
 pub fn tray(l: &Listing, mode: MemoryMode) -> (u32, Option<[u8; 3]>, String, String) {
     let s = &l.snapshot;
-    let counted = s.mem_total.saturating_sub(s.mem_available);
+    let credited = s.credited();
+    let counted = s.mem_used - credited;
     let segs = crate::shell::glyph_segments(counted, s.mem_total);
     let ink = match s.pressure {
         Pressure::Normal => None,
@@ -645,19 +648,20 @@ pub fn tray(l: &Listing, mode: MemoryMode) -> (u32, Option<[u8; 3]>, String, Str
         title += " ⏸︎";
     }
     let gb = |b: Bytes| b as f64 / (1u64 << 30) as f64;
-    let memory = match mode {
-        MemoryMode::Strict => format!("{:.1}/{:.0} GB", gb(s.mem_used), gb(s.mem_total)),
-        MemoryMode::Lenient if counted < s.mem_used => format!(
+    let used = format!("{:.1}/{:.0} GB", gb(s.mem_used), gb(s.mem_total));
+    let memory = if credited > 0 {
+        format!(
             "{:.1}/{:.0} GB counted (lenient), {:.1} GB used",
             gb(counted),
             gb(s.mem_total),
             gb(s.mem_used)
-        ),
-        MemoryMode::Lenient => format!(
-            "{:.1}/{:.0} GB (lenient, compressed not counted now)",
-            gb(s.mem_used),
-            gb(s.mem_total)
-        ),
+        )
+    } else if mode == MemoryMode::Lenient && s.mem_compressed > 0 {
+        format!("{used} (lenient, compressed not counted now)")
+    } else if mode == MemoryMode::Lenient {
+        format!("{used} (lenient)")
+    } else {
+        used
     };
     let tip = format!(
         "{} · {memory} · swap {:.1} GB · {n} running · {q} queued",
@@ -1716,7 +1720,8 @@ mod tests {
         assert_eq!(title, "");
     }
 
-    /// 36 GB, 30 GB used of which the daemon counts `counted`.
+    /// 36 GB, 30 GB used (more if `counted` is more), of which the daemon
+    /// counts `counted`.
     fn memory(counted: Bytes) -> Listing {
         Listing {
             running: vec![],
@@ -1724,7 +1729,7 @@ mod tests {
             held: false,
             snapshot: Snapshot {
                 mem_total: 36 * GIB,
-                mem_used: 30 * GIB,
+                mem_used: counted.max(30 * GIB),
                 mem_available: 36 * GIB - counted,
                 mem_compressed: 12 * GIB,
                 ..Snapshot::default()
@@ -1757,6 +1762,27 @@ mod tests {
             tip.contains("30.0/36 GB (lenient, compressed not counted now)"),
             "{tip}"
         );
+    }
+
+    #[test]
+    fn a_lenient_tray_with_nothing_compressed_does_not_blame_swap() {
+        let mut l = memory(30 * GIB);
+        l.snapshot.mem_compressed = 0;
+        let (segs, _, _, tip) = tray(&l, MemoryMode::Lenient);
+        assert_eq!(segs, 3);
+        assert!(tip.contains("30.0/36 GB (lenient) · swap"), "{tip}");
+    }
+
+    #[test]
+    fn the_tray_follows_what_the_daemon_counted_while_the_app_catches_up() {
+        // Switched to lenient elsewhere; the app still has strict.
+        let (segs, _, _, tip) = tray(&memory(18 * GIB), MemoryMode::Strict);
+        assert_eq!(segs, 2);
+        assert!(tip.contains("18.0/36 GB counted (lenient)"), "{tip}");
+        // Switched back to strict elsewhere; the app still has lenient.
+        let (segs, _, _, tip) = tray(&memory(30 * GIB), MemoryMode::Lenient);
+        assert_eq!(segs, 3);
+        assert!(!tip.contains("GB counted"), "{tip}");
     }
 
     #[test]

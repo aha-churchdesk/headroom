@@ -796,7 +796,9 @@ function renderHead(S){
   if (UI.page === "welcome") return '<div class="welcome-brand"><span>Headroom</span><span>Getting started</span></div>';
   const m = S.system;
   const stat = (value, label, tip) => `<div data-tip="${esc(tip)}"><b>${value}</b><span>${label}</span></div>`;
-  const usedPct = Math.min(100, m.mem_used / m.mem_total * 100);
+  // As the queue counts it: lenient counting leaves out compressed memory.
+  const credited = creditedMemory(m);
+  const usedPct = Math.min(100, (m.mem_used - credited) / m.mem_total * 100);
   const reservePct = Math.min(100, S.settings.headroom / m.mem_total * 100);
   const color = { normal:"var(--accent)", warn:"var(--warn)", critical:"var(--bad)" }[m.pressure];
   // One notice per agent, so one can be hidden for good without the other.
@@ -814,7 +816,9 @@ function renderHead(S){
     <div class="row1">
       <span class="lbl">Memory</span>
       <span class="level ${m.pressure}" data-tip="${PRESSURE_TIP[m.pressure]}">${m.pressure.toUpperCase()}</span>
-      <span class="memtxt num">${gb(m.mem_used)} / ${gb(m.mem_total)} GB</span>
+      ${credited
+        ? `<span class="memtxt num" data-tip="${esc(`Counted as used by the lenient memory setting. ${gb(m.mem_used)} GB is in use; ${gb(credited)} GB of it is compressed memory counted as available.`)}">${gb(m.mem_used - credited)} / ${gb(m.mem_total)} GB counted</span>`
+        : `<span class="memtxt num">${gb(m.mem_used)} / ${gb(m.mem_total)} GB</span>`}
       <button class="btn-hold ${S.held ? "on" : ""}" data-act="hold" aria-label="Hold new jobs" aria-pressed="${S.held}"
         title="${S.held ? "Start admitting jobs again" : "Stop starting new jobs; running jobs continue"}">
         ${S.held ? "Held" : "Hold"}</button>
@@ -1622,8 +1626,13 @@ const HOOK_SNIPPET = `"hooks": {
    4 segments filled by memory used, coloured only off-normal
    (template image while normal), title = running·queued.
    ═══════════════════════════════════════════════════════════ */
+/* Memory in use that the daemon counts as available (lenient counting of
+   compressed memory); zero when it counts memory as measured. */
+const creditedMemory = m => Math.max(0, m.mem_used + m.mem_available - m.mem_total);
+
 function trayModel(S){
-  const segs = Math.max(0, Math.min(4, Math.round(S.system.mem_used / S.system.mem_total * 4)));
+  const m = S.system;
+  const segs = Math.max(0, Math.min(4, Math.round((m.mem_used - creditedMemory(m)) / m.mem_total * 4)));
   const frozen = S.running.some(j => j.state === "frozen");
   const n = S.running.length, q = S.queued.length;
   const title = ((n || q) ? `${n}·${q}` : "") + (frozen ? " ❄︎" : "") + (S.held ? " ⏸︎" : "");
