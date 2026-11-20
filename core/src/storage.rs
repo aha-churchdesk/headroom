@@ -36,6 +36,19 @@ pub struct Alarm {
 }
 
 impl Alarm {
+    /// Carry on from what an earlier run warned about, so starting again
+    /// on a disk that hasn't changed is not news.
+    pub fn resume(warned: Option<u8>) -> Self {
+        Self {
+            warned: warned.filter(|t| THRESHOLDS.contains(t)),
+        }
+    }
+
+    /// The highest threshold warned about and not yet re-armed, to keep.
+    pub fn warned(&self) -> Option<u8> {
+        self.warned
+    }
+
     /// Record a reading. Returns the threshold to warn about, if this
     /// reading crossed one not already warned about. A jump past several
     /// warns once, for the highest.
@@ -132,6 +145,36 @@ mod tests {
         assert_eq!(a.check(50.0), None);
         assert_eq!(a.check(70.0), Some(70));
         assert_eq!(a.check(96.0), Some(95));
+    }
+
+    #[test]
+    fn a_restart_on_an_unchanged_disk_does_not_warn_again() {
+        let mut a = Alarm::default();
+        assert_eq!(a.check(82.0), Some(80));
+        let mut again = Alarm::resume(a.warned());
+        assert_eq!(again.check(82.0), None);
+        assert_eq!(
+            again.check(90.0),
+            Some(90),
+            "the next threshold still warns"
+        );
+    }
+
+    #[test]
+    fn a_restart_after_space_was_freed_warns_again_on_the_way_up() {
+        let mut a = Alarm::default();
+        assert_eq!(a.check(82.0), Some(80));
+        assert_eq!(a.check(60.0), None);
+        let mut again = Alarm::resume(a.warned());
+        assert_eq!(again.warned(), None);
+        assert_eq!(again.check(81.0), Some(80));
+    }
+
+    #[test]
+    fn a_kept_threshold_that_is_not_one_is_ignored() {
+        assert_eq!(Alarm::resume(Some(42)).warned(), None);
+        assert_eq!(Alarm::resume(None).warned(), None);
+        assert_eq!(Alarm::resume(Some(95)).warned(), Some(95));
     }
 
     #[test]

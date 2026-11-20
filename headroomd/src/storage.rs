@@ -15,12 +15,18 @@ pub struct Watch {
 
 impl Watch {
     /// Watch the volume `path` is on: the home folder, where repositories
-    /// and their builds live.
-    pub fn new(path: PathBuf) -> Self {
+    /// and their builds live. `warned` is what an earlier run last warned
+    /// about (`warned()`), so a restart doesn't repeat it.
+    pub fn new(path: PathBuf, warned: Option<u8>) -> Self {
         Self {
             path,
-            alarm: Alarm::default(),
+            alarm: Alarm::resume(warned),
         }
+    }
+
+    /// The threshold last warned about and not yet re-armed, to keep.
+    pub fn warned(&self) -> Option<u8> {
+        self.alarm.warned()
     }
 
     /// Read the disk. The notice to post, as (title, body), if this reading
@@ -64,18 +70,21 @@ mod tests {
     fn the_first_reading_warns_only_if_the_disk_is_past_the_first_threshold() {
         let path = std::env::temp_dir();
         let d = worktrees::disk(&path).unwrap();
-        let mut w = Watch::new(path);
+        let mut w = Watch::new(path.clone(), None);
         let notice = w.check();
         assert_eq!(notice.is_some(), used_pct(d.total, d.free) >= 70.0);
         if let Some((title, _)) = notice {
             assert!(title.starts_with("Disk is "), "{title}");
         }
         assert_eq!(w.check(), None, "the same disk a second later is not news");
+        let mut restarted = Watch::new(path, w.warned());
+        assert_eq!(restarted.check(), None, "nor after a restart");
     }
 
     #[test]
     fn a_disk_that_cannot_be_read_is_skipped() {
-        let mut w = Watch::new("/nonexistent/folder".into());
+        let mut w = Watch::new("/nonexistent/folder".into(), Some(80));
         assert_eq!(w.check(), None);
+        assert_eq!(w.warned(), Some(80), "what was kept stays kept");
     }
 }

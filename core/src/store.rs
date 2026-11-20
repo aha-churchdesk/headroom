@@ -33,6 +33,9 @@ pub struct UiPreferences {
     /// queue, as `agent:status` ("codex:not_installed"). A different
     /// problem with the same agent warns again.
     pub hidden_hook_notices: BTreeSet<String>,
+    /// The disk-full threshold last warned about and not yet re-armed, so
+    /// starting the app again on an unchanged disk doesn't repeat it.
+    pub disk_warned: Option<u8>,
 }
 
 unsafe extern "C" {
@@ -299,6 +302,7 @@ mod tests {
         let preferences = UiPreferences {
             setup_complete: true,
             hidden_hook_notices: BTreeSet::from(["codex:not_installed".to_string()]),
+            disk_warned: Some(80),
         };
         s.save_ui_preferences(&preferences).unwrap();
         for name in [
@@ -344,6 +348,7 @@ mod tests {
         let preferences = UiPreferences {
             setup_complete: true,
             hidden_hook_notices: BTreeSet::from(["claude:stale".to_string()]),
+            disk_warned: Some(90),
         };
         s.save_ui_preferences(&preferences).unwrap();
         assert_eq!(
@@ -372,6 +377,7 @@ mod tests {
         let p = s.load_ui_preferences();
         assert!(p.setup_complete);
         assert!(p.hidden_hook_notices.is_empty());
+        assert_eq!(p.disk_warned, None);
         assert!(!s.root().join("ui.json.corrupt").exists());
     }
 

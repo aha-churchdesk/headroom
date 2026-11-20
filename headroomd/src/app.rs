@@ -327,6 +327,24 @@ impl App {
         self.listing.as_ref()
     }
 
+    /// The disk-full threshold an earlier run warned about.
+    pub fn disk_warned(&self) -> Option<u8> {
+        self.ui_preferences.disk_warned
+    }
+
+    /// Keep what the disk watch has warned about, for the next start.
+    pub fn keep_disk_warned(&mut self, warned: Option<u8>) {
+        if self.ui_preferences.disk_warned == warned {
+            return;
+        }
+        let mut preferences = self.ui_preferences.clone();
+        preferences.disk_warned = warned;
+        match self.store.save_ui_preferences(&preferences) {
+            Ok(()) => self.ui_preferences = preferences,
+            Err(e) => self.last_error = Some(format!("disk notice: {e}")),
+        }
+    }
+
     /// How memory is counted, for the menu bar.
     pub fn memory_mode(&self) -> MemoryMode {
         self.cfg.memory_mode
@@ -795,6 +813,51 @@ mod tests {
         }
         assert!(app.ui_preferences.hidden_hook_notices.is_empty());
         assert!(!app.store.root().join("ui.json").exists());
+    }
+
+    #[test]
+    fn the_disk_warning_kept_survives_a_restart_and_is_written_only_on_change() {
+        let root = dir("disk-warned");
+        let open = || {
+            App::new(
+                Store::at(root.join("data")).unwrap(),
+                root.join("home"),
+                "h".into(),
+                "d".into(),
+            )
+        };
+        let mut app = open();
+        assert_eq!(app.disk_warned(), None);
+        app.keep_disk_warned(None);
+        assert!(
+            !app.store.root().join("ui.json").exists(),
+            "nothing to keep"
+        );
+        app.keep_disk_warned(Some(80));
+        assert_eq!(open().disk_warned(), Some(80));
+        app.keep_disk_warned(None);
+        assert_eq!(open().disk_warned(), None, "re-armed is kept too");
+    }
+
+    #[test]
+    fn a_disk_warning_that_cannot_be_kept_is_reported_not_lost_in_memory() {
+        let root = dir("disk-warned-unsaved");
+        let mut app = App::new(
+            Store::at(root.join("data")).unwrap(),
+            root.join("home"),
+            "h".into(),
+            "d".into(),
+        );
+        fs::create_dir(app.store.root().join("ui.json")).unwrap();
+        app.keep_disk_warned(Some(90));
+        assert_eq!(app.disk_warned(), None);
+        assert!(
+            app.last_error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("disk notice: ")),
+            "{:?}",
+            app.last_error
+        );
     }
 
     #[test]

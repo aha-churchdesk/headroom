@@ -320,7 +320,7 @@ fn main() -> wry::Result<()> {
     let mut next_settings = Instant::now();
     let mut next_hooks = Instant::now();
     let mut next_disk = Instant::now();
-    let mut disk = storage::Watch::new(home());
+    let mut disk = storage::Watch::new(home(), app.borrow().disk_warned());
     let mut daemon_thread = Some(daemon_thread);
 
     event_loop.run(move |event, _, control_flow| {
@@ -418,6 +418,7 @@ fn main() -> wry::Result<()> {
             {
                 eprintln!("headroomd: disk notice: {e}");
             }
+            app.borrow_mut().keep_disk_warned(disk.warned());
         }
         if now >= next_list {
             next_list = now + LIST_EVERY;
