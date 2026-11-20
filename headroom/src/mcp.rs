@@ -115,6 +115,9 @@ fn status(l: &Listing) -> Value {
         "memory_used_gb": gb(s.mem_used),
         "memory_total_gb": gb(s.mem_total),
         "memory_available_gb": gb(s.mem_available),
+        // Lenient memory counting: compressed memory, in use, that the
+        // queue counts as available. Zero otherwise.
+        "memory_available_compressed_gb": gb(s.credited()),
         "swap_used_gb": gb(s.swap_used),
         "running": l.running.len(),
         "queued": l.queued.len(),
@@ -359,6 +362,38 @@ pub fn main() -> i32 {
 mod tests {
     use super::*;
     use headroom_core::profile::{Profiles, Run};
+
+    fn status_of(snapshot: headroom_core::model::Snapshot) -> Value {
+        status(&Listing {
+            now: 0,
+            snapshot,
+            held: false,
+            running: vec![],
+            queued: vec![],
+            blocked: None,
+            history: vec![],
+        })
+    }
+
+    #[test]
+    fn status_says_how_much_available_memory_is_compressed() {
+        use headroom_core::model::Snapshot;
+        let lenient = status_of(Snapshot {
+            mem_total: 36 * GIB,
+            mem_used: 30 * GIB,
+            mem_available: 18 * GIB,
+            ..Snapshot::default()
+        });
+        assert_eq!(lenient["memory_available_gb"], 18.0);
+        assert_eq!(lenient["memory_available_compressed_gb"], 12.0);
+        let strict = status_of(Snapshot {
+            mem_total: 36 * GIB,
+            mem_used: 30 * GIB,
+            mem_available: 6 * GIB,
+            ..Snapshot::default()
+        });
+        assert_eq!(strict["memory_available_compressed_gb"], 0.0);
+    }
 
     fn store(name: &str) -> (Store, PathBuf) {
         let root = std::env::temp_dir().join(format!("hr-mcp-{name}-{}", std::process::id()));

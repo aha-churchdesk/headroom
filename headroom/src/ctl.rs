@@ -29,8 +29,14 @@ fn dur(ms: Millis) -> String {
 
 pub fn render(l: &Listing) -> String {
     let m = &l.snapshot;
+    // In lenient mode, available includes compressed memory that is also
+    // in use; say so, or used and available add up to more than the Mac.
+    let credited = match m.credited() {
+        0 => String::new(),
+        c => format!(" (incl. {} GB compressed)", gb(c)),
+    };
     let mut out = format!(
-        "memory   {} / {} GB used · {} GB available · swap {} GB · pressure {}\n",
+        "memory   {} / {} GB used · {} GB available{credited} · swap {} GB · pressure {}\n",
         gb(m.mem_used),
         gb(m.mem_total),
         gb(m.mem_available),
@@ -191,5 +197,30 @@ mod tests {
         assert!(s.contains("2m14") && s.contains("[pinned]"), "{s}");
         assert!(s.contains("queued   1 · held by you"), "{s}");
         assert!(s.contains("(new)  waited 2m05"), "{s}");
+        assert!(!s.contains("compressed"), "{s}");
+    }
+
+    #[test]
+    fn credited_compressed_memory_is_named_in_the_memory_line() {
+        let l = Listing {
+            now: 0,
+            snapshot: Snapshot {
+                mem_total: 36 * GIB,
+                mem_used: 30 * GIB,
+                mem_available: 18 * GIB,
+                mem_compressed: 12 * GIB,
+                ..Snapshot::default()
+            },
+            held: false,
+            running: vec![],
+            queued: vec![],
+            blocked: None,
+            history: vec![],
+        };
+        let s = render(&l);
+        assert!(
+            s.contains("30.0 / 36.0 GB used · 18.0 GB available (incl. 12.0 GB compressed) · swap"),
+            "{s}"
+        );
     }
 }

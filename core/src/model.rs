@@ -30,7 +30,9 @@ pub struct Snapshot {
     pub mem_total: Bytes,
     pub mem_used: Bytes,
     pub mem_available: Bytes,
-    /// Physical memory the compressor occupies. Part of `mem_used`.
+    /// Physical memory the compressor occupies. Part of `mem_used`. A
+    /// daemon from before it was measured sends none.
+    #[serde(default)]
     pub mem_compressed: Bytes,
     pub swap_used: Bytes,
     pub load1: f64,
@@ -38,6 +40,15 @@ pub struct Snapshot {
     /// disables the CPU rule rather than blocking everything.
     pub cores: u32,
     pub cpu_pct: f64,
+}
+
+impl Snapshot {
+    /// Memory in use that still counts as available: compressed memory,
+    /// in lenient mode while that is allowed. Zero otherwise, since the
+    /// sampler's available memory is exactly what isn't used.
+    pub fn credited(&self) -> Bytes {
+        (self.mem_used + self.mem_available).saturating_sub(self.mem_total)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,6 +311,28 @@ impl HistoryEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_snapshot_from_a_daemon_without_compressed_memory_still_reads() {
+        let old = r#"{"pressure":"normal","mem_total":10,"mem_used":4,"mem_available":6,
+            "swap_used":0,"load1":0.0,"cores":8,"cpu_pct":0.0}"#;
+        let s: Snapshot = serde_json::from_str(old).unwrap();
+        assert_eq!((s.mem_compressed, s.mem_available), (0, 6));
+    }
+
+    #[test]
+    fn credited_memory_is_what_is_counted_available_beyond_what_is_free() {
+        let s = |used, available| Snapshot {
+            mem_total: 36,
+            mem_used: used,
+            mem_available: available,
+            ..Snapshot::default()
+        };
+        assert_eq!(s(30, 6).credited(), 0, "as measured");
+        assert_eq!(s(30, 18).credited(), 12, "compressed counted as free");
+        assert_eq!(s(0, 0).credited(), 0, "no reading yet");
+        assert_eq!(Snapshot::default().credited(), 0);
+    }
 
     #[test]
     fn worker_metadata_cannot_enable_tuning_in_an_older_daemon() {
