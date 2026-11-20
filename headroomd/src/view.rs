@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use headroom_core::classify::{command_key, is_exact_key};
-use headroom_core::config::Config;
+use headroom_core::config::{Config, MemoryMode};
 use headroom_core::model::{Bytes, HistoryEntry, Job, JobState, Outcome, Pressure};
 use headroom_core::profile::{ESTIMATE_SAMPLES, Profile, Profiles, Run};
 use headroom_core::protocol::Listing;
@@ -620,9 +620,13 @@ pub fn state(l: &Listing, x: &Extras) -> Value {
 }
 
 /// The menu bar item: glyph fill, glyph colour (`None` = template), title, tooltip.
-pub fn tray(l: &Listing) -> (u32, Option<[u8; 3]>, String, String) {
+/// The glyph fills with memory as `mode` counts it: in lenient mode the
+/// daemon's available memory includes compressed memory while that is
+/// allowed, so the bars match what queued jobs are admitted against.
+pub fn tray(l: &Listing, mode: MemoryMode) -> (u32, Option<[u8; 3]>, String, String) {
     let s = &l.snapshot;
-    let segs = crate::shell::glyph_segments(s.mem_used, s.mem_total);
+    let counted = s.mem_total.saturating_sub(s.mem_available);
+    let segs = crate::shell::glyph_segments(counted, s.mem_total);
     let ink = match s.pressure {
         Pressure::Normal => None,
         Pressure::Warn => Some([245, 158, 11]),
@@ -641,15 +645,27 @@ pub fn tray(l: &Listing) -> (u32, Option<[u8; 3]>, String, String) {
         title += " ⏸︎";
     }
     let gb = |b: Bytes| b as f64 / (1u64 << 30) as f64;
+    let memory = match mode {
+        MemoryMode::Strict => format!("{:.1}/{:.0} GB", gb(s.mem_used), gb(s.mem_total)),
+        MemoryMode::Lenient if counted < s.mem_used => format!(
+            "{:.1}/{:.0} GB counted (lenient), {:.1} GB used",
+            gb(counted),
+            gb(s.mem_total),
+            gb(s.mem_used)
+        ),
+        MemoryMode::Lenient => format!(
+            "{:.1}/{:.0} GB (lenient, compressed not counted now)",
+            gb(s.mem_used),
+            gb(s.mem_total)
+        ),
+    };
     let tip = format!(
-        "{} · {:.1}/{:.0} GB · swap {:.1} GB · {n} running · {q} queued",
+        "{} · {memory} · swap {:.1} GB · {n} running · {q} queued",
         match s.pressure {
             Pressure::Normal => "Normal",
             Pressure::Warn => "Warn",
             Pressure::Critical => "Critical",
         },
-        gb(s.mem_used),
-        gb(s.mem_total),
         gb(s.swap_used)
     );
     (segs, ink, title.trim().to_string(), tip)
@@ -1679,7 +1695,7 @@ mod tests {
 
     #[test]
     fn tray_shows_counts_freeze_hold_and_pressure_colour() {
-        let (segs, ink, title, tip) = tray(&listing());
+        let (segs, ink, title, tip) = tray(&listing(), MemoryMode::Strict);
         assert_eq!(segs, 4);
         assert_eq!(ink, Some([239, 68, 68]));
         assert_eq!(title, "1·1 ❄︎ ⏸︎");
@@ -1690,10 +1706,69 @@ mod tests {
             held: false,
             ..listing()
         };
-        let (_, _, title, _) = tray(&Listing {
-            snapshot: Snapshot::default(),
-            ..idle
-        });
+        let (_, _, title, _) = tray(
+            &Listing {
+                snapshot: Snapshot::default(),
+                ..idle
+            },
+            MemoryMode::Strict,
+        );
         assert_eq!(title, "");
+    }
+
+    /// 36 GB, 30 GB used of which the daemon counts `counted`.
+    fn memory(counted: Bytes) -> Listing {
+        Listing {
+            running: vec![],
+            queued: vec![],
+            held: false,
+            snapshot: Snapshot {
+                mem_total: 36 * GIB,
+                mem_used: 30 * GIB,
+                mem_available: 36 * GIB - counted,
+                mem_compressed: 12 * GIB,
+                ..Snapshot::default()
+            },
+            ..listing()
+        }
+    }
+
+    #[test]
+    fn the_tray_fills_with_memory_as_the_strategy_counts_it() {
+        let (segs, ink, _, tip) = tray(&memory(30 * GIB), MemoryMode::Strict);
+        assert_eq!((segs, ink), (3, None));
+        assert!(tip.starts_with("Normal · 30.0/36 GB · swap"), "{tip}");
+
+        // Lenient with the compressed 12 GB credited: 18 of 36 GB counted.
+        let (segs, _, _, tip) = tray(&memory(18 * GIB), MemoryMode::Lenient);
+        assert_eq!(segs, 2);
+        assert!(
+            tip.contains("18.0/36 GB counted (lenient), 30.0 GB used"),
+            "{tip}"
+        );
+    }
+
+    #[test]
+    fn a_lenient_tray_without_the_credit_says_so_and_fills_as_strict() {
+        // Swap grew or pressure rose: the daemon counts everything again.
+        let (segs, _, _, tip) = tray(&memory(30 * GIB), MemoryMode::Lenient);
+        assert_eq!(segs, 3);
+        assert!(
+            tip.contains("30.0/36 GB (lenient, compressed not counted now)"),
+            "{tip}"
+        );
+    }
+
+    #[test]
+    fn an_empty_or_full_machine_fills_no_bars_or_all_of_them() {
+        let unknown = Listing {
+            snapshot: Snapshot::default(),
+            ..memory(0)
+        };
+        for mode in [MemoryMode::Strict, MemoryMode::Lenient] {
+            assert_eq!(tray(&unknown, mode).0, 0, "{mode:?}: no reading yet");
+            assert_eq!(tray(&memory(36 * GIB), mode).0, 4, "{mode:?}");
+            assert_eq!(tray(&memory(0), mode).0, 0, "{mode:?}");
+        }
     }
 }

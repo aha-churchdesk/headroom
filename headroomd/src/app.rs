@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use headroom_core::config::Config;
+use headroom_core::config::{Config, MemoryMode};
 use headroom_core::hookio::Agent;
 use headroom_core::hooksettings::{self, Scope, Status};
 use headroom_core::profile::Profiles;
@@ -325,6 +325,11 @@ impl App {
 
     pub fn listing(&self) -> Option<&Listing> {
         self.listing.as_ref()
+    }
+
+    /// How memory is counted, for the menu bar.
+    pub fn memory_mode(&self) -> MemoryMode {
+        self.cfg.memory_mode
     }
 
     /// The popover's state, once the daemon has answered at least once.

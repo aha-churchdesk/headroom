@@ -298,7 +298,7 @@ fn main() -> wry::Result<()> {
         move || {
             let a = app.borrow();
             let Some(l) = a.listing() else { return };
-            let (segs, ink, title, tip) = view::tray(l);
+            let (segs, ink, title, tip) = view::tray(l, a.memory_mode());
             if last_icon != Some((segs, ink)) {
                 let icon = Some(glyph(segs, ink));
                 let _ = if ink.is_none() {
