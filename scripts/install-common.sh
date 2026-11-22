@@ -162,6 +162,14 @@ hr_validate_bundle() {
   codesign --verify --deep --strict "$app" || return 1
 }
 
+# Whether $1 is this app, or nothing yet: an unrelated app can be installed
+# at the same /Applications/Headroom.app, and that one is never replaced or
+# removed. Read with PlistBuddy, which also reads binary plists.
+hr_is_ours() {
+  [ -e "$1" ] || return 0
+  [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$1/Contents/Info.plist" 2>/dev/null)" = dev.headroom ]
+}
+
 hr_bundle_executable() {
   /usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$1"
 }
@@ -202,6 +210,7 @@ hr_install_bundle() (
   trap 'exit 130' INT
   trap 'exit 143' HUP TERM
   [ ! -L "$HR_APP" ] || { hr_error "refusing to replace a symlink: $HR_APP"; exit 1; }
+  hr_is_ours "$HR_APP" || { hr_error "$HR_APP is another app, not Headroom; move it away first"; exit 1; }
   hr_validate_bundle "$source" || exit 1
   stage=$(mktemp -d "$(dirname "$HR_APP")/.headroom-stage.XXXXXX") || exit 1
   cp -R "$source" "$stage/Headroom.app" || exit 1

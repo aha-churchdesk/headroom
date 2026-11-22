@@ -44,7 +44,11 @@ if [ $UNINSTALL -eq 1 ]; then
   # pointing at a missing binary would fail on every shell command.
   if [ -x "$CLI" ]; then "$CLI" hook uninstall; fi
   ./scripts/login-item.sh uninstall >/dev/null
-  rm -rf "$APP"
+  if hr_is_ours "$APP"; then
+    rm -rf "$APP"
+  else
+    echo "left $APP: it is another app, not Headroom"
+  fi
   # Only our own link: never a headroom that something else put there.
   if [ -L "$LINK" ] && [ "$(readlink "$LINK")" = "$CLI" ]; then rm "$LINK"; fi
   echo "removed $APP and $LINK"

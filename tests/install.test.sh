@@ -70,6 +70,9 @@ open() {
   simulate_start open
 }
 
+info_plist() {
+  printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>%s</string><key>CFBundleExecutable</key><string>headroomd</string></dict></plist>\n' "$1"
+}
 fixture() {
   TEST_WORK="$ROOT/$1"
   export TEST_WORK
@@ -77,7 +80,7 @@ fixture() {
   HR_PLIST="$TEST_WORK/user/dev.headroom.plist"
   mkdir -p "$HR_APP/Contents/MacOS" "$TEST_WORK/user"
   printf 'old\n' > "$HR_APP/version"
-  printf '<plist/>\n' > "$HR_APP/Contents/Info.plist"
+  info_plist dev.headroom > "$HR_APP/Contents/Info.plist"
   cat > "$HR_APP/Contents/MacOS/headroom" <<'CLI'
 #!/bin/bash
 if [ "$(cat "$TEST_WORK/apps/Headroom.app/version")" = new ]; then
@@ -128,6 +131,11 @@ unknown() {
 unreachable() {
   touch "$TEST_WORK/list-fail"
   expect_failure; assert_old; assert_no_signal; assert_clean
+}
+foreign_app() {
+  info_plist com.example.headroom > "$HR_APP/Contents/Info.plist"
+  expect_failure; assert_old; assert_no_signal; assert_clean
+  grep -q 'is another app, not Headroom' "$TEST_WORK/output" || fail 'no reason given'
 }
 custom_home() {
   export HEADROOM_HOME="$TEST_WORK/other-daemon"
@@ -306,6 +314,6 @@ missing_rustc() { check_build_toolchain rustc; }
 broken_toolchain() { check_build_toolchain broken_toolchain; }
 mise_toolchain() { check_build_toolchain mise_toolchain; }
 working_toolchain() { check_build_toolchain working_toolchain; }
-for name in busy queued unknown unreachable custom_home process_failure near_matches delayed_exit timeout stage_failure sign_failure rollback restart_rollback registered registered_fallback startup_absent startup_unknown startup_busy_rollback startup_busy_healthy relative_bundle missing_cargo missing_rustc broken_toolchain mise_toolchain working_toolchain; do
+for name in busy queued unknown unreachable foreign_app custom_home process_failure near_matches delayed_exit timeout stage_failure sign_failure rollback restart_rollback registered registered_fallback startup_absent startup_unknown startup_busy_rollback startup_busy_healthy relative_bundle missing_cargo missing_rustc broken_toolchain mise_toolchain working_toolchain; do
   run_case "$name" "$name"
 done
