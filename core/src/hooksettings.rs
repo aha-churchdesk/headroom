@@ -306,16 +306,37 @@ pub fn write_atomic(path: &Path, content: &str, previous: Option<&str>) -> io::R
     if let Some(prev) = previous {
         let mut bak = path.as_os_str().to_owned();
         bak.push(".headroom-bak");
-        fs::write(PathBuf::from(bak), prev)?;
+        write_new(&PathBuf::from(bak), prev)?;
     }
+    // Unique per writer, so two installs at once don't share one.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".headroom-tmp");
+    tmp.push(format!(
+        ".headroom-tmp-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     let tmp = PathBuf::from(tmp);
-    fs::write(&tmp, content)?;
+    write_new(&tmp, content)?;
     if let Some(m) = mode {
         fs::set_permissions(&tmp, m)?;
     }
     fs::rename(&tmp, path)
+}
+
+/// Write `content` as a new file at `path`, replacing whatever is there
+/// without following it: a project's checkout could hold a symlink at
+/// that name, and writing through it would overwrite the file it points to.
+fn write_new(path: &Path, content: &str) -> io::Result<()> {
+    use std::io::Write;
+    if fs::symlink_metadata(path).is_ok() {
+        fs::remove_file(path)?;
+    }
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    f.write_all(content.as_bytes())
 }
 
 pub fn status(agent: Agent, path: &Path, exe: &str) -> Result<Status, String> {
@@ -1240,7 +1261,30 @@ mod tests {
 
         let again = install(Agent::Claude, &path, EXE, false).unwrap();
         assert_eq!(again.change, Change::Unchanged);
-        assert!(!d.join("settings.json.headroom-tmp").exists());
+        let leftovers: Vec<_> = fs::read_dir(&d)
+            .unwrap()
+            .flatten()
+            .filter(|f| f.file_name().to_string_lossy().contains("headroom-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    #[test]
+    fn a_symlink_where_the_backup_goes_is_replaced_not_written_through() {
+        let d = tmpdir("symlink-bak");
+        let victim = d.join("victim.txt");
+        fs::write(&victim, "keep me").unwrap();
+        let path = d.join("settings.json");
+        let original = "{}\n";
+        fs::write(&path, original).unwrap();
+        std::os::unix::fs::symlink(&victim, d.join("settings.json.headroom-bak")).unwrap();
+
+        install(Agent::Claude, &path, EXE, false).unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep me");
+        let bak = d.join("settings.json.headroom-bak");
+        assert!(!fs::symlink_metadata(&bak).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_to_string(&bak).unwrap(), original);
+        assert_eq!(status(Agent::Claude, &path, EXE), Ok(Status::Installed));
     }
 
     #[test]
