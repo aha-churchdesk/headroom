@@ -153,6 +153,12 @@ mod tests {
         drop(server);
         let mut bytes = vec![];
         client.read_to_end(&mut bytes).unwrap();
+        // The client sees the close as the reader thread is still letting
+        // go of its connection: wait for that, briefly.
+        let until = std::time::Instant::now() + Duration::from_secs(2);
+        while !conns.lock().unwrap().is_empty() && std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         assert!(conns.lock().unwrap().is_empty());
         assert!(UnixStream::connect(&socket).is_err(), "listener was closed");
         assert!(matches!(

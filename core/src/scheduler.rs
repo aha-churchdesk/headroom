@@ -260,6 +260,11 @@ impl Scheduler {
             return vec![];
         };
         let e = self.jobs.get_mut(&id).expect("by_conn");
+        // Only a granted job has a process group to look after; a wrapper
+        // that says otherwise is out of step, and its group isn't ours.
+        if e.job.state == JobState::Queued {
+            return vec![];
+        }
         e.job.pgid = Some(pgid);
         // Killed between grant and start: the wrapper may have spawned anyway.
         if e.fate.is_some() {
@@ -280,6 +285,12 @@ impl Scheduler {
         let Some(id) = self.by_conn(conn) else {
             return vec![];
         };
+        // A job still waiting hasn't run, so it can't have exited: an out of
+        // step wrapper. It stays queued until its connection closes, rather
+        // than leaving its place in the queue pointing at nothing.
+        if self.jobs[&id].job.state == JobState::Queued {
+            return vec![];
+        }
         let mut e = self.jobs.remove(&id).expect("by_conn");
         let mut fx = vec![];
         // The wrapper reports its first child's exit, not the death of all
@@ -2469,6 +2480,30 @@ mod tests {
         s.disconnected(2, 0, 0);
         // 200 is gone from the jobs but still owed a SIGKILL check.
         assert_eq!(s.pgids(), vec![100, 200]);
+    }
+
+    #[test]
+    fn an_exit_reported_while_still_queued_leaves_the_queue_whole() {
+        let mut s = sched(4);
+        s.tick(snap(4), &HashMap::new(), 0);
+        s.enqueue(1, spec("a"), 0);
+        s.started(1, 100);
+        s.enqueue(2, spec("b"), 0);
+        assert_eq!(s.list().queued.len(), 1, "b waits behind a");
+        assert!(s.exited(2, Some(0), None, 10, 0).is_empty());
+        assert!(s.started(2, 4242).is_empty());
+        // The next settle used to look up the removed job and panic.
+        s.tick(snap(4), &HashMap::new(), 20);
+        let l = s.list();
+        assert_eq!(l.queued.len(), 1);
+        assert_eq!(l.queued[0].pgid, None, "its group was never taken on");
+        // When its connection goes, it goes without a kill.
+        let fx = s.disconnected(2, 30, 0);
+        assert!(
+            !fx.iter().any(|e| matches!(e, Effect::Signal { .. })),
+            "{fx:?}"
+        );
+        assert!(s.list().queued.is_empty());
     }
 
     /// 4 GB available as measured, plus 6 GB in the compressor.
