@@ -570,7 +570,7 @@ function reasonText(r){
   switch (r.kind){
     case "memory":   return `next needs ${gb(r.need)} GB, ${gb(r.free)} GB free`;
     case "pressure": return `memory pressure ${r.level.toUpperCase()}`;
-    case "cpu":      return `CPU busy, load ${r.load.toFixed(0)} / ${r.cores} cores`;
+    case "cpu":      return `CPU busy, ${r.busy_pct.toFixed(0)}% in use`;
     case "held":     return "held by you";
     default:         return "";
   }
@@ -2022,7 +2022,7 @@ const MOCK = {
     hooks:{ claude:"installed", codex:"needs_review", pi:"not_installed" },
     system:{ pressure:"normal", mem_total:G(36), mem_used:G(20.3), mem_available:G(15.7), swap_used:G(0), cpu_pct:97 },
     running:[J.vitest()], queued:[J.build()],
-    queue_reason:{ kind:"cpu", load:16, cores:10 } }) },
+    queue_reason:{ kind:"cpu", busy_pct:95 } }) },
 };
 
 let CURRENT = new URLSearchParams(location.search).get("state");

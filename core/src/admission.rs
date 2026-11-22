@@ -27,7 +27,7 @@ use crate::model::{Bytes, Job, JobId, JobState, Millis, Pressure, Snapshot};
 pub enum Blocked {
     Memory { need: Bytes, free: Bytes },
     Pressure { level: Pressure },
-    Cpu { load: f64, cores: u32 },
+    Cpu { busy_pct: f64 },
     Held,
 }
 
@@ -41,7 +41,7 @@ impl Blocked {
             Blocked::Pressure { level } => {
                 format!("memory pressure {}", format!("{level:?}").to_uppercase())
             }
-            Blocked::Cpu { load, cores } => format!("CPU busy, load {load:.0} / {cores} cores"),
+            Blocked::Cpu { busy_pct } => format!("CPU busy, {busy_pct:.0}% in use"),
             Blocked::Held => "held by you".to_string(),
         }
     }
@@ -138,10 +138,10 @@ pub fn decide(
         return d;
     }
     let mut growth = pending_growth(running);
-    // Jobs admitted this round haven't reached the load average yet; count
-    // each as a busy core so one round can't overshoot.
-    let mut load = snap.load1;
-    let cpu_limit = snap.cores as f64 * cfg.cpu_factor;
+    // Jobs admitted this round haven't shown up in the CPU reading yet;
+    // count each as one busy core so one round can't overshoot.
+    let mut busy = snap.cpu_pct;
+    let core_pct = 100.0 / f64::from(snap.cores.max(1));
 
     let mut admitted: Vec<(Option<u64>, Bytes)> = Vec::new();
     let mut waiting_head: Option<(usize, Bytes)> = None;
@@ -176,18 +176,15 @@ pub fn decide(
             waiting_head = Some((i, free));
             break;
         }
-        let cpu_ok = idle || job.low() || snap.cores == 0 || load < cpu_limit;
+        let cpu_ok = idle || job.low() || snap.cores == 0 || busy < cfg.cpu_busy_pct;
         if !cpu_ok {
-            d.blocked = Some(Blocked::Cpu {
-                load,
-                cores: snap.cores,
-            });
+            d.blocked = Some(Blocked::Cpu { busy_pct: busy });
             break;
         }
         d.admit.push(job.id);
         growth += job.estimate;
         admitted.push((job.median_ms, job.estimate));
-        load += 1.0;
+        busy += core_pct;
     }
 
     let Some((i, mut free)) = waiting_head else {
@@ -207,7 +204,7 @@ pub fn decide(
         cfg.backfill_skips.saturating_sub(head.skipped) as usize
     };
     for job in &queue[i + 1..] {
-        let cpu_ok = job.low() || snap.cores == 0 || load < cpu_limit;
+        let cpu_ok = job.low() || snap.cores == 0 || busy < cfg.cpu_busy_pct;
         if job.estimate > free || !cpu_ok {
             continue;
         }
@@ -231,7 +228,7 @@ pub fn decide(
         }
         d.admit.push(job.id);
         free -= job.estimate;
-        load += 1.0;
+        busy += core_pct;
     }
     if !d.backfilled.is_empty() {
         d.skipped = Some(head.id);
@@ -577,13 +574,13 @@ mod tests {
                 .admit
                 .is_empty()
         );
-        s.load1 = s.cores as f64 * cfg.cpu_factor;
+        s.cpu_pct = cfg.cpu_busy_pct;
         assert!(
             decide(&s, &[&r], &[&head, &later], false, &cfg, 0)
                 .admit
                 .is_empty()
         );
-        s.load1 -= 1.0;
+        s.cpu_pct -= 10.0; // one of the 10 cores
         let another = job(3, 1.0);
         assert_eq!(
             decide(&s, &[&r], &[&head, &later, &another], false, &cfg, 0).admit,
@@ -599,7 +596,7 @@ mod tests {
         // A CPU-blocked pinned head is never passed by this memory-only path.
         let mut pinned = head;
         pinned.pinned = true;
-        s.load1 += 1.0;
+        s.cpu_pct += 10.0;
         assert!(
             decide(&s, &[&r], &[&pinned, &low], false, &cfg, 0)
                 .admit
@@ -829,28 +826,50 @@ mod tests {
     #[test]
     fn cpu_saturation_holds_normal_jobs_but_not_low_ones() {
         let s = Snapshot {
-            load1: 16.0,
+            cpu_pct: 95.0,
             ..snap(30.0)
         };
         let busy = [running(9, 0.0, 0.0)];
         let d = run(&s, &busy, &[job(1, 0.1)], false);
-        assert_eq!(
-            d.blocked,
-            Some(Blocked::Cpu {
-                load: 16.0,
-                cores: 10
-            })
-        );
+        assert_eq!(d.blocked, Some(Blocked::Cpu { busy_pct: 95.0 }));
         let mut low = job(2, 0.1);
         low.spec.low = true;
         assert_eq!(run(&s, &busy, &[low], false).admit, vec![2]);
     }
 
     #[test]
-    fn one_round_cannot_overshoot_the_cpu() {
-        // limit 15, load 13: two admissions, then the third sees load 15.
+    fn a_high_load_average_on_an_idle_cpu_does_not_hold_the_queue() {
+        // Threads waiting on disk (swap, Spotlight) count toward the load
+        // average without using the CPU.
         let s = Snapshot {
-            load1: 13.0,
+            load1: 99.0,
+            cores: 15,
+            cpu_pct: 46.0,
+            ..snap(30.0)
+        };
+        assert_eq!(
+            run(&s, &[running(9, 0.0, 0.0)], &[job(1, 0.1)], false).admit,
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn the_cpu_limit_holds_from_exactly_its_value() {
+        let at = |pct| Snapshot {
+            cpu_pct: pct,
+            ..snap(30.0)
+        };
+        let r = [running(9, 0.0, 0.0)];
+        assert!(run(&at(90.0), &r, &[job(1, 0.1)], false).admit.is_empty());
+        assert_eq!(run(&at(89.9), &r, &[job(1, 0.1)], false).admit, vec![1]);
+    }
+
+    #[test]
+    fn one_round_cannot_overshoot_the_cpu() {
+        // 10 cores, limit 90%, 70% busy: two admissions, then the third
+        // sees 90%.
+        let s = Snapshot {
+            cpu_pct: 70.0,
             ..snap(30.0)
         };
         let d = run(
@@ -860,12 +879,22 @@ mod tests {
             false,
         );
         assert_eq!(d.admit, vec![1, 2]);
+        assert_eq!(d.blocked, Some(Blocked::Cpu { busy_pct: 90.0 }));
+    }
+
+    #[test]
+    fn a_busy_cpu_does_not_hold_an_idle_queue() {
+        let s = Snapshot {
+            cpu_pct: 100.0,
+            ..snap(30.0)
+        };
+        assert_eq!(run(&s, &[], &[job(1, 0.1)], false).admit, vec![1]);
     }
 
     #[test]
     fn unknown_core_count_disables_the_cpu_rule() {
         let s = Snapshot {
-            load1: 99.0,
+            cpu_pct: 100.0,
             cores: 0,
             ..snap(30.0)
         };
@@ -913,12 +942,8 @@ mod tests {
             "memory pressure CRITICAL"
         );
         assert_eq!(
-            Blocked::Cpu {
-                load: 16.2,
-                cores: 10
-            }
-            .describe(),
-            "CPU busy, load 16 / 10 cores"
+            Blocked::Cpu { busy_pct: 95.4 }.describe(),
+            "CPU busy, 95% in use"
         );
         assert_eq!(Blocked::Held.describe(), "held by you");
     }

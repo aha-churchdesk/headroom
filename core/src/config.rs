@@ -56,8 +56,9 @@ pub struct Config {
     pub kill_grace_s: u64,
     /// Swap growth since a job started that gets it killed outright.
     pub swap_kill_growth: Bytes,
-    /// The queue holds while `load1 ≥ cores × cpu_factor`.
-    pub cpu_factor: f64,
+    /// The queue holds while the CPU is at least this busy, in percent of
+    /// all cores, averaged over the last few seconds.
+    pub cpu_busy_pct: f64,
     /// Commands whose normalised form matches one of these are queued.
     /// `*` matches any program: `* test` covers `pnpm test` and `cargo test`.
     pub patterns: Vec<String>,
@@ -153,7 +154,7 @@ impl Default for Config {
             kill_after_s: 30,
             kill_grace_s: 10,
             swap_kill_growth: 4 * GIB,
-            cpu_factor: 1.5,
+            cpu_busy_pct: 90.0,
             patterns: DEFAULT_PATTERNS.iter().map(|p| p.to_string()).collect(),
             patterns_seen: DEFAULT_PATTERNS.iter().map(|p| p.to_string()).collect(),
             excluded: [

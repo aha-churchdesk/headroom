@@ -103,6 +103,32 @@ pub struct Scheduler {
     /// The latest time any event carried, for listings.
     clock: Millis,
     swap: SwapWatch,
+    cpu: CpuWatch,
+}
+
+/// How quickly the CPU reading the queue goes by follows the samples. One
+/// sample covers about a second, which a compile step can spike or dip.
+pub const CPU_SMOOTH_MS: Millis = 10_000;
+
+/// CPU in use, averaged over roughly the last `CPU_SMOOTH_MS`.
+#[derive(Default)]
+struct CpuWatch {
+    avg: Option<(f64, Millis)>,
+}
+
+impl CpuWatch {
+    fn smooth(&mut self, pct: f64, now: Millis) -> f64 {
+        let avg = match self.avg {
+            None => pct,
+            Some((avg, at)) => {
+                let dt = now.saturating_sub(at) as f64;
+                let w = 1.0 - (-dt / CPU_SMOOTH_MS as f64).exp();
+                avg + (pct - avg) * w
+            }
+        };
+        self.avg = Some((avg, now));
+        avg
+    }
 }
 
 /// How long swap must hold steady before lenient mode counts compressed
@@ -162,6 +188,7 @@ impl Scheduler {
             kills: Vec::new(),
             clock: 0,
             swap: SwapWatch::default(),
+            cpu: CpuWatch::default(),
         }
     }
 
@@ -593,6 +620,7 @@ impl Scheduler {
         self.snap = snap;
         let swap_steady = self.swap.steady(self.snap.swap_used, now);
         credit_compressed(&mut self.snap, self.cfg.memory_mode, swap_steady);
+        self.snap.cpu_pct = self.cpu.smooth(self.snap.cpu_pct, now);
         let normal = self.snap.pressure == Pressure::Normal;
         for e in self.jobs.values_mut() {
             e.job.spared &= !normal;
@@ -2591,5 +2619,49 @@ mod tests {
         );
         s.tick(compressed_snap(0), &HashMap::new(), SWAP_STEADY_MS + 1_000);
         assert_eq!(s.snapshot().mem_available, 10 * GIB);
+    }
+
+    fn cpu_at(pct: f64) -> Snapshot {
+        Snapshot {
+            cpu_pct: pct,
+            ..snap(30)
+        }
+    }
+
+    #[test]
+    fn a_one_second_cpu_spike_does_not_hold_the_queue() {
+        let mut s = sched(30);
+        s.enqueue(1, spec("a"), 0);
+        s.started(1, 100);
+        for t in 1..=20 {
+            s.tick(cpu_at(20.0), &HashMap::new(), t * 1_000);
+        }
+        s.tick(cpu_at(100.0), &HashMap::new(), 21_000);
+        assert!(s.snapshot().cpu_pct < 30.0, "{}", s.snapshot().cpu_pct);
+        assert!(granted(&s.enqueue(2, spec("b"), 21_000), 2));
+    }
+
+    #[test]
+    fn a_cpu_that_stays_busy_holds_the_queue_within_seconds() {
+        let mut s = sched(30);
+        s.enqueue(1, spec("a"), 0);
+        s.started(1, 100);
+        let mut t = 0;
+        while s.snapshot().cpu_pct < s.cfg.cpu_busy_pct {
+            t += 1_000;
+            s.tick(cpu_at(100.0), &HashMap::new(), t);
+        }
+        assert_eq!(t, 22_000, "10% to 90% at a 10 s time constant");
+        assert!(!granted(&s.enqueue(2, spec("b"), t), 2));
+    }
+
+    #[test]
+    fn the_first_cpu_reading_is_taken_as_is() {
+        let mut s = Scheduler::new(Config::default(), Profiles::default(), VecDeque::new());
+        s.tick(cpu_at(95.0), &HashMap::new(), 5_000);
+        assert_eq!(s.snapshot().cpu_pct, 95.0);
+        // A repeated reading at the same moment moves nothing.
+        s.tick(cpu_at(0.0), &HashMap::new(), 5_000);
+        assert_eq!(s.snapshot().cpu_pct, 95.0);
     }
 }
