@@ -10,7 +10,7 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use headroom_core::classify::{
-    Class, ProfileCommand, alike_keys, classify_in, describe_in, profile_keys,
+    Class, Here, ProfileCommand, alike_keys, classify_here, describe_in, profile_keys,
 };
 use headroom_core::model::{Bytes, GIB, Job, JobState};
 use headroom_core::profile::Keys;
@@ -18,7 +18,7 @@ use headroom_core::protocol::{ClientMsg, Control, DaemonMsg, Listing, request};
 use headroom_core::store::Store;
 use serde_json::{Map, Value, json};
 
-use crate::context::{git_context, git_hook_installed, tunable};
+use crate::context::{git_context, git_hook_installed, npm_script, tunable};
 
 const PROTOCOL: &str = "2025-06-18";
 
@@ -158,7 +158,11 @@ fn estimate_execution(
 ) -> Value {
     let cfg = store.load_config();
     let hooked = |d: Option<&str>, h: &str| git_hook_installed(cwd, d, h);
-    match classify_in(command, &cfg, &hooked) {
+    let here = Here {
+        cwd,
+        script: &npm_script,
+    };
+    match classify_here(command, &cfg, &hooked, Some(here)) {
         Class::Light | Class::Wrapped => json!({
             "queued": false,
             "why": "not a heavy command; it runs immediately",
@@ -713,6 +717,27 @@ mod tests {
         );
         assert_eq!(known["structuredContent"]["estimate_gb"], 4.0);
         assert_eq!(known["structuredContent"]["profiled_runs"], 3);
+    }
+
+    #[test]
+    fn estimates_read_the_script_a_command_runs() {
+        let (s, cwd) = store("estimate-script");
+        std::fs::write(
+            cwd.join("package.json"),
+            r#"{"scripts":{"build:dev":"vite","build:prod":"vite build"}}"#,
+        )
+        .unwrap();
+        let server = estimate(&s, "yarn build:dev", &cwd);
+        assert_eq!(server["queued"], false);
+        assert_eq!(
+            server["why"],
+            "long-lived (dev, via script build:dev), so it is never queued"
+        );
+        assert_eq!(estimate(&s, "yarn build:prod", &cwd)["queued"], true);
+        // Unreadable package.json: the name decides.
+        std::fs::write(cwd.join("package.json"), "{ not json").unwrap();
+        assert_eq!(estimate(&s, "yarn build:prod", &cwd)["queued"], true);
+        assert_eq!(estimate(&s, "yarn build:dev", &cwd)["queued"], false);
     }
 
     #[test]

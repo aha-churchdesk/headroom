@@ -7,7 +7,7 @@ use headroom_core::hookio::{self, Agent};
 use headroom_core::hooksettings::{self, Change, Scope, Status};
 use headroom_core::store::Store;
 
-use crate::context::{git_hook_installed, stable_exe};
+use crate::context::{git_hook_installed, npm_script, stable_exe};
 
 /// The hook itself: payload on stdin, answer (or nothing) on stdout.
 /// Always exits 0: a hook failure must never stop the agent's command.
@@ -25,7 +25,14 @@ pub fn answer(agent: Agent) -> i32 {
             .unwrap_or_default();
         git_hook_installed(&base, dir, hook)
     };
-    let out = hookio::handle(agent, &payload, &stable_exe(), &cfg, &hooked);
+    let out = hookio::handle_in(
+        agent,
+        &payload,
+        &stable_exe(),
+        &cfg,
+        &hooked,
+        Some(&npm_script),
+    );
     if !out.is_empty() {
         println!("{out}");
     }

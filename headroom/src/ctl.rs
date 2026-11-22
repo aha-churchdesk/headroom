@@ -1,8 +1,8 @@
 //! `headroom ls` and the queue controls, over the daemon's socket.
 
-use headroom_core::classify::{Class, classify_in};
+use headroom_core::classify::{Class, Here, classify_here};
 
-use crate::context::git_hook_installed;
+use crate::context::{git_hook_installed, npm_script};
 use headroom_core::model::{Bytes, GIB, Job, JobState, Millis};
 use headroom_core::protocol::{ClientMsg, Control, DaemonMsg, Listing};
 use headroom_core::store::Store;
@@ -143,7 +143,16 @@ pub fn control(ctl: Control) -> i32 {
 pub fn explain(line: &str) -> i32 {
     let cfg = Store::open().map(|s| s.load_config()).unwrap_or_default();
     let cwd = std::env::current_dir().unwrap_or_default();
-    match classify_in(line, &cfg, &|d, h| git_hook_installed(&cwd, d, h)) {
+    let here = Here {
+        cwd: &cwd,
+        script: &npm_script,
+    };
+    match classify_here(
+        line,
+        &cfg,
+        &|d, h| git_hook_installed(&cwd, d, h),
+        Some(here),
+    ) {
         Class::Heavy { cmd, .. } => println!("heavy: queued, command type `{cmd}`"),
         Class::Excluded { why } => println!("long-lived ({why}): never queued"),
         Class::Wrapped => println!("already wrapped: left alone"),

@@ -109,7 +109,7 @@ fn up_to_top(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// The nearest package.json's script and the directory npm runs it in.
-fn npm_script(cwd: &Path, name: &str) -> Option<(PathBuf, String)> {
+pub fn npm_script(cwd: &Path, name: &str) -> Option<(PathBuf, String)> {
     let (dir, text) = up_to_top(cwd).into_iter().find_map(|d| {
         std::fs::read_to_string(d.join("package.json"))
             .ok()

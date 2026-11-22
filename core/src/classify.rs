@@ -325,6 +325,23 @@ fn tool(program: &str, rest: &[String]) -> Normal {
                 None => normal(program, &[program], rest),
             }
         }
+        // Bare `vite` and `next` start the dev server; `vite ./app` names a root.
+        "vite" | "next" => {
+            const SUBS: &[&str] = &[
+                "build",
+                "optimize",
+                "preview",
+                "serve",
+                "dev",
+                "start",
+                "lint",
+                "export",
+                "info",
+                "telemetry",
+            ];
+            let sub = rest.iter().find(|a| SUBS.contains(&a.as_str()));
+            normal(program, &[program, sub.map_or("dev", |s| s)], rest)
+        }
         "vitest" => {
             const SUBS: &[&str] = &[
                 "run",
@@ -456,7 +473,16 @@ fn heavy_pattern_matches(pattern: &str, key: &[String]) -> bool {
         && p.iter().zip(key).all(|(p, k)| heavy_token_matches(p, k))
 }
 
-fn excluded_by(n: &Normal, cfg: &Config) -> Option<String> {
+/// `dev` ends `build:dev` and `start-dev`. The last word of a script name
+/// says how it runs, so `test:watch` is a watcher even though it tests.
+fn ends_with_word(pat: &str, tok: &str) -> bool {
+    tok.strip_suffix(pat)
+        .is_some_and(|rest| rest.ends_with(':') || rest.ends_with('-'))
+}
+
+/// The exclusion this part hits. `ends` also counts a word that ends a
+/// script name, for when the script's own text can't be read.
+fn excluded_by(n: &Normal, cfg: &Config, ends: bool) -> Option<String> {
     for e in &cfg.excluded {
         let hit = if e.starts_with("--") {
             n.args.iter().any(|a| {
@@ -467,9 +493,9 @@ fn excluded_by(n: &Normal, cfg: &Config) -> Option<String> {
         } else if e.contains(' ') {
             pattern_matches(e, &n.key)
         } else {
-            n.key
-                .iter()
-                .any(|k| token_matches(e, k) && !is_test_script(k))
+            n.key.iter().any(|k| {
+                (token_matches(e, k) && !is_test_script(k)) || (ends && ends_with_word(e, k))
+            })
         };
         if hit {
             return Some(e.clone());
@@ -545,6 +571,35 @@ fn wrapped(words: &[String]) -> bool {
 /// hook's name.
 pub type HookProbe<'a> = &'a dyn Fn(Option<&str>, &str) -> bool;
 
+/// The text of a package script: given the directory a package manager runs
+/// in and the script's name, the nearest package.json's script and the
+/// directory that package.json is in.
+pub type ScriptProbe<'a> = &'a dyn Fn(&Path, &str) -> Option<(PathBuf, String)>;
+
+/// Where a line runs, so the package scripts it names can be read.
+#[derive(Clone, Copy)]
+pub struct Here<'a> {
+    pub cwd: &'a Path,
+    pub script: ScriptProbe<'a>,
+}
+
+/// Scripts that run scripts: deeper than this, names decide.
+const SCRIPT_DEPTH: usize = 4;
+
+/// The script a part runs from this directory's package.json, if any. Not
+/// for `--filter` or `--cwd`: those run another package's script.
+fn script_of<'n>(n: &'n Normal, words: &[String]) -> Option<&'n str> {
+    let ["pnpm" | "npm" | "yarn" | "bun", name] =
+        n.key.iter().map(String::as_str).collect::<Vec<_>>()[..]
+    else {
+        return None;
+    };
+    (n.program == n.key[0]
+        && !crate::tweaks::PM_BUILTINS.contains(&name)
+        && !crate::tweaks::package_target_override(words))
+    .then_some(name)
+}
+
 /// [`classify_in`] without a repository to look in: git commands are light.
 pub fn classify(line: &str, cfg: &Config) -> Class {
     classify_in(line, cfg, &|_, _| false)
@@ -553,12 +608,47 @@ pub fn classify(line: &str, cfg: &Config) -> Class {
 /// Classify a line run where `hooked` can tell which git hooks exist: a
 /// commit or push in a repository with that hook is as heavy as the hook.
 pub fn classify_in(line: &str, cfg: &Config, hooked: HookProbe) -> Class {
+    classify_here(line, cfg, hooked, None)
+}
+
+/// [`classify_in`] that also reads the package scripts the line runs from
+/// `here`: `yarn build:dev` that runs `vite` is a dev server, whatever its
+/// name says. Without `here`, or where a script can't be read, its name
+/// decides.
+pub fn classify_here(line: &str, cfg: &Config, hooked: HookProbe, here: Option<Here>) -> Class {
+    classify_from(line, cfg, hooked, here, &[])
+}
+
+fn classify_from(
+    line: &str,
+    cfg: &Config,
+    hooked: HookProbe,
+    here: Option<Here>,
+    // The scripts being read, outermost first, by package directory.
+    within: &[(PathBuf, String)],
+) -> Class {
     let cmds = simple_commands(line);
     if cmds.iter().any(|w| wrapped(w)) {
         return Class::Wrapped;
     }
     let mut heavy: Option<Normal> = None;
+    // Where the next part runs; `None` once a `cd` goes somewhere the line
+    // alone cannot say.
+    let mut dir = here.map(|h| h.cwd.to_path_buf());
     for words in &cmds {
+        match words.first().map(String::as_str) {
+            Some("cd") => {
+                dir = match words[1..].iter().find(|w| !is_flag(w)) {
+                    Some(t) if !t.contains(['$', '`', '~']) && t != "-" => {
+                        dir.map(|d| lexical_join(&d, t))
+                    }
+                    _ => None,
+                };
+                continue;
+            }
+            Some("pushd" | "popd") => dir = None,
+            _ => {}
+        }
         if let Some(g) = git_hook(words) {
             if heavy.is_none() && hooked(g.dir.as_deref(), g.hook) {
                 heavy = Some(normal("git", &["git", g.sub], &words[1..]));
@@ -568,8 +658,40 @@ pub fn classify_in(line: &str, cfg: &Config, hooked: HookProbe) -> Class {
         let Some(n) = normalize(words) else { continue };
         // One long-lived part makes the whole line long-lived: wrapping
         // `pnpm build && pnpm start` would hold a slot until the server stops.
-        if let Some(why) = excluded_by(&n, cfg) {
+        if let Some(why) = excluded_by(&n, cfg, false) {
             return Class::Excluded { why };
+        }
+        let body = match (here, dir.as_deref(), script_of(&n, words)) {
+            (Some(h), Some(d), Some(name)) if within.len() < SCRIPT_DEPTH => (h.script)(d, name)
+                // A script that runs itself: its name decides.
+                .filter(|(pkg, _)| !within.iter().any(|(p, n)| p == pkg && n == name))
+                .map(|(pkg, text)| {
+                    let inner = Here {
+                        cwd: &pkg,
+                        script: h.script,
+                    };
+                    let mut deeper = within.to_vec();
+                    deeper.push((pkg.clone(), name.to_string()));
+                    // A script's git commands run its repository's hooks, which
+                    // `hooked` answers for the line's directory, not the package's.
+                    let class = classify_from(&text, cfg, &|_, _| false, Some(inner), &deeper);
+                    (name, class)
+                }),
+            _ => None,
+        };
+        match body {
+            Some((name, Class::Excluded { why })) => {
+                return Class::Excluded {
+                    why: format!("{why}, via script {name}"),
+                };
+            }
+            // The script's text says it ends, whatever its name ends with.
+            Some(_) => {}
+            None => {
+                if let Some(why) = excluded_by(&n, cfg, true) {
+                    return Class::Excluded { why };
+                }
+            }
         }
         if heavy.is_none() && is_heavy(&n, cfg) {
             heavy = Some(n);
@@ -1409,5 +1531,157 @@ mod tests {
         }
         // A cd after the last workload moves nothing.
         assert!(alike_in("/w/one", "yarn typecheck && cd /elsewhere").is_some());
+    }
+
+    /// Package scripts by directory, as `npm_script` reads them: the
+    /// nearest package.json at or above the directory.
+    fn here_cls(cwd: &str, line: &str, pkgs: &[(&str, &[(&str, &str)])]) -> Class {
+        let look = |dir: &Path, name: &str| {
+            let (at, scripts) = dir
+                .ancestors()
+                .find_map(|d| pkgs.iter().find(|(p, _)| Path::new(p) == d))?;
+            let (_, text) = scripts.iter().find(|(n, _)| *n == name)?;
+            Some((PathBuf::from(at), text.to_string()))
+        };
+        let here = Here {
+            cwd: Path::new(cwd),
+            script: &look,
+        };
+        classify_here(line, &Config::default(), &|_, _| false, Some(here))
+    }
+
+    #[test]
+    fn a_script_that_starts_a_server_is_never_queued_whatever_its_name() {
+        let pkg: &[(&str, &[(&str, &str)])] = &[(
+            "/w",
+            &[
+                ("build:dev", "vite"),
+                ("build", "vite --mode development"),
+                ("bundle", "webpack --watch"),
+            ],
+        )];
+        assert_eq!(
+            here_cls("/w", "yarn run build:dev", pkg),
+            excluded("dev, via script build:dev")
+        );
+        assert_eq!(
+            here_cls("/w", "pnpm build", pkg),
+            excluded("dev, via script build")
+        );
+        assert_eq!(
+            here_cls("/w/src", "npm run bundle", pkg),
+            excluded("--watch, via script bundle")
+        );
+    }
+
+    #[test]
+    fn a_script_that_ends_is_queued_even_when_its_name_ends_in_dev() {
+        let pkg: &[(&str, &[(&str, &str)])] =
+            &[("/w", &[("build:dev", "vite build --mode development")])];
+        assert_eq!(
+            here_cls("/w", "yarn build:dev", pkg),
+            heavy("yarn build:dev", "yarn")
+        );
+    }
+
+    #[test]
+    fn scripts_that_run_scripts_are_followed() {
+        let pkg: &[(&str, &[(&str, &str)])] = &[(
+            "/w",
+            &[
+                ("build:all", "yarn build && yarn run web"),
+                ("build", "tsc -b"),
+                ("web", "next"),
+            ],
+        )];
+        assert_eq!(
+            here_cls("/w", "yarn build:all", pkg),
+            excluded("dev, via script web, via script build:all")
+        );
+        assert_eq!(
+            here_cls("/w", "yarn build", pkg),
+            heavy("yarn build", "yarn")
+        );
+    }
+
+    #[test]
+    fn a_cd_picks_the_package_whose_scripts_are_read() {
+        let pkg: &[(&str, &[(&str, &str)])] = &[
+            ("/w", &[("build", "turbo run build")]),
+            ("/w/apps/web", &[("build", "vite")]),
+        ];
+        assert_eq!(
+            here_cls("/w", "cd apps/web && yarn build", pkg),
+            excluded("dev, via script build")
+        );
+        assert_eq!(
+            here_cls("/w/apps/web", "cd ../.. && yarn build", pkg),
+            heavy("yarn build", "yarn")
+        );
+    }
+
+    #[test]
+    fn where_the_script_cannot_be_read_its_name_decides() {
+        let pkg: &[(&str, &[(&str, &str)])] = &[("/w", &[("build:dev", "vite build")])];
+        for line in [
+            // Not in package.json.
+            "yarn build:watch",
+            // Somewhere the line alone cannot say.
+            "cd \"$APP\" && yarn build:dev",
+            "pushd web && yarn build:dev",
+            // Another package's script.
+            "pnpm --filter web build:dev",
+            "yarn --cwd web build:dev",
+        ] {
+            assert!(
+                matches!(here_cls("/w", line, pkg), Class::Excluded { .. }),
+                "{line}"
+            );
+        }
+        // No package.json above the directory at all.
+        assert_eq!(
+            here_cls("/elsewhere", "yarn build", pkg),
+            heavy("yarn build", "yarn")
+        );
+    }
+
+    #[test]
+    fn a_script_that_runs_itself_ends_in_its_name() {
+        let pkg: &[(&str, &[(&str, &str)])] = &[(
+            "/w",
+            &[("build", "yarn build"), ("loop:dev", "npm run loop:dev")],
+        )];
+        assert_eq!(
+            here_cls("/w", "yarn build", pkg),
+            heavy("yarn build", "yarn")
+        );
+        assert_eq!(
+            here_cls("/w", "yarn loop:dev", pkg),
+            excluded("dev, via script loop:dev")
+        );
+    }
+
+    #[test]
+    fn the_last_word_of_a_script_name_says_how_it_runs() {
+        assert_eq!(cls("yarn build:dev"), excluded("dev"));
+        assert_eq!(cls("pnpm web-dev"), excluded("dev"));
+        assert_eq!(cls("npm run test:watch"), excluded("watch"));
+        assert_eq!(cls("yarn docs:serve"), excluded("serve"));
+        // Only a whole word: `devbuild` and `build:device` are builds.
+        assert_eq!(cls("yarn build:device"), heavy("yarn build:device", "yarn"));
+        assert_eq!(cls("yarn build:predev"), heavy("yarn build:predev", "yarn"));
+        // A leading word still yields to a test at the end.
+        assert_eq!(cls("yarn dev:test"), heavy("yarn dev:test", "yarn"));
+    }
+
+    #[test]
+    fn bare_vite_and_next_are_dev_servers() {
+        assert_eq!(cls("vite"), excluded("dev"));
+        assert_eq!(cls("npx vite --port 3000"), excluded("dev"));
+        assert_eq!(cls("vite ./app"), excluded("dev"));
+        assert_eq!(cls("next"), excluded("dev"));
+        assert_eq!(cls("vite build"), heavy("vite build", "vite"));
+        assert_eq!(cls("pnpm next build"), heavy("next build", "next"));
+        assert_eq!(cls("vite preview"), excluded("preview"));
     }
 }

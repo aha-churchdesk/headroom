@@ -12,11 +12,11 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use headroom_core::classify::{Class, classify_in};
+use headroom_core::classify::{Class, Here, classify_here};
 use headroom_core::shell;
 use headroom_core::store::Store;
 
-use crate::context::git_hook_installed;
+use crate::context::{git_hook_installed, npm_script};
 use crate::run::{self, JOB_ENV, RunOpts};
 
 pub use headroom_core::shims::{NAMES, OnPath, on_path};
@@ -63,9 +63,16 @@ pub fn shim(name: &str, args: &[String]) -> i32 {
     let mut words = vec![name.to_string()];
     words.extend(args.iter().cloned());
     let cwd = std::env::current_dir().unwrap_or_default();
-    let class = classify_in(&shell::join(&words), &cfg, &|d, h| {
-        git_hook_installed(&cwd, d, h)
-    });
+    let here = Here {
+        cwd: &cwd,
+        script: &npm_script,
+    };
+    let class = classify_here(
+        &shell::join(&words),
+        &cfg,
+        &|d, h| git_hook_installed(&cwd, d, h),
+        Some(here),
+    );
     if !matches!(class, Class::Heavy { .. }) {
         return exec(name, &real, args);
     }

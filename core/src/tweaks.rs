@@ -112,7 +112,7 @@ pub struct Tunable {
 
 const PACKAGE_MANAGERS: [&str; 4] = ["pnpm", "npm", "yarn", "bun"];
 /// Package manager subcommands that are not script names.
-const PM_BUILTINS: [&str; 10] = [
+pub(crate) const PM_BUILTINS: [&str; 10] = [
     "install", "add", "remove", "exec", "dlx", "x", "create", "why", "outdated", "update",
 ];
 

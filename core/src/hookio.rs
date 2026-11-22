@@ -18,7 +18,7 @@
 
 use serde_json::{Map, Value, json};
 
-use crate::classify::{Class, HookProbe, classify_in};
+use crate::classify::{Class, Here, HookProbe, ScriptProbe, classify_here};
 use crate::config::Config;
 use crate::shell::quote;
 
@@ -136,8 +136,19 @@ pub struct Wrap {
 
 /// The rewrite for a heavy command, or `None` to leave it alone. `hooked`
 /// says which git hooks the command's repository has.
-pub fn wrap(agent: Agent, call: &Call, exe: &str, cfg: &Config, hooked: HookProbe) -> Option<Wrap> {
-    if !matches!(classify_in(&call.command, cfg, hooked), Class::Heavy { .. }) {
+/// `here`, when given, reads the package scripts the command runs.
+pub fn wrap(
+    agent: Agent,
+    call: &Call,
+    exe: &str,
+    cfg: &Config,
+    hooked: HookProbe,
+    here: Option<Here>,
+) -> Option<Wrap> {
+    if !matches!(
+        classify_here(&call.command, cfg, hooked, here),
+        Class::Heavy { .. }
+    ) {
         return None;
     }
     let (timeout, wait_s) = if call.background {
@@ -229,10 +240,25 @@ pub fn handle(
     cfg: &Config,
     hooked: CwdHookProbe,
 ) -> String {
+    handle_in(agent, payload, exe, cfg, hooked, None)
+}
+
+/// [`handle`] that reads the package scripts a command runs, from the
+/// payload's working directory. Without one, script names decide.
+pub fn handle_in(
+    agent: Agent,
+    payload: &str,
+    exe: &str,
+    cfg: &Config,
+    hooked: CwdHookProbe,
+    scripts: Option<ScriptProbe>,
+) -> String {
     parse(agent, payload)
         .and_then(|call| {
             let probe = |dir: Option<&str>, hook: &str| hooked(call.cwd.as_deref(), dir, hook);
-            wrap(agent, &call, exe, cfg, &probe).map(|w| respond(agent, &call, &w))
+            let cwd = call.cwd.as_deref().map(std::path::Path::new);
+            let here = cwd.zip(scripts).map(|(cwd, script)| Here { cwd, script });
+            wrap(agent, &call, exe, cfg, &probe, here).map(|w| respond(agent, &call, &w))
         })
         .unwrap_or_default()
 }
@@ -263,6 +289,54 @@ mod tests {
     fn out(agent: Agent, payload: &str) -> Value {
         let s = handle(agent, payload, EXE, &Config::default(), &no_hooks);
         serde_json::from_str(&s).unwrap_or(Value::Null)
+    }
+
+    /// `build:dev` in /repo's package.json runs `script`.
+    fn with_script(payload: &str, script: &str) -> String {
+        let look = |dir: &std::path::Path, name: &str| {
+            (dir == std::path::Path::new("/repo") && name == "build:dev")
+                .then(|| (std::path::PathBuf::from("/repo"), script.to_string()))
+        };
+        handle_in(
+            Agent::Claude,
+            payload,
+            EXE,
+            &Config::default(),
+            &no_hooks,
+            Some(&look),
+        )
+    }
+
+    #[test]
+    fn a_script_that_starts_a_dev_server_is_left_alone() {
+        assert_eq!(
+            with_script(&claude("yarn build:dev", json!({})), "vite"),
+            ""
+        );
+        assert_eq!(
+            with_script(&claude("yarn build:dev", json!({})), "vite build --watch"),
+            ""
+        );
+    }
+
+    #[test]
+    fn a_script_that_ends_is_queued_whatever_its_name_ends_with() {
+        let s = with_script(&claude("yarn build:dev", json!({})), "vite build");
+        let o: Value = serde_json::from_str(&s).unwrap();
+        assert!(
+            o["hookSpecificOutput"]["updatedInput"]["command"]
+                .as_str()
+                .unwrap()
+                .ends_with("--sh 'yarn build:dev'")
+        );
+    }
+
+    #[test]
+    fn without_a_working_directory_the_script_name_decides() {
+        let mut payload: Value =
+            serde_json::from_str(&claude("yarn build:dev", json!({}))).unwrap();
+        payload.as_object_mut().unwrap().remove("cwd");
+        assert_eq!(with_script(&payload.to_string(), "vite build"), "");
     }
 
     #[test]
