@@ -263,7 +263,12 @@ fn call(store: &Store, cwd: &Path, name: &str, args: &Map<String, Value>) -> Res
         }
         "pin_job" => {
             let id = id_arg(args)?;
-            let on = args.get("on").and_then(Value::as_bool).unwrap_or(true);
+            // Absent means pin; anything but a boolean is refused rather
+            // than read as one: "false" must not pin.
+            let on = match args.get("on") {
+                None => true,
+                Some(v) => v.as_bool().ok_or("on must be true or false")?,
+            };
             control(store, Control::Pin { id, on })
         }
         other => Err(format!("unknown tool {other}")),
@@ -532,6 +537,16 @@ mod tests {
             ("move_job", json!({ "id": "j4" }), "id must be"),
             ("move_job", json!({ "id": 4, "to": -1 }), "to must be"),
             ("pin_job", json!({ "id": 4.5 }), "id must be"),
+            (
+                "pin_job",
+                json!({ "id": 4, "on": "false" }),
+                "on must be true or false",
+            ),
+            (
+                "pin_job",
+                json!({ "id": 4, "on": 0 }),
+                "on must be true or false",
+            ),
             (
                 "estimate_command",
                 json!({ "command": "  " }),
