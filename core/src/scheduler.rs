@@ -1375,9 +1375,11 @@ mod tests {
 
     #[test]
     fn a_batch_counts_every_job_against_the_heads_backfill_limit() {
+        // The 12 GB e2e run fits with nothing to spare once the build ends,
+        // so every lint ahead of it is a pass that could delay it.
         let mut s = sched(8);
         learned(&mut s, "build", 6, 60);
-        learned(&mut s, "e2e", 7, 300);
+        learned(&mut s, "e2e", 12, 300);
         learned(&mut s, "lint", 1, 10);
         s.enqueue(1, own("build"), 0);
         s.started(1, 100);

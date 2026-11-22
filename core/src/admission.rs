@@ -8,11 +8,13 @@
 //! The queue gives its head first claim on memory. Later jobs can pass a
 //! waiting head only within the backfill limits below.
 //!
-//! A later job may start first if it fits now. When runtimes are known,
-//! it must finish before the head could start anyway (EASY backfilling).
+//! A later job may start first if it fits now and either leaves the head
+//! enough room when it could start, or, when runtimes are known, finishes
+//! before then (EASY backfilling). Neither delays the head. A job that leaves
+//! the head room passes freely; one that must finish in time counts toward a
+//! bounded number and time of passes, since runtimes are only predictions.
 //! Without a predicted runtime or release window, fitting jobs may still
-//! pass opportunistically, which can delay the head. Every pass counts
-//! toward the same bounded number and time; then the queue is strict again.
+//! pass opportunistically within that same bound, which can delay the head.
 
 use serde::{Deserialize, Serialize};
 
@@ -48,24 +50,25 @@ impl Blocked {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Decision {
     pub admit: Vec<JobId>,
-    /// Admitted jobs that start ahead of `skipped`, the head waiting on memory.
+    /// Admitted jobs that start ahead of `skipped`, the head waiting on memory,
+    /// and might delay it. Jobs that leave it room aren't listed.
     pub backfilled: Vec<JobId>,
     pub skipped: Option<JobId>,
     pub blocked: Option<Blocked>,
 }
 
-/// When the head could start, in ms from now: running jobs are expected to
-/// end at their median run time, each freeing what it holds or is still
-/// expected to grow into. One already past its median is expected to run as
-/// long again as it has so far. `None` if any end can't be predicted, or if
-/// even all of them ending wouldn't make room.
+/// When the head could start, in ms from now, and the memory free then:
+/// running jobs are expected to end at their median run time, each freeing
+/// what it holds or is still expected to grow into. One already past its
+/// median is expected to run as long again as it has so far. `None` if any
+/// end can't be predicted, or if even all of them ending wouldn't make room.
 fn shadow(
     running: &[&Job],
     admitted: &[(Option<u64>, Bytes)],
     need: Bytes,
     free: Bytes,
     now: Millis,
-) -> Option<u64> {
+) -> Option<(u64, Bytes)> {
     let mut ends: Vec<(u64, Bytes)> = Vec::new();
     for j in running {
         match j.state {
@@ -91,7 +94,7 @@ fn shadow(
     for (at, freed) in ends {
         free += freed;
         if free >= need {
-            return Some(at);
+            return Some((at, free));
         }
     }
     None
@@ -191,30 +194,44 @@ pub fn decide(
         return d;
     };
     let head = queue[i];
-    if strict(head, cfg, now) {
+    if !cfg.backfill {
         return d;
     }
-    let head_starts_in = shadow(running, &admitted, head.estimate, free, now);
-    let remaining = cfg.backfill_skips.saturating_sub(head.skipped) as usize;
+    let head_starts = shadow(running, &admitted, head.estimate, free, now);
+    // What is left over once the head starts. A job that fits in it can run
+    // as long as it likes without delaying the head, so it needn't count.
+    let mut spare = head_starts.map_or(0, |(_, then)| then - head.estimate);
+    let remaining = if strict(head, cfg, now) {
+        0
+    } else {
+        cfg.backfill_skips.saturating_sub(head.skipped) as usize
+    };
     for job in &queue[i + 1..] {
-        if d.backfilled.len() >= remaining {
-            break;
+        let cpu_ok = job.low() || snap.cores == 0 || load < cpu_limit;
+        if job.estimate > free || !cpu_ok {
+            continue;
         }
         // Preserve the finish window whenever both sides are known. A
         // successful run can supply runtime even if its memory was unmeasured.
-        // Otherwise use the remaining skip allowance without promising that
-        // the head will not be delayed.
-        let time_ok = match (job.median_ms, head_starts_in) {
-            (Some(takes), Some(window)) => takes <= window,
-            _ => true,
+        let in_time = match (job.median_ms, head_starts) {
+            (Some(takes), Some((window, _))) => Some(takes <= window),
+            _ => None,
         };
-        let cpu_ok = job.low() || snap.cores == 0 || load < cpu_limit;
-        if time_ok && job.estimate <= free && cpu_ok {
-            d.admit.push(job.id);
+        let may_pass = d.backfilled.len() < remaining;
+        if may_pass && in_time == Some(true) {
+            // Gone before the head starts, so it leaves the spare room alone.
             d.backfilled.push(job.id);
-            free -= job.estimate;
-            load += 1.0;
+        } else if job.estimate <= spare {
+            spare -= job.estimate;
+        } else if may_pass && in_time.is_none() {
+            // No promise the head won't be delayed: only the allowance.
+            d.backfilled.push(job.id);
+        } else {
+            continue;
         }
+        d.admit.push(job.id);
+        free -= job.estimate;
+        load += 1.0;
     }
     if !d.backfilled.is_empty() {
         d.skipped = Some(head.id);
@@ -259,11 +276,11 @@ mod tests {
     }
 
     /// 6 GB available, 2 kept free; a 3 GB job running that is done in 60 s.
-    /// The 5 GB head can start once it ends.
+    /// The 7 GB head can start once it ends, with nothing to spare.
     fn backfill_case(skipped: u32, since: Option<Millis>) -> (Snapshot, Job, Job) {
         let mut r = running(9, 3.0, 3.0);
         r.median_ms = Some(60_000);
-        let mut head = job(1, 5.0);
+        let mut head = job(1, 7.0);
         (head.skipped, head.skipped_since) = (skipped, since);
         (snap(6.0), r, head)
     }
@@ -291,10 +308,102 @@ mod tests {
         assert_eq!(
             d.blocked,
             Some(Blocked::Memory {
-                need: 5 * GIB,
+                need: 7 * GIB,
                 free: 4 * GIB
             }),
             "the head still waits, and says why"
+        );
+    }
+
+    /// 9 GB available, 2 kept free: 7 GB free now. A 6 GB job running that
+    /// is done in 60 s; then 13 GB are free and the 9 GB head has 4 to spare.
+    fn spare_case() -> (Snapshot, Job, Job) {
+        let mut r = running(9, 6.0, 6.0);
+        r.median_ms = Some(60_000);
+        (snap(9.0), r, job(1, 9.0))
+    }
+
+    #[test]
+    fn long_jobs_that_leave_the_head_room_start_ahead_of_it_freely() {
+        let (s, r, head) = spare_case();
+        let q = [
+            head,
+            short(2, 2.0, 600_000),
+            short(3, 2.0, 600_000),
+            short(4, 2.0, 600_000),
+        ];
+        let d = at(&s, &[r], &q, 0);
+        assert_eq!(d.admit, vec![2, 3], "the third would take the head's room");
+        assert!(d.backfilled.is_empty(), "neither counts as a pass");
+        assert_eq!(d.skipped, None);
+    }
+
+    #[test]
+    fn leaving_the_head_room_needs_no_pass_allowance() {
+        let (s, r, mut head) = spare_case();
+        (head.skipped, head.skipped_since) = (3, Some(0));
+        let q = [head, short(2, 2.0, 600_000), job(3, 3.0)];
+        let d = at(&s, &[r], &q, 1_000_000);
+        assert_eq!(
+            d.admit,
+            vec![2],
+            "3 fits now, not in the 2 GB left to spare"
+        );
+    }
+
+    #[test]
+    fn exactly_the_spare_room_is_enough() {
+        let (s, r, head) = spare_case();
+        let fits = at(
+            &s,
+            std::slice::from_ref(&r),
+            &[head.clone(), short(2, 4.0, 600_000)],
+            0,
+        );
+        assert_eq!(fits.admit, vec![2]);
+        let mut over = short(2, 4.0, 600_000);
+        over.estimate += 1;
+        assert!(at(&s, &[r], &[head, over], 0).admit.is_empty());
+    }
+
+    #[test]
+    fn a_job_that_finishes_in_time_does_not_use_up_the_spare_room() {
+        let (s, r, head) = spare_case();
+        // The short one counts as a pass but is gone before the head starts,
+        // so the long one still has the 4 GB to spare.
+        let q = [head, short(2, 3.0, 30_000), short(3, 4.0, 600_000)];
+        let d = at(&s, &[r], &q, 0);
+        // 7 GB free now: 3 then 4.
+        assert_eq!(d.admit, vec![2, 3]);
+        assert_eq!(d.backfilled, vec![2]);
+    }
+
+    #[test]
+    fn no_spare_room_without_a_predictable_start() {
+        let (s, mut r, head) = spare_case();
+        r.median_ms = None;
+        let mut q = vec![head];
+        q.extend((2..6).map(|id| short(id, 0.5, 600_000)));
+        let d = at(&s, std::slice::from_ref(&r), &q, 0);
+        assert_eq!(d.backfilled, vec![2, 3, 4], "only the bounded allowance");
+        r.state = JobState::Frozen;
+        r.median_ms = Some(60_000);
+        let d = at(&s, &[r], &q, 0);
+        assert_eq!(d.backfilled, vec![2, 3, 4], "a frozen job frees nothing");
+    }
+
+    #[test]
+    fn backfill_off_keeps_the_queue_in_order() {
+        let (s, r, head) = spare_case();
+        let cfg = Config {
+            backfill: false,
+            ..Config::default()
+        };
+        let long = short(2, 1.0, 600_000);
+        assert!(
+            decide(&s, &[&r], &[&head, &long], false, &cfg, 0)
+                .admit
+                .is_empty()
         );
     }
 
@@ -521,11 +630,12 @@ mod tests {
             first.median_ms = first_runtime;
             for candidate_runtime in [120_000, 120_001] {
                 // 6 GB usable before the first admission, 2 GB afterward.
-                // The 5 GB head needs the first job's 4 GB to be released.
+                // The 8 GB head needs the first job's 4 GB to be released,
+                // with nothing to spare.
                 let d = at(
                     &snap(8.0),
                     std::slice::from_ref(&running),
-                    &[first.clone(), job(2, 5.0), short(3, 1.0, candidate_runtime)],
+                    &[first.clone(), job(2, 8.0), short(3, 1.0, candidate_runtime)],
                     0,
                 );
                 let may_pass = first_runtime.is_none() || candidate_runtime <= 120_000;
@@ -534,7 +644,7 @@ mod tests {
                 assert_eq!(
                     d.blocked,
                     Some(Blocked::Memory {
-                        need: 5 * GIB,
+                        need: 8 * GIB,
                         free: 2 * GIB
                     })
                 );
