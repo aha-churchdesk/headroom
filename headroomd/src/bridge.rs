@@ -17,33 +17,96 @@ use crate::stop::Target;
 #[derive(Debug, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum UiCmd {
-    Hold { on: bool },
-    Freeze { id: String },
-    Resume { id: String },
-    Kill { id: String },
-    Cancel { id: String },
-    Top { id: String },
-    Pin { id: String, on: bool },
-    Low { id: String, on: bool },
-    Move { id: String, to: usize },
-    Dismiss { id: String },
-    HideHookNotice { agent: String },
-    Copy { text: String },
+    Hold {
+        on: bool,
+    },
+    Freeze {
+        id: String,
+    },
+    Resume {
+        id: String,
+    },
+    Kill {
+        id: String,
+    },
+    Cancel {
+        id: String,
+    },
+    Top {
+        id: String,
+    },
+    Pin {
+        id: String,
+        on: bool,
+    },
+    Low {
+        id: String,
+        on: bool,
+    },
+    Move {
+        id: String,
+        to: usize,
+    },
+    Dismiss {
+        id: String,
+    },
+    HideHookNotice {
+        agent: String,
+    },
+    Copy {
+        text: String,
+    },
     FinishSetup,
     CheckShims,
-    ResetProfile { key: String },
-    ResetCommand { command: String },
-    OpenProfile { key: Option<String> },
-    ScanWorktrees,
-    RemoveWorktree { repo: String, path: String },
-    RemoveMergedWorktrees { repo: String },
-    KillProcess { pid: i32, start: String },
-    KillApp { name: String },
+    ResetProfile {
+        key: String,
+    },
+    ResetCommand {
+        command: String,
+    },
+    OpenProfile {
+        key: Option<String>,
+    },
+    ScanWorktrees {
+        /// "Check again": measure every folder, not only stale ones.
+        #[serde(default)]
+        again: bool,
+    },
+    RemoveWorktree {
+        repo: String,
+        path: String,
+        /// The commit the row showed, so another checkout at that path
+        /// isn't taken for it.
+        #[serde(default)]
+        head: Option<String>,
+        /// The row said "Branch stays".
+        #[serde(default)]
+        keep_branch: bool,
+    },
+    RemoveMergedWorktrees {
+        repo: String,
+    },
+    KillProcess {
+        pid: i32,
+        start: String,
+    },
+    KillApp {
+        name: String,
+    },
     ClearData,
-    Set { key: String, value: Value },
-    AddPattern { pattern: String },
-    RemovePattern { pattern: String },
-    Classify { text: String },
+    Set {
+        key: String,
+        value: Value,
+    },
+    AddPattern {
+        pattern: String,
+    },
+    RemovePattern {
+        pattern: String,
+    },
+    Classify {
+        text: String,
+    },
     Quit,
 }
 
@@ -60,10 +123,12 @@ pub enum Do {
     Classify(String),
     /// The profile page shows this key's details; `None` when it is closed.
     OpenProfile(Option<String>),
-    ScanWorktrees,
+    /// Look at the worktrees; `true` measures every folder again.
+    ScanWorktrees(bool),
     RemoveWorktree {
         repo: String,
         path: String,
+        asked: crate::worktrees::Asked,
     },
     RemoveMergedWorktrees(String),
     /// One process on the "Other apps" page. The page sends its start time
@@ -98,8 +163,17 @@ pub fn translate(cmd: UiCmd, cfg: &Config) -> Result<Do, String> {
         UiCmd::ResetProfile { key } => Do::Control(Control::ResetProfile { key }),
         UiCmd::ResetCommand { command } => Do::Control(Control::ResetCommand { command }),
         UiCmd::OpenProfile { key } => Do::OpenProfile(key),
-        UiCmd::ScanWorktrees => Do::ScanWorktrees,
-        UiCmd::RemoveWorktree { repo, path } => Do::RemoveWorktree { repo, path },
+        UiCmd::ScanWorktrees { again } => Do::ScanWorktrees(again),
+        UiCmd::RemoveWorktree {
+            repo,
+            path,
+            head,
+            keep_branch,
+        } => Do::RemoveWorktree {
+            repo,
+            path,
+            asked: crate::worktrees::Asked { head, keep_branch },
+        },
         UiCmd::RemoveMergedWorktrees { repo } => Do::RemoveMergedWorktrees(repo),
         UiCmd::KillProcess { pid, start } => Do::KillProcess(Target {
             pid,
@@ -224,12 +298,33 @@ mod tests {
             t(r#"{"cmd":"open_profile","key":null}"#),
             Ok(Do::OpenProfile(None))
         );
-        assert_eq!(t(r#"{"cmd":"scan_worktrees"}"#), Ok(Do::ScanWorktrees));
+        assert_eq!(
+            t(r#"{"cmd":"scan_worktrees"}"#),
+            Ok(Do::ScanWorktrees(false))
+        );
+        assert_eq!(
+            t(r#"{"cmd":"scan_worktrees","again":true}"#),
+            Ok(Do::ScanWorktrees(true))
+        );
         assert_eq!(
             t(r#"{"cmd":"remove_worktree","repo":"/r","path":"/r.worktrees/a"}"#),
             Ok(Do::RemoveWorktree {
                 repo: "/r".into(),
-                path: "/r.worktrees/a".into()
+                path: "/r.worktrees/a".into(),
+                asked: crate::worktrees::Asked::default(),
+            })
+        );
+        assert_eq!(
+            t(
+                r#"{"cmd":"remove_worktree","repo":"/r","path":"/r.worktrees/a","head":"abc","keep_branch":true}"#
+            ),
+            Ok(Do::RemoveWorktree {
+                repo: "/r".into(),
+                path: "/r.worktrees/a".into(),
+                asked: crate::worktrees::Asked {
+                    head: Some("abc".into()),
+                    keep_branch: true
+                },
             })
         );
         assert_eq!(

@@ -453,7 +453,9 @@ impl App {
         // pattern tester) is not the next action, so a message stays put.
         if !matches!(
             cmd,
-            UiCmd::OpenProfile { .. } | UiCmd::ScanWorktrees | UiCmd::Classify { .. }
+            UiCmd::OpenProfile { .. }
+                | UiCmd::ScanWorktrees { again: false }
+                | UiCmd::Classify { .. }
         ) {
             self.refused = None;
             self.kill_result = None;
@@ -543,12 +545,16 @@ impl App {
                 self.open_profile = key;
                 return Next::Continue;
             }
-            Do::ScanWorktrees => {
-                self.worktrees.scan(self.repos());
+            Do::ScanWorktrees(again) => {
+                if again {
+                    self.worktrees.scan(self.repos());
+                } else {
+                    self.worktrees.scan_quick(self.repos());
+                }
                 return Next::Continue;
             }
-            Do::RemoveWorktree { repo, path } => {
-                self.worktrees.remove_one(repo, path);
+            Do::RemoveWorktree { repo, path, asked } => {
+                self.worktrees.remove_one(repo, path, asked);
                 return Next::Continue;
             }
             Do::KillProcess(t) => {

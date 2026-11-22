@@ -128,6 +128,9 @@ pub struct Repo {
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(60);
 const GH_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a measured folder size is shown without measuring it again,
+/// unless asked to ("Check again").
+const SIZE_FRESH: Duration = Duration::from_secs(15 * 60);
 /// Worktrees whose changes are counted at once.
 const PARALLEL: usize = 8;
 
@@ -141,14 +144,34 @@ fn run(program: &str, dir: &Path, args: &[&str], timeout: Duration) -> Result<St
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("{program}: {e}"))?;
-    // Read while waiting: a full pipe would stall the child.
-    let mut stdout = child.stdout.take().expect("piped");
-    let reader = std::thread::spawn(move || {
-        let mut out = Vec::new();
-        let _ = stdout.read_to_end(&mut out);
-        out
-    });
+    // Read both while waiting: a full pipe would stall the child. Each
+    // reader hands its bytes over a channel, so a descendant that keeps a
+    // pipe open after the child exits can't hold us past the timeout.
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if let Some(mut pipe) = pipe {
+            std::thread::spawn(move || {
+                let mut out = Vec::new();
+                let _ = pipe.read_to_end(&mut out);
+                let _ = tx.send(out);
+            });
+        }
+        rx
+    };
+    let stdout = drain(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let stderr = drain(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
     let end = Instant::now() + timeout;
+    let timed_out = || format!("{program} {} timed out", args.join(" "));
     let status = loop {
         if let Some(s) = child.try_wait().map_err(|e| e.to_string())? {
             break s;
@@ -156,17 +179,22 @@ fn run(program: &str, dir: &Path, args: &[&str], timeout: Duration) -> Result<St
         if Instant::now() >= end {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(format!("{program} {} timed out", args.join(" ")));
+            return Err(timed_out());
         }
         std::thread::sleep(Duration::from_millis(20));
     };
-    let out = reader.join().unwrap_or_default();
+    let left = || {
+        end.saturating_duration_since(Instant::now())
+            .max(Duration::from_millis(200))
+    };
+    let out = stdout.recv_timeout(left()).map_err(|_| timed_out())?;
     if !status.success() {
-        let mut err = String::new();
-        if let Some(mut e) = child.stderr.take() {
-            let _ = e.read_to_string(&mut err);
-        }
-        return Err(format!("{program} {}: {}", args.join(" "), err.trim()));
+        let err = stderr.recv_timeout(left()).unwrap_or_default();
+        return Err(format!(
+            "{program} {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&err).trim()
+        ));
     }
     Ok(String::from_utf8_lossy(&out).into_owned())
 }
@@ -298,11 +326,21 @@ fn merged_by_pr(
 }
 
 /// Changed and untracked files in a worktree. Ignored files, such as
-/// `node_modules`, don't count: git removes those with the folder.
+/// `node_modules`, don't count: git removes those with the folder. Every
+/// untracked file is listed whatever `status.showUntrackedFiles` says, or a
+/// repository set to hide them would look clean.
 fn changes(path: &Path) -> Option<u32> {
-    git(path, &["status", "--porcelain"])
-        .ok()
-        .map(|s| s.lines().count() as u32)
+    git(
+        path,
+        &[
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        ],
+    )
+    .ok()
+    .map(|s| s.lines().count() as u32)
 }
 
 /// The processes working in `path` or below it.
@@ -475,23 +513,46 @@ fn set_aside(repo: &Path, path: &str) -> Result<bool, String> {
 
 /// Remove a worktree found free to go, then its branch: `-d` when it is
 /// in the default branch, `-D` when a merged pull request holds its every
-/// commit. A missing folder is pruned instead.
-fn take(dir: &Path, w: &Worktree) -> Result<String, String> {
+/// commit, and never when `keep_branch` (the page said it stays) or the
+/// branch isn't merged. A missing folder is forgotten, that one only:
+/// `git worktree prune` would also forget others, such as ones on a drive
+/// that isn't plugged in.
+fn take(dir: &Path, w: &Worktree, keep_branch: bool) -> Result<String, String> {
     if w.missing {
-        git(dir, &["worktree", "prune"])?;
-    } else if !set_aside(dir, &w.path)? {
         git(dir, &["worktree", "remove", &w.path])?;
+    } else {
+        // Checked again at the last moment: an editor may have saved into
+        // it since, and the folder is deleted without git looking.
+        match changes(Path::new(&w.path)) {
+            Some(0) => {}
+            Some(n) => return Err(format!("not removed: {}", uncommitted(n))),
+            None => return Err("not removed: changes not checked".into()),
+        }
+        if !set_aside(dir, &w.path)? {
+            git(dir, &["worktree", "remove", &w.path])?;
+        }
     }
     let Some(branch) = &w.branch else {
         return Ok("worktree removed".into());
     };
-    if w.merged.is_none() && !w.missing {
-        return Ok(format!("worktree removed; unmerged branch {branch} kept"));
+    if keep_branch || (w.merged.is_none() && !w.missing) {
+        return Ok(format!("worktree removed; branch {branch} kept"));
     }
     let flag = match w.merged {
         Some(Merged::Pr(_)) => "-D",
         _ => "-d",
     };
+    // `-D` deletes whatever the branch points at: only the commit the
+    // merged pull request was checked against, not one added since.
+    if flag == "-D" {
+        match git(
+            dir,
+            &["rev-parse", "--verify", &format!("refs/heads/{branch}")],
+        ) {
+            Ok(tip) if tip.trim() == w.head => {}
+            _ => return Ok(format!("worktree removed; branch {branch} kept (it moved)")),
+        }
+    }
     Ok(match git(dir, &["branch", flag, branch]) {
         Ok(_) => format!("worktree and branch {branch} removed"),
         Err(e) => format!("worktree removed; branch {branch} kept ({e})"),
@@ -527,16 +588,32 @@ pub fn remove_each(
             {
                 return Err(format!("not removed: {why}"));
             }
-            take(dir, w)
+            take(dir, w, false)
         })();
         done(path, result);
     }
 }
 
+/// What the page showed when one worktree's removal was confirmed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Asked {
+    /// The commit the row showed; a worktree at another one is not the
+    /// one confirmed, such as a new checkout at the same path.
+    pub head: Option<String>,
+    /// The page said its branch stays ("Remove folder? Branch stays"):
+    /// kept even if it has been merged since.
+    pub keep_branch: bool,
+}
+
 /// Remove one worktree from its row, merged or not, after checking again
 /// that it may go: its uncommitted files are counted now, whatever the
-/// last scan skipped, and any at all keep it.
-pub fn remove_alone(repo: &str, path: &str, procs: &Procs) -> Result<String, String> {
+/// last scan found, and any at all keep it.
+pub fn remove_alone(
+    repo: &str,
+    path: &str,
+    procs: &Procs,
+    asked: &Asked,
+) -> Result<String, String> {
     let dir = Path::new(repo);
     let fresh = scan_repo(dir, procs).ok_or("the repository has no worktrees")?;
     let mut w = fresh
@@ -544,8 +621,11 @@ pub fn remove_alone(repo: &str, path: &str, procs: &Procs) -> Result<String, Str
         .into_iter()
         .find(|w| w.path == path)
         .ok_or("no longer a worktree")?;
+    if asked.head.as_ref().is_some_and(|h| *h != w.head) {
+        return Err("not removed: changed since it was checked".into());
+    }
     if !w.missing {
-        w.changes = w.changes.or_else(|| changes(Path::new(path)));
+        w.changes = changes(Path::new(path));
         if w.changes.is_none() {
             return Err("not removed: changes not checked".into());
         }
@@ -553,7 +633,7 @@ pub fn remove_alone(repo: &str, path: &str, procs: &Procs) -> Result<String, Str
     if let Some(why) = w.alone_blocker() {
         return Err(format!("not removed: {why}"));
     }
-    take(dir, &w)
+    take(dir, &w, asked.keep_branch)
 }
 
 /// Remove one worktree after checking again that it may go.
@@ -635,6 +715,7 @@ pub fn json(repos: &[Repo], wall: u64) -> Value {
                 "worktrees": r.worktrees.iter().map(|w| json!({
                     "path": w.path,
                     "branch": w.branch,
+                    "head": w.head,
                     "main": w.main,
                     "locked": w.locked,
                     "missing": w.missing,
@@ -688,6 +769,8 @@ struct State {
     repos: Vec<Repo>,
     /// Worktrees waiting to be removed or being removed, by path.
     removing: HashSet<String>,
+    /// When each worktree's folder was last measured, by path.
+    measured_at: HashMap<String, Instant>,
     /// What happened to each removal asked for, by path: done, and what.
     results: BTreeMap<String, (bool, String)>,
 }
@@ -715,6 +798,18 @@ impl Tab {
     /// Look at `repos` again, unless a scan is already running. The list
     /// shows as soon as git has answered; sizes follow, a few at a time.
     pub fn scan(&self, repos: Vec<String>) {
+        self.scan_sizes(repos, true);
+    }
+
+    /// Look at `repos` again, as `scan`, but only measure folders not
+    /// measured in the last `SIZE_FRESH`: opening the page again shouldn't
+    /// walk every `node_modules` again (gigabytes of reads with hundreds
+    /// of worktrees). "Check again" measures all of them.
+    pub fn scan_quick(&self, repos: Vec<String>) {
+        self.scan_sizes(repos, false);
+    }
+
+    fn scan_sizes(&self, repos: Vec<String>, every: bool) {
         {
             let mut s = self.lock();
             if s.scanning || s.sizing {
@@ -747,22 +842,31 @@ impl Tab {
                 s.sizing = true;
                 s.scanned_at = Some(now());
             }
-            tab.measure();
+            tab.measure(every);
             tab.lock().sizing = false;
         });
     }
 
-    /// Measure every worktree's folder. The main checkouts are not
-    /// worktrees to clear out, so they are left unmeasured.
-    fn measure(&self) {
-        let paths: Vec<String> = self
-            .lock()
-            .repos
-            .iter()
-            .flat_map(|r| &r.worktrees)
-            .filter(|w| !w.main && !w.missing)
-            .map(|w| w.path.clone())
-            .collect();
+    /// Measure the worktrees' folders: all of them, or only those not
+    /// measured lately. The main checkouts are not worktrees to clear out,
+    /// so they are left unmeasured.
+    fn measure(&self, every: bool) {
+        let paths: Vec<String> = {
+            let s = self.lock();
+            let fresh = |w: &Worktree| {
+                !every
+                    && w.size.is_some()
+                    && s.measured_at
+                        .get(&w.path)
+                        .is_some_and(|t| t.elapsed() < SIZE_FRESH)
+            };
+            s.repos
+                .iter()
+                .flat_map(|r| &r.worktrees)
+                .filter(|w| !w.main && !w.missing && !fresh(w))
+                .map(|w| w.path.clone())
+                .collect()
+        };
         for chunk in paths.chunks(PARALLEL) {
             let measured: Vec<(&String, Option<(u64, u64)>)> = std::thread::scope(|s| {
                 let handles: Vec<_> = chunk
@@ -782,21 +886,22 @@ impl Tab {
                     w.volume = usage.map(|(volume, _)| volume);
                     w.size = usage.map(|(_, bytes)| bytes);
                 }
+                s.measured_at.insert(path.clone(), Instant::now());
             }
         }
     }
 
     /// Remove these worktrees of `repo`, each checked again first.
     pub fn remove(&self, repo: String, paths: Vec<String>) {
-        self.run_removal(repo, paths, false);
+        self.run_removal(repo, paths, None);
     }
 
     /// Remove one worktree from its row; it need not be merged.
-    pub fn remove_one(&self, repo: String, path: String) {
-        self.run_removal(repo, vec![path], true);
+    pub fn remove_one(&self, repo: String, path: String, asked: Asked) {
+        self.run_removal(repo, vec![path], Some(asked));
     }
 
-    fn run_removal(&self, repo: String, paths: Vec<String>, alone: bool) {
+    fn run_removal(&self, repo: String, paths: Vec<String>, alone: Option<Asked>) {
         let paths: Vec<String> = {
             let mut s = self.lock();
             paths
@@ -824,9 +929,9 @@ impl Tab {
                 };
                 s.results.insert(path.to_string(), entry);
             };
-            if alone {
+            if let Some(asked) = &alone {
                 for path in &paths {
-                    record(path, remove_alone(&repo, path, &processes()));
+                    record(path, remove_alone(&repo, path, &processes(), asked));
                 }
             } else {
                 remove_each(&repo, &paths, processes, record);
@@ -1019,6 +1124,10 @@ mod tests {
         let repo = root.join("r");
         std::fs::create_dir_all(&repo).unwrap();
         sh(&repo, &["init", "-q", "-b", "main"]);
+        // No housekeeping left running in the background: a git process
+        // working in a worktree makes it "in use".
+        sh(&repo, &["config", "gc.auto", "0"]);
+        sh(&repo, &["config", "maintenance.auto", "false"]);
         sh(&repo, &["commit", "-q", "--allow-empty", "-m", "base"]);
         for b in ["merged", "open", "dirty"] {
             let wt = root.join(b);
@@ -1241,16 +1350,154 @@ mod tests {
         let open = find(&r, "open");
         assert_eq!(open.blocker().as_deref(), Some("not merged"), "not in bulk");
         assert_eq!(open.alone_blocker(), None, "but from its row");
-        let said = remove_alone(&repo_s, &open.path, &[]).unwrap();
-        assert_eq!(said, "worktree removed; unmerged branch open kept");
+        let said = remove_alone(&repo_s, &open.path, &[], &Asked::default()).unwrap();
+        assert_eq!(said, "worktree removed; branch open kept");
         assert!(!root.join("open").exists());
         let log = git(&repo, &["log", "--format=%s", "open"]).unwrap();
         assert!(log.starts_with("work"), "its commit is still there: {log}");
         // Pressed again once it is gone.
         assert_eq!(
-            remove_alone(&repo_s, &open.path, &[]),
+            remove_alone(&repo_s, &open.path, &[], &Asked::default()),
             Err("no longer a worktree".to_string())
         );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_chatty_command_does_not_stall_on_its_error_output() {
+        let dir = std::env::temp_dir();
+        // 1 MB on stderr would fill the pipe if nothing read it.
+        let r = run(
+            "/bin/sh",
+            &dir,
+            &["-c", "head -c 1000000 /dev/zero >&2; echo done"],
+            Duration::from_secs(10),
+        );
+        assert_eq!(r.as_deref().map(str::trim), Ok("done"));
+    }
+
+    #[test]
+    fn a_descendant_holding_the_output_open_does_not_outlast_the_timeout() {
+        let dir = std::env::temp_dir();
+        let t0 = Instant::now();
+        let r = run(
+            "/bin/sh",
+            &dir,
+            &["-c", "sleep 4 & echo started"],
+            Duration::from_secs(1),
+        );
+        assert!(r.unwrap_err().ends_with("timed out"));
+        assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
+    }
+
+    #[test]
+    fn a_failing_command_says_why() {
+        let r = run(
+            "/bin/sh",
+            &std::env::temp_dir(),
+            &["-c", "echo nope >&2; exit 3"],
+            Duration::from_secs(5),
+        );
+        assert_eq!(r, Err("/bin/sh -c echo nope >&2; exit 3: nope".to_string()));
+    }
+
+    #[test]
+    fn untracked_files_count_even_where_git_is_told_to_hide_them() {
+        let (root, repo) = fixture("hidden-untracked");
+        sh(&repo, &["config", "status.showUntrackedFiles", "no"]);
+        std::fs::write(root.join("merged/draft.rs"), "x").unwrap();
+        assert_eq!(changes(&root.join("merged")), Some(1));
+        let r = scan_repo(&repo, &[]).unwrap();
+        assert_eq!(
+            find(&r, "merged").blocker().as_deref(),
+            Some("1 uncommitted file")
+        );
+        assert_eq!(changes(&root.join("open")), Some(0), "nothing to hide");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_file_saved_after_the_check_stops_the_removal() {
+        let (root, repo) = fixture("late-save");
+        let r = scan_repo(&repo, &[]).unwrap();
+        let merged = find(&r, "merged").clone();
+        assert_eq!(merged.blocker(), None);
+        std::fs::write(root.join("merged/saved.txt"), "x").unwrap();
+        assert_eq!(
+            take(&repo, &merged, false),
+            Err("not removed: 1 uncommitted file".to_string())
+        );
+        assert!(root.join("merged/saved.txt").exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_confirmed_row_is_removed_only_as_it_was_shown() {
+        let (root, repo) = fixture("asked");
+        let repo_s = repo.display().to_string();
+        let r = scan_repo(&repo, &[]).unwrap();
+        let merged = find(&r, "merged").clone();
+        let stale = Asked {
+            head: Some("0000000000000000000000000000000000000000".into()),
+            keep_branch: false,
+        };
+        assert_eq!(
+            remove_alone(&repo_s, &merged.path, &[], &stale),
+            Err("not removed: changed since it was checked".to_string())
+        );
+        assert!(root.join("merged").exists());
+        // Shown as "Branch stays": merged since or not, the branch stays.
+        let keep = Asked {
+            head: Some(merged.head.clone()),
+            keep_branch: true,
+        };
+        assert_eq!(
+            remove_alone(&repo_s, &merged.path, &[], &keep),
+            Ok("worktree removed; branch merged kept".to_string())
+        );
+        assert!(git(&repo, &["rev-parse", "--verify", "refs/heads/merged"]).is_ok());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn forgetting_one_missing_worktree_leaves_another_registered() {
+        let (root, repo) = fixture("one-missing");
+        std::fs::remove_dir_all(root.join("open")).unwrap();
+        std::fs::remove_dir_all(root.join("dirty")).unwrap();
+        let r = scan_repo(&repo, &[]).unwrap();
+        let open = find(&r, "open").clone();
+        assert!(open.missing && find(&r, "dirty").missing);
+        take(&repo, &open, false).unwrap();
+        let after = scan_repo(&repo, &[]).unwrap();
+        assert!(
+            after
+                .worktrees
+                .iter()
+                .all(|w| w.branch.as_deref() != Some("open"))
+        );
+        assert!(find(&after, "dirty").missing, "still registered");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_pr_merged_branch_that_moved_since_is_kept() {
+        let (root, repo) = fixture("moved");
+        let r = scan_repo(&repo, &[]).unwrap();
+        let mut open = find(&r, "open").clone();
+        sh(
+            &root.join("open"),
+            &["commit", "-q", "--allow-empty", "-m", "newer"],
+        );
+        std::fs::remove_dir_all(root.join("open")).unwrap();
+        // As if a pull request merged the commit the scan saw.
+        open.merged = Some(Merged::Pr(7));
+        open.missing = true;
+        assert_eq!(
+            take(&repo, &open, false),
+            Ok("worktree removed; branch open kept (it moved)".to_string())
+        );
+        let log = git(&repo, &["log", "-1", "--format=%s", "open"]).unwrap();
+        assert_eq!(log.trim(), "newer");
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -1263,7 +1510,12 @@ mod tests {
         assert_eq!(open.changes, None, "not counted by the scan");
         assert_eq!(open.alone_blocker(), None, "so the row offers it");
         assert_eq!(
-            remove_alone(&repo.display().to_string(), &open.path, &[]),
+            remove_alone(
+                &repo.display().to_string(),
+                &open.path,
+                &[],
+                &Asked::default()
+            ),
             Err("not removed: 1 uncommitted file".to_string())
         );
         assert!(root.join("open/notes.txt").exists());
@@ -1277,7 +1529,7 @@ mod tests {
         let open = root.join("open").display().to_string();
         let procs = vec![(open.clone(), "codex".to_string())];
         assert_eq!(
-            remove_alone(&repo_s, &open, &procs),
+            remove_alone(&repo_s, &open, &procs, &Asked::default()),
             Err("not removed: in use by codex".to_string())
         );
         let detached = root.join("detached");
@@ -1294,7 +1546,7 @@ mod tests {
         sh(&detached, &["commit", "-q", "--allow-empty", "-m", "lost?"]);
         let d = detached.display().to_string();
         assert_eq!(
-            remove_alone(&repo_s, &d, &[]),
+            remove_alone(&repo_s, &d, &[], &Asked::default()),
             Err("not removed: not merged, and on no branch".to_string())
         );
         assert!(root.join("open").exists() && detached.exists());
@@ -1336,6 +1588,32 @@ mod tests {
     }
 
     #[test]
+    fn opening_the_page_again_keeps_fresh_sizes_and_check_again_measures_anew() {
+        let (root, repo) = fixture("quick-sizes");
+        let repo_s = repo.display().to_string();
+        let open = root.join("open").display().to_string();
+        let size = |v: &Value| {
+            v["repos"][0]["worktrees"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|w| w["path"] == open.as_str())
+                .unwrap()["size"]
+                .as_u64()
+                .unwrap()
+        };
+        let tab = Tab::default();
+        tab.scan_quick(vec![repo_s.clone()]);
+        let first = size(&settle(&tab));
+        std::fs::write(root.join("open/big.bin"), vec![1u8; 2_000_000]).unwrap();
+        tab.scan_quick(vec![repo_s.clone()]);
+        assert_eq!(size(&settle(&tab)), first, "measured moments ago: kept");
+        tab.scan(vec![repo_s.clone()]);
+        assert!(size(&settle(&tab)) >= first + 2_000_000, "Check again");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn the_tab_removes_one_unmerged_worktree_and_says_its_branch_stays() {
         let (root, repo) = fixture("tab-alone");
         let repo_s = repo.display().to_string();
@@ -1359,12 +1637,12 @@ mod tests {
             !tab.removable(&repo_s).contains(&open),
             "not in remove-merged"
         );
-        tab.remove_one(repo_s.clone(), open.clone());
+        tab.remove_one(repo_s.clone(), open.clone(), Asked::default());
         let v = settle(&tab);
         assert_eq!(v["results"][&open]["ok"], true, "{v}");
         assert_eq!(
             v["results"][&open]["message"],
-            "worktree removed; unmerged branch open kept"
+            "worktree removed; branch open kept"
         );
         std::fs::remove_dir_all(&root).unwrap();
     }

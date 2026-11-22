@@ -1805,6 +1805,14 @@ test('opening the worktrees tab asks for a fresh look, once', () => {
   has(ui.view(), 'Looking at your repositories…');
 });
 
+test('Check again measures every worktree again; opening the tab does not ask for that', () => {
+  ui.setState(worktreesState([appRepo([WT({ size: 1e9 })])]));
+  ui.click({ act: 'goto', page: 'worktrees' });
+  eq(ui.sent, [{ cmd: 'scan_worktrees' }], 'sizes measured lately are kept');
+  ui.click({ act: 'scan_worktrees' });
+  eq(ui.sent.at(-1), { cmd: 'scan_worktrees', again: true });
+});
+
 test('merged worktrees can be removed; the rest say why they stay', () => {
   ui.setState(worktreesState([appRepo([
     WT(),
@@ -1845,14 +1853,14 @@ test('removing a worktree needs a second click and sends it once', () => {
 
 test('an unmerged worktree can be removed alone, saying its branch stays', () => {
   const open = WT({ path: '/p/app.worktrees/o', branch: 'sc-9/o', merged: null, changes: null,
-    blocker: 'not merged', alone_blocker: null });
+    blocker: 'not merged', alone_blocker: null, head: 'abc123' });
   const busyOne = WT({ path: '/p/app.worktrees/u', branch: 'sc-8/u', merged: null, in_use: ['claude'],
     blocker: 'not merged', alone_blocker: 'in use by claude' });
   ui.setState(worktreesState([appRepo([WT(), open, busyOne])]));
   ui.click({ act: 'goto', page: 'worktrees' });
   ui.sent.length = 0;
-  has(ui.view(), '3 worktrees · 1 can be removed');
-  has(ui.view(), 'Remove 1 merged');
+  has(ui.view(), '3 worktrees · 2 can be removed', 'counted with the merged one');
+  has(ui.view(), 'Remove 1 merged', 'but never removed in bulk');
   eq(ui.find({ act: 'remove_worktree', path: busyOne.path }).length, 0, 'in use: no button');
   const target = { act: 'remove_worktree', path: open.path };
   eq(ui.find(target)[0].dataset.unmerged, '1');
@@ -1867,7 +1875,11 @@ test('an unmerged worktree can be removed alone, saying its branch stays', () =>
   eq(ui.sent, [], 'armed, not sent');
   has(ui.view(), 'Remove folder? Branch stays');
   ui.click(target);
-  eq(ui.sent, [{ cmd: 'remove_worktree', repo: '/p/app', path: open.path }]);
+  eq(ui.sent, [{ cmd: 'remove_worktree', repo: '/p/app', path: open.path, head: 'abc123', keep_branch: true }]);
+  ui.click({ act: 'wt_state', val: 'removable' });
+  has(ui.view(), 'sc-9/o', 'the Removable filter shows it');
+  lacks(ui.view(), 'sc-8/u');
+  ui.click({ act: 'wt_state', val: 'all' });
 });
 
 test('removing every merged worktree of a repository is confirmed too', () => {

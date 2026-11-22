@@ -1230,9 +1230,13 @@ const lastPart = p => String(p ?? "").split("/").filter(Boolean).pop() || String
 /** Bytes on disk, in the decimal units Finder and `df -H` use. */
 const diskSize = b => b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : b >= 1e6 ? `${Math.round(b / 1e6)} MB` : b > 0 ? "under 1 MB" : "0 MB";
 
+/* Whether a worktree can go from its own row; unmerged ones can too, one
+   at a time. "Remove N merged" still goes by `blocker`. */
+const canGo = x => (x.alone_blocker !== undefined ? x.alone_blocker : x.blocker) == null;
+
 const WT_STATES = [
   ["all", "All", () => true],
-  ["removable", "Removable", x => x.blocker == null],
+  ["removable", "Removable", canGo],
   ["merged", "Merged", x => !!x.merged],
   ["open", "Not merged", x => !x.merged && !x.missing],
   ["in_use", "In use", x => (x.in_use || []).length > 0],
@@ -1264,7 +1268,7 @@ function renderWorktrees(S){
   const state = WT_STATES.find(([k]) => k === UI.wtState) || WT_STATES[0];
   const repos = inRepo.map(r => ({ ...r, shown: r.worktrees.filter(state[2]) })).filter(r => r.shown.length);
   const all = repos.flatMap(r => r.shown);
-  const removable = all.filter(x => x.blocker == null);
+  const removable = all.filter(canGo);
   // A total only of what is measured; "+" while some are still to come.
   const sum = xs => {
     const known = xs.filter(x => x.size != null);
@@ -1287,7 +1291,7 @@ function renderWorktrees(S){
   const before = head + diskMeter(w.disk) + filters + top;
   if (!every.length) return before + `<div class="empty">${w.scanning ? "Looking at your repositories…" : "No worktrees besides your checkouts"}</div>`;
   // Removable first, oldest first: those are what this page is for.
-  const order = x => x.blocker == null ? 0 : x.merged ? 1 : 2;
+  const order = x => x.blocker == null ? 0 : canGo(x) ? 1 : x.merged ? 2 : 3;
   const items = repos.flatMap(r => {
     // The button removes every merged worktree here, shown or filtered out.
     const can = r.worktrees.filter(x => x.blocker == null && !removing.has(x.path)).length;
@@ -1310,11 +1314,10 @@ function renderWorktrees(S){
       : x.merged === "branch" ? `<span class="gtag ok" title="In ${esc(it.against ?? "the default branch")}">merged</span>` : "";
     // One worktree may go from its row even unmerged: its branch stays.
     const unmerged = !x.merged && !x.missing;
-    const alone = x.alone_blocker !== undefined ? x.alone_blocker : x.blocker;
     const label = unmerged ? (confirming(key) ? "Remove folder? Branch stays" : "Remove folder")
       : confirming(key) ? "Remove? Click again" : "Remove";
     const action = removing.has(x.path) ? `<span class="dim">Removing…</span>`
-      : alone == null ? `<button class="chip-btn ${confirming(key) ? "confirm" : "danger"}" data-act="remove_worktree" data-repo="${esc(it.repo)}" data-path="${esc(x.path)}" data-confirm="${esc(key)}"${unmerged ? ` data-unmerged="1"` : ""}>${label}</button>` : "";
+      : canGo(x) ? `<button class="chip-btn ${confirming(key) ? "confirm" : "danger"}" data-act="remove_worktree" data-repo="${esc(it.repo)}" data-path="${esc(x.path)}" data-confirm="${esc(key)}"${x.head ? ` data-head="${esc(x.head)}"` : ""}${unmerged ? ` data-unmerged="1"` : ""}>${label}</button>` : "";
     const why = [
       x.size != null ? diskSize(x.size) : w.sizing && !x.missing ? "measuring…" : null,
       x.last_commit_ago_s == null ? null : `last commit ${ago(x.last_commit_ago_s)}`,
@@ -1709,8 +1712,10 @@ $("pop").addEventListener("click", (e) => {
     case "copy":    send({ cmd:"copy", text: d.text }); return;
     case "reset_profile": send({ cmd:"reset_profile", key: d.key }); return;
     case "reset_command": send({ cmd:"reset_command", command: d.command }); return;
-    case "scan_worktrees": send({ cmd:"scan_worktrees" }); return;
-    case "remove_worktree": send({ cmd:"remove_worktree", repo: d.repo, path: d.path }); return;
+    case "scan_worktrees": send({ cmd:"scan_worktrees", again: true }); return;
+    case "remove_worktree": send({ cmd:"remove_worktree", repo: d.repo, path: d.path,
+      // What the row showed: that commit, and "Branch stays" if it said so.
+      ...(d.head ? { head: d.head } : {}), ...(d.unmerged === "1" ? { keep_branch: true } : {}) }); return;
     case "remove_merged_worktrees": send({ cmd:"remove_merged_worktrees", repo: d.repo }); return;
     case "clear_data": send({ cmd:"clear_data" }); return;
     case "kill_app": send({ cmd:"kill_app", name: d.name }); return;
