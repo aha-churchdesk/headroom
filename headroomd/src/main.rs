@@ -424,6 +424,7 @@ fn main() -> wry::Result<()> {
             next_list = now + LIST_EVERY;
             app.borrow_mut()
                 .set_attached(attached.load(Ordering::Relaxed));
+            app.borrow_mut().set_shown(visible);
             app.borrow_mut().poll();
             update_tray();
             if visible {

@@ -79,6 +79,9 @@ pub struct App {
     login: Login,
     listing: Option<Listing>,
     attached: bool,
+    /// Whether the popover is open. Checking the shims starts a login
+    /// shell, which runs the user's startup files: not while nobody looks.
+    shown: bool,
     data_clear: Option<Value>,
     ui_preferences: UiPreferences,
     setup_error: Option<String>,
@@ -191,6 +194,7 @@ impl App {
             login: Login::Off,
             listing: None,
             attached: false,
+            shown: true,
             data_clear: None,
             setup_error: None,
             copy_result: None,
@@ -206,7 +210,9 @@ impl App {
     /// Ask the daemon for the queue. A failed ask keeps the last listing:
     /// a daemon restarting for a second shouldn't blank the popover.
     pub fn poll(&mut self) -> bool {
-        self.refresh_shims(false);
+        if self.shown {
+            self.refresh_shims(false);
+        }
         match request(&self.socket, &ClientMsg::List) {
             Ok(DaemonMsg::Jobs(l)) => {
                 self.listing = Some(l);
@@ -326,6 +332,11 @@ impl App {
         self.shims = self
             .shims_verification
             .refresh(&self.home, Instant::now(), force);
+    }
+
+    /// Whether the popover is open now.
+    pub fn set_shown(&mut self, on: bool) {
+        self.shown = on;
     }
 
     /// Whether the queue this app shows runs in another headroomd.
