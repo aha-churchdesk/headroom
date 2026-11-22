@@ -1318,6 +1318,34 @@ test('profile reset escapes repository names and preserves its confirmation key'
   eq(ui.sent, [{ cmd: 'reset_profile', key }]);
 });
 
+test("a job's tooltip shows the start of a long command and all of a short one", () => {
+  const long = 'cd /Users/me/worktrees/app/sc-1/apps/frontend; S=/private/tmp/scratch; '
+    + 'timeout 900 corepack yarn storybook-test A.stories B.stories > $S/sb.log 2>&1; echo sb=$?; '
+    + 'timeout 600 corepack yarn typecheck 2>&1 | grep "new errors"';
+  const s = JSON.parse(JSON.stringify(busy));
+  s.running[0].full_cmd = long;
+  const [short, edge] = [...s.running.slice(1), ...s.queued];
+  short.full_cmd = 'pnpm build';
+  edge.full_cmd = 'x'.repeat(160);
+  ui.setState(s);
+  const html = ui.headHtml() + ui.html();
+  has(html, 'title="cd /Users/me/worktrees/app/sc-1/apps/frontend; S=/private/tmp/scratch;');
+  has(html, `echo sb=$?… Click for the full command."`);
+  lacks(html, 'grep &quot;new errors&quot;');
+  has(html, 'title="pnpm build"');
+  has(html, `title="${'x'.repeat(160)}"`, 'exactly at the limit stays whole');
+  // What hovering shows: the page moves `title` into the tooltip it draws.
+  const [name] = ui.find({ act: 'expand', id: s.running[0].id });
+  const attrs = { title: name.title };
+  const shown = { dataset: { ...name.dataset }, textContent: '', getAttribute: k => attrs[k],
+    setAttribute: (k, v) => { attrs[k] = v; }, removeAttribute: k => { delete attrs[k]; } };
+  ui.describeButton(shown);
+  has(shown.dataset.tip, 'Click for the full command.');
+  lacks(shown.dataset.tip, 'new errors');
+  ui.click({ act: 'expand', id: s.running[0].id });
+  has(ui.view(), 'timeout 600 corepack yarn typecheck', 'the details show all of it');
+});
+
 test('button tooltips expose action consequences to assistive technology', () => {
   ui.setState(busy);
   for (const [dataset, expected] of [

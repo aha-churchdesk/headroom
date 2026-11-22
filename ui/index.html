@@ -180,6 +180,8 @@ button:disabled{ cursor:default; opacity:.4; }
   position:fixed; z-index:20; max-width:240px; padding:5px 8px; border-radius:6px;
   background:var(--text); color:var(--bg); font-size:11px; line-height:1.35;
   pointer-events:none; opacity:0; visibility:hidden; transition:opacity .08s;
+  /* Never a wall over the popover: at most eight lines. */
+  overflow-wrap:anywhere; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:8; overflow:hidden;
 }
 .tip.on{ opacity:1; visibility:visible; }
 [data-tip]{ cursor:default; }
@@ -957,10 +959,16 @@ function originLabel(agent){
   }
 }
 
+/* An agent's command line can run to a screenful; the tooltip shows its
+   start and the job's details show all of it. */
+const CMD_TIP_MAX = 160;
+const cmdTip = full => !full || full.length <= CMD_TIP_MAX ? full || ""
+  : `${full.slice(0, CMD_TIP_MAX).trimEnd()}… Click for the full command.`;
+
 /** Where it runs and which agent started it, then the command beneath. */
 function jobName(j){
   const origin = originLabel(j.agent);
-  return `<span class="name two" role="button" tabindex="0" aria-expanded="${UI.expanded.has(j.id)}" data-act="expand" data-id="${j.id}" title="${esc(j.full_cmd)}">
+  return `<span class="name two" role="button" tabindex="0" aria-expanded="${UI.expanded.has(j.id)}" data-act="expand" data-id="${j.id}" title="${esc(cmdTip(j.full_cmd))}">
     <span class="job-title"><b>${esc(j.label)}</b>${origin ? `<span class="job-origin" title="Started by ${esc(origin)}">${esc(origin)}</span>` : ""}</span><span class="cmd">${esc(j.cmd)}</span></span>`;
 }
 

@@ -59,6 +59,7 @@ function actionable(html) {
       role: /\srole="([^"]*)"/.exec(attrs)?.[1],
       tabIndex: /\stabindex="([^"]*)"/.exec(attrs)?.[1],
       label: unescape(/\saria-label="([^"]*)"/.exec(attrs)?.[1] || ""),
+      title: unescape(/\stitle="([^"]*)"/.exec(attrs)?.[1] || ""),
       pressed: /\saria-pressed="([^"]*)"/.exec(attrs)?.[1],
       checked: /\saria-checked="([^"]*)"/.exec(attrs)?.[1] });
   }
