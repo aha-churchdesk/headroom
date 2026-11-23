@@ -104,6 +104,12 @@ pub enum UiCmd {
     RemovePattern {
         pattern: String,
     },
+    AddExcluded {
+        pattern: String,
+    },
+    RemoveExcluded {
+        pattern: String,
+    },
     Classify {
         text: String,
     },
@@ -141,6 +147,15 @@ pub enum Do {
 
 fn job(id: &str) -> Result<JobId, String> {
     id.parse().map_err(|_| format!("bad job id {id:?}"))
+}
+
+/// A list entry as typed, trimmed; blank is refused.
+fn entry(text: &str) -> Result<String, String> {
+    let p = text.trim();
+    if p.is_empty() {
+        return Err("empty pattern".into());
+    }
+    Ok(p.to_string())
 }
 
 fn configure(cfg: Config) -> Do {
@@ -190,12 +205,12 @@ pub fn translate(cmd: UiCmd, cfg: &Config) -> Result<Do, String> {
         UiCmd::CheckShims => Do::CheckShims,
         UiCmd::Classify { text } => Do::Classify(text),
         UiCmd::Quit => Do::Quit,
+        // A command is on one list or the other: adding it to one takes it
+        // off the other, so the two never disagree about it.
         UiCmd::AddPattern { pattern } => {
-            let p = pattern.trim().to_string();
-            if p.is_empty() {
-                return Err("empty pattern".into());
-            }
+            let p = entry(&pattern)?;
             let mut c = cfg.clone();
+            c.excluded.retain(|e| *e != p);
             if !c.patterns.contains(&p) {
                 c.patterns.push(p);
             }
@@ -204,6 +219,20 @@ pub fn translate(cmd: UiCmd, cfg: &Config) -> Result<Do, String> {
         UiCmd::RemovePattern { pattern } => {
             let mut c = cfg.clone();
             c.patterns.retain(|p| *p != pattern);
+            configure(c)
+        }
+        UiCmd::AddExcluded { pattern } => {
+            let p = entry(&pattern)?;
+            let mut c = cfg.clone();
+            c.patterns.retain(|e| *e != p);
+            if !c.excluded.contains(&p) {
+                c.excluded.push(p);
+            }
+            configure(c)
+        }
+        UiCmd::RemoveExcluded { pattern } => {
+            let mut c = cfg.clone();
+            c.excluded.retain(|p| *p != pattern);
             configure(c)
         }
         UiCmd::Set { key, value } => {
@@ -439,6 +468,49 @@ mod tests {
         let c = config_of(t(r#"{"cmd":"remove_pattern","pattern":"vitest"}"#));
         assert!(!c.patterns.contains(&"vitest".to_string()));
         assert!(t(r#"{"cmd":"add_pattern","pattern":"   "}"#).is_err());
+    }
+
+    #[test]
+    fn never_queued_commands_are_added_once_and_removed() {
+        let c = config_of(t(r#"{"cmd":"add_excluded","pattern":"  yarn build:dev "}"#));
+        assert_eq!(
+            c.excluded.last().map(String::as_str),
+            Some("yarn build:dev")
+        );
+        let c = config_of(t(r#"{"cmd":"add_excluded","pattern":"dev"}"#));
+        assert_eq!(c.excluded, Config::default().excluded, "already there");
+        let c = config_of(t(r#"{"cmd":"remove_excluded","pattern":"dev"}"#));
+        assert!(!c.excluded.contains(&"dev".to_string()));
+        let c = config_of(t(r#"{"cmd":"remove_excluded","pattern":"nothing"}"#));
+        assert_eq!(
+            c.excluded,
+            Config::default().excluded,
+            "removing a stranger"
+        );
+        assert!(t(r#"{"cmd":"add_excluded","pattern":"  "}"#).is_err());
+    }
+
+    #[test]
+    fn a_command_moves_between_the_lists_instead_of_being_on_both() {
+        let c = config_of(t(r#"{"cmd":"add_excluded","pattern":"vitest"}"#));
+        assert!(c.excluded.contains(&"vitest".to_string()));
+        assert!(!c.patterns.contains(&"vitest".to_string()));
+        let c = config_of(t(r#"{"cmd":"add_pattern","pattern":" dev"}"#));
+        assert!(c.patterns.contains(&"dev".to_string()));
+        assert!(!c.excluded.contains(&"dev".to_string()));
+    }
+
+    #[test]
+    fn a_never_queued_command_line_wins_over_a_heavy_pattern() {
+        let mut cfg = Config::default();
+        cfg.excluded.push("yarn build:x".into());
+        assert_eq!(classify_json("yarn build:x", &cfg)["result"], "excluded");
+        assert_eq!(
+            classify_json("yarn run build:x", &cfg)["result"],
+            "excluded"
+        );
+        assert_eq!(classify_json("pnpm build:x", &cfg)["result"], "heavy");
+        assert_eq!(classify_json("yarn build", &cfg)["result"], "heavy");
     }
 
     #[test]

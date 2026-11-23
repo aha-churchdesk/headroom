@@ -1476,6 +1476,40 @@ test('patterns are added once typed and removed by their button', () => {
   eq(ui.sent, [{ cmd: 'add_pattern', pattern: 'bun test' }, { cmd: 'remove_pattern', pattern: 'vitest' }]);
 });
 
+test('never queued commands are added once typed and removed by their button', () => {
+  ui.setState(busy);
+  ui.click({ act: 'goto', page: 'settings' }, 0);
+  has(ui.html(), 'for="exclIn">New never queued command</label>');
+  eq(ui.find({ act: 'add_excluded' })[0].disabled, true, 'Add is off while empty');
+  ui.type('excluded', '  ');
+  ui.key('Enter', 'excluded');
+  ui.click({ act: 'add_excluded' });
+  eq(ui.sent, [], 'blank is not a command');
+  ui.type('excluded', ' yarn build:dev ');
+  ui.key('Enter', 'excluded');
+  ui.type('excluded', 'next dev');
+  ui.click({ act: 'add_excluded' });
+  ui.click({ act: 'add_excluded' });
+  const dev = busy.settings.excluded[0];
+  ui.click({ act: 'remove_excluded', pattern: dev });
+  eq(ui.sent, [
+    { cmd: 'add_excluded', pattern: 'yarn build:dev' },
+    { cmd: 'add_excluded', pattern: 'next dev' },
+    { cmd: 'remove_excluded', pattern: dev },
+  ], 'the second Add on an emptied box sends nothing');
+  eq(ui.find({ act: 'remove_excluded', pattern: dev })[0].label, `Remove never queued ${dev}`);
+});
+
+test('the heavy list and the never queued list are shown apart', () => {
+  ui.setState(busy);
+  ui.click({ act: 'goto', page: 'settings' }, 0);
+  for (const p of busy.settings.excluded) {
+    eq(ui.find({ act: 'remove_excluded', pattern: p }).length, 1, p);
+    eq(ui.find({ act: 'remove_pattern', pattern: p }).length, 0, p);
+  }
+  has(ui.view(), 'Never queued');
+});
+
 test('the test box asks Rust and shows only the answer for what is typed', () => {
   ui.setState(busy);
   ui.click({ act: 'goto', page: 'settings' }, 0);

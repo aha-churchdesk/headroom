@@ -601,7 +601,7 @@ const UI = {
   openApps: new Set(),    // Other apps rows showing their processes
   confirm: null,          // { key, until } — second click within 3 s acts
   drag: null,             // { id } while a queued row is being dragged
-  drafts: { pattern: "", test: "" },
+  drafts: { pattern: "", excluded: "", test: "" },
   snippet: false,
 };
 
@@ -1547,15 +1547,26 @@ function renderSettings(S){
     </div>
     <div class="set">
       <div class="k">Heavy commands</div>
-      <div class="h">Commands matching these are queued. Dashed ones are long-lived and never queued.</div>
+      <div class="h">Commands matching these are queued.</div>
       <div class="pats mono">
         ${c.patterns.map(p => `<span class="pat">${esc(p)}<button data-act="remove_pattern" data-pattern="${esc(p)}" aria-label="Remove pattern ${esc(p)}" title="Remove">✕</button></span>`).join("")}
-        ${c.excluded.map(p => `<span class="pat excl" title="Long-lived: not queued">${esc(p)}</span>`).join("")}
       </div>
       <div class="ctl">
         <label class="sr-only" for="patIn">New heavy command pattern</label>
         <input class="txt mono" id="patIn" placeholder="add pattern, e.g. bun test" value="${esc(UI.drafts.pattern)}" data-draft="pattern">
         <button class="chip-btn" data-act="add_pattern" ${UI.drafts.pattern.trim() ? "" : "disabled"}>Add</button>
+      </div>
+    </div>
+    <div class="set">
+      <div class="k">Never queued</div>
+      <div class="h">Commands matching these run straight away, even when they also match a heavy command: dev servers, watchers, or a whole command line such as <span class="mono">yarn build:dev</span>. Adding a command here takes it off the heavy list, and the other way round.</div>
+      <div class="pats mono">
+        ${c.excluded.map(p => `<span class="pat excl">${esc(p)}<button data-act="remove_excluded" data-pattern="${esc(p)}" aria-label="Remove never queued ${esc(p)}" title="Remove">✕</button></span>`).join("")}
+      </div>
+      <div class="ctl">
+        <label class="sr-only" for="exclIn">New never queued command</label>
+        <input class="txt mono" id="exclIn" placeholder="add command, e.g. yarn build:dev" value="${esc(UI.drafts.excluded)}" data-draft="excluded">
+        <button class="chip-btn" data-act="add_excluded" ${UI.drafts.excluded.trim() ? "" : "disabled"}>Add</button>
       </div>
       <div class="ctl">
         <label class="sr-only" for="testIn">Test a command</label>
@@ -1725,16 +1736,20 @@ $("pop").addEventListener("click", (e) => {
               : isNaN(Number(d.val)) ? d.val : Number(d.val);
       send({ cmd:"set", key: d.key, value: v }); return;
     }
-    case "add_pattern": {
-      const p = UI.drafts.pattern.trim();
-      if (p){ UI.drafts.pattern = ""; send({ cmd:"add_pattern", pattern: p }); }
-      return;
-    }
+    case "add_pattern":
+    case "add_excluded": addDraft(d.act === "add_pattern" ? "pattern" : "excluded"); return;
     case "remove_pattern": send({ cmd:"remove_pattern", pattern: d.pattern }); return;
+    case "remove_excluded": send({ cmd:"remove_excluded", pattern: d.pattern }); return;
     case "quit":    send({ cmd:"quit" }); return;
   }
   render();
 });
+
+/* Send what is typed in a list's box to that list, and empty the box. */
+function addDraft(list){
+  const p = UI.drafts[list].trim();
+  if (p){ UI.drafts[list] = ""; send({ cmd:`add_${list}`, pattern: p }); }
+}
 
 $("pop").addEventListener("input", (e) => {
   const k = e.target.dataset.draft;
@@ -1755,10 +1770,8 @@ $("pop").addEventListener("keydown", (e) => {
     if (!e.repeat) button.click();
     return;
   }
-  if (e.key === "Enter" && e.target.dataset.draft === "pattern"){
-    const p = UI.drafts.pattern.trim();
-    if (p){ UI.drafts.pattern = ""; send({ cmd:"add_pattern", pattern: p }); }
-  }
+  const draft = e.target.dataset.draft;
+  if (e.key === "Enter" && (draft === "pattern" || draft === "excluded")) addDraft(draft);
   if (e.key === "Escape" && UI.page !== "main" && UI.page !== "welcome"){
     e.preventDefault?.();
     navigate(UI.page === "profile" ? UI.profileFrom || "history" : "main", null, true);
@@ -2130,8 +2143,15 @@ function mockApply(m){
       S.data_clear = { ok:true, message:"Saved profiles, history and statistics cleared." };
       break;
     case "set": S.settings[m.key] = m.value; break;
-    case "add_pattern": if (!S.settings.patterns.includes(m.pattern)) S.settings.patterns.push(m.pattern); break;
+    case "add_pattern":
+    case "add_excluded": {
+      const [to, from] = m.cmd === "add_pattern" ? ["patterns", "excluded"] : ["excluded", "patterns"];
+      S.settings[from] = S.settings[from].filter(p => p !== m.pattern);
+      if (!S.settings[to].includes(m.pattern)) S.settings[to].push(m.pattern);
+      break;
+    }
     case "remove_pattern": S.settings.patterns = S.settings.patterns.filter(p => p !== m.pattern); break;
+    case "remove_excluded": S.settings.excluded = S.settings.excluded.filter(p => p !== m.pattern); break;
     case "classify": S.classify = mockClassify(m.text); break;
     case "finish_setup":
       S.setup = {complete:true,error:null};

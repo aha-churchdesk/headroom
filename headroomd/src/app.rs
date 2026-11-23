@@ -1045,6 +1045,7 @@ mod tests {
     fn settings_edits_are_persisted_by_the_daemon_and_reread() {
         let (mut app, _d) = with_daemon("settings");
         app.command(r#"{"cmd":"add_pattern","pattern":"bun test"}"#);
+        app.command(r#"{"cmd":"add_excluded","pattern":"yarn build:dev"}"#);
         app.command(r#"{"cmd":"set","key":"wait_cap_s","value":120}"#);
         let s = app.state().unwrap();
         assert_eq!(s["settings"]["wait_cap_s"], 120);
@@ -1058,6 +1059,9 @@ mod tests {
         let saved = app.store.load_config();
         assert_eq!(saved.wait_cap_s, 120);
         assert!(saved.patterns.contains(&"bun test".to_string()));
+        assert!(saved.excluded.contains(&"yarn build:dev".to_string()));
+        app.command(r#"{"cmd":"classify","text":"yarn build:dev"}"#);
+        assert_eq!(app.state().unwrap()["classify"]["result"], "excluded");
     }
 
     #[test]
