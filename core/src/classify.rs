@@ -686,8 +686,10 @@ fn classify_from(
                 };
             }
             // The script's text says it ends, whatever its name ends with.
-            Some(_) => {}
-            None => {
+            Some((_, Class::Heavy { .. } | Class::Wrapped)) => {}
+            // Text that says nothing either way, such as `node scripts/dev.mjs`,
+            // or no text at all: the name decides.
+            Some((_, Class::Light)) | None => {
                 if let Some(why) = excluded_by(&n, cfg, true) {
                     return Class::Excluded { why };
                 }
@@ -1582,6 +1584,49 @@ mod tests {
             here_cls("/w", "yarn build:dev", pkg),
             heavy("yarn build:dev", "yarn")
         );
+    }
+
+    #[test]
+    fn a_script_whose_text_says_nothing_is_judged_by_its_name() {
+        let pkg: &[(&str, &[(&str, &str)])] = &[(
+            "/w",
+            &[
+                ("build:dev", "node scripts/dev.mjs"),
+                ("test:watch", "./run-tests.sh"),
+                ("build", "node scripts/build.mjs"),
+                ("build:device", "node scripts/device.mjs"),
+                ("dev", ""),
+            ],
+        )];
+        assert_eq!(
+            here_cls("/w", "yarn build:dev", pkg),
+            excluded("dev"),
+            "a dev server started from a node file"
+        );
+        assert_eq!(
+            here_cls("/w/src", "npm run test:watch", pkg),
+            excluded("watch")
+        );
+        assert_eq!(
+            here_cls("/w", "yarn dev", pkg),
+            excluded("dev"),
+            "empty text"
+        );
+        // A name with no long-lived word is still queued by its pattern.
+        assert_eq!(
+            here_cls("/w", "yarn build", pkg),
+            heavy("yarn build", "yarn")
+        );
+        assert_eq!(
+            here_cls("/w", "yarn build:device", pkg),
+            heavy("yarn build:device", "yarn")
+        );
+    }
+
+    #[test]
+    fn a_script_that_already_queues_itself_is_left_to_its_text() {
+        let pkg: &[(&str, &[(&str, &str)])] = &[("/w", &[("check:dev", "headroom run -- tsc -b")])];
+        assert_eq!(here_cls("/w", "yarn check:dev", pkg), Class::Light);
     }
 
     #[test]
