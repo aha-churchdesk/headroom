@@ -1185,13 +1185,13 @@ mod tests {
         );
     }
 
-    /// `program` copied under a name no other process on this machine has,
-    /// so killing that "app" can only reach what the test started.
-    fn unique(root: &Path, program: &str, name: &str) -> PathBuf {
+    /// This test binary copied under a name no other process on this
+    /// machine has, so killing that "app" can only reach what the test
+    /// started. Not a system binary such as `/bin/sleep`: those are arm64e,
+    /// and some macOS versions kill an arm64e copy signed ad hoc at launch.
+    fn unique(root: &Path, name: &str) -> PathBuf {
         let p = root.join(format!("{name}-{}", std::process::id()));
-        fs::copy(program, &p).unwrap();
-        // A copied system binary keeps Apple's signature, which no longer
-        // matches where it is, and is killed at launch; sign it ad hoc.
+        fs::copy(std::env::current_exe().unwrap(), &p).unwrap();
         let signed = Command::new("/usr/bin/codesign")
             .args(["-f", "-s", "-"])
             .arg(&p)
@@ -1199,6 +1199,28 @@ mod tests {
             .unwrap();
         assert!(signed.status.success(), "{signed:?}");
         p
+    }
+
+    /// A copy made by [`unique`], run as a process that sleeps 30 s.
+    fn sleeping(copy: &Path) -> Command {
+        let mut c = Command::new(copy);
+        c.args(["--exact", "app::tests::stand_in", "--ignored", "--quiet"])
+            .env("HEADROOM_STAND_IN", "30")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        c
+    }
+
+    /// What a [`sleeping`] copy runs; does nothing in a normal test run.
+    #[test]
+    #[ignore]
+    fn stand_in() {
+        if let Some(secs) = std::env::var("HEADROOM_STAND_IN")
+            .ok()
+            .and_then(|s| s.parse().ok())
+        {
+            std::thread::sleep(Duration::from_secs(secs));
+        }
     }
 
     fn exited_by(c: &mut std::process::Child, within: Duration) -> Option<i32> {
@@ -1217,10 +1239,10 @@ mod tests {
     fn killing_an_app_ends_every_process_it_has_and_nothing_else() {
         let (mut app, _d) = with_daemon("kill-app");
         let root = dir("kill-app-bin");
-        let sleeper = unique(&root, "/bin/sleep", "hr-kill-app");
+        let sleeper = unique(&root, "hr-kill-app");
         let name = sleeper.file_name().unwrap().to_str().unwrap().to_string();
         let mut mine: Vec<_> = (0..2)
-            .map(|_| Command::new(&sleeper).arg("30").spawn().unwrap())
+            .map(|_| sleeping(&sleeper).spawn().unwrap())
             .collect();
         let mut bystander = Command::new("/bin/sleep").arg("30").spawn().unwrap();
         std::thread::sleep(Duration::from_millis(100));
@@ -1255,13 +1277,9 @@ mod tests {
 
         let (mut app, _d) = with_daemon("kill-fresh-job");
         let root = dir("kill-fresh-job-bin");
-        let sleeper = unique(&root, "/bin/sleep", "hr-fresh-job");
+        let sleeper = unique(&root, "hr-fresh-job");
         let name = sleeper.file_name().unwrap().to_str().unwrap().to_string();
-        let mut job = Command::new(&sleeper)
-            .arg("30")
-            .process_group(0)
-            .spawn()
-            .unwrap();
+        let mut job = sleeping(&sleeper).process_group(0).spawn().unwrap();
         let pid = job.id() as i32;
         // The job's lease, held open as `headroom run` holds it.
         let stream = UnixStream::connect(&app.socket).unwrap();
@@ -1330,9 +1348,8 @@ mod tests {
         let (mut app, _d) = with_daemon("kill-stubborn");
         app.cfg.kill_grace_s = 1;
         let root = dir("kill-stubborn-bin");
-        let sleeper = unique(&root, "/bin/sleep", "hr-stubborn");
-        let mut cmd = Command::new(&sleeper);
-        cmd.arg("30");
+        let sleeper = unique(&root, "hr-stubborn");
+        let mut cmd = sleeping(&sleeper);
         // An ignored signal stays ignored across exec.
         unsafe {
             std::os::unix::process::CommandExt::pre_exec(&mut cmd, || {
